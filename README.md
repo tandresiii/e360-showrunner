@@ -1,0 +1,198 @@
+# E360 Showrunner
+
+The **project-management** app for E360 Sport live-event LED/Print production.
+Everything from the sales call → planning → specs → gear/trucks/vendors/travel →
+show → strike → the client recap, organized in one **Event Folder** so that if
+the person running an event is "kidnapped by aliens," anyone can pick it up and
+keep going.
+
+Showrunner is a **separate service** from the staffing/scheduler app
+(`e360-staffing3`). It owns the *planning* lifecycle; when a show is ready it
+**pushes to the scheduler** over HTTP — staffing stays the system of record for
+live crew scheduling.
+
+It also serves an **agent-facing API** (`AGENT_API.md`) so each teammate's M365
+agent can file documents, propose expenses and draft work — under a hard rule:
+**agents file, they never fire.** Nothing in this system has an outbound path.
+
+`APP_VERSION` is at the top of `server.js` and is served at `GET /api/version`.
+
+---
+
+## What it actually is
+
+Two halves that can run independently:
+
+1. **A no-build SPA** (`public/`) — plain `<script>` tags, no modules, no
+   bundler, so it works over `file://`. It runs in **two modes**, decided once
+   at boot by a single probe of `/api/health`:
+   - **demo** — the fixture in `data.js` *is* the world. Fully interactive,
+     nothing is saved, nothing is real. This is what opens if no server answers.
+   - **api** — every read and write goes to the backend; `data.js` contributes
+     only its vocabulary (roles, statuses, lane definitions) and its pure
+     helpers.
+2. **A Node/Express + PostgreSQL backend** (`server.js`, `lib/`, `routes/`) —
+   `pg` `Pool` on `DATABASE_URL`, **no ORM, no build step**, additive-only
+   `initDB()` (`CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`,
+   **never `DROP`**), `x-auth-token` sessions in a **durable `sessions` table**
+   that survives redeploys, and manual transaction-wrapped delete cascades.
+
+**34 tables · 160 routes.** Column-by-column detail, the full route list, the
+push-to-scheduler field mapping and the spec-bind contract are in
+**[SCHEMA.md](./SCHEMA.md)**.
+
+### Data model in one line
+
+**Project (Event Folder) → 1+ Shows → Steps in lanes.** A folder holding exactly
+one show auto-collapses into that show everywhere in the UI. Lanes are **not
+fixed** — each event *type* declares its own set (`led` = 6, `print` = 8,
+`both` = 10) and types are extensible from config; every dashboard, folder,
+pipeline and template grid is lane-agnostic. Alongside that sits the commercial
+axis: **one job = one deal = one QuickBooks number = one budget**, and any
+cost-bearing item can override its show's default job, so one show can bill
+across two deals.
+
+---
+
+## Module map
+
+### `public/` — the SPA (load order is dependency order; see `index.html`)
+
+| File | What it owns |
+|---|---|
+| `data.js` | The demo fixture **and** the shared vocabulary: `ROLES`, `STATUS`, `EVENT_TYPES`/`LANES`, `BUDGET_CATS`, `PO_STATUS_META`, `RECAP_STATUS`. Plus the flat index maps (`SHOWS_BY_ID`, `JOBS_BY_ID`, …) and the pure read helpers (`financeExceptions`, `poRisks`, `noteInbox`, `buildRecapDraft`, …). Runs at parse time in **both** modes. |
+| `api.js` | The seam. `SR` = transport, session, mode probe, store sync; `api.*` = ~90 methods that each branch demo vs API. The `A.*` absorbers are the read-through cache that keeps the index maps in step with server payloads. |
+| `components.js` | Shared render helpers — `esc()`, formatters, pills/tags/chips, the roster picker, and the white **document sheets** (spec, pull sheet, manifest, proof, money, call sheet, client recap) used by both the viewer and the print path. |
+| `views-dashboard.js` | Projects portfolio + the Season/Program dashboard. |
+| `views-folder.js` | The per-show tabbed folder: Overview · Schedule · Pipeline · Specs · Gear · Files · Photos · Recap · Financials · Proofs/Bookings · Activity. |
+| `views-finance.js` | Finance cockpit, job drill-in, the per-show Financials tab, season P&L strip. |
+| `views-purchasing.js` | Purchasing cockpit, PO drill-in, the per-show procurement surfaces. |
+| `views-notes.js` | The one anchored-thread component, @mentions, and the bell inbox. |
+| `views-global.js` | My Tasks · Calendar · Team & Roles · Files library · Templates · Settings · the multimedia viewer. |
+| `bind.js` | The `?bind-spec=1` popup — a first-party page that carries the operator's session so a spec tool never holds a credential. |
+| `app.js` | Router, the **one** delegated `data-act` click listener, every mutation, the login screen, and boot. |
+| `app.css` / `tokens.css` | Dark-first tokens with a light override on `:root[data-theme="light"]`. |
+
+**Safety rule, enforced throughout:** every interpolated value goes through
+`esc()`, and inline handlers carry **numeric ids only** — anything stringy is a
+`data-` attribute read by the delegated listener.
+
+### `lib/` — backend core
+
+`auth.js` (roles, `hasFinance`, `canApprovePO`, `canApproveRecap`) ·
+`db.js` (schema + cascades) · `enums.js` (server-side whitelists) ·
+`mappers.js` (row → API shape) · `agent.js` + `firewall.js` (agent surface and
+the client-facing content firewall) · `scheduler.js` (push) · `flex.js` (Flex
+client) · `speccheck.js` (the stack-aware spec checker) · `storage.js` (NAS
+drivers) · `mentions.js` · `seed.js` · `activity.js` · `http.js`.
+
+### `routes/` — one file per family
+
+`auth · core · files · finance · purchasing · schedule · notes · photos ·
+deliverables · proposals · agent`.
+
+### `scripts/`
+
+`smoke.js` (the full end-to-end suite) · `flex-test.js` (offline, recorded
+shapes) · `flex-probe.js` (needs a real key).
+
+---
+
+## Run it
+
+### 1. Demo mode — zero setup
+
+```bash
+open public/index.html            # or just double-click it
+```
+
+No server, no database. Works over `file://`. A **"Demo data"** badge sits in
+the topbar the whole time, and Settings says so too.
+
+`dist/showrunner-single.html` is the same app inlined into **one 775 KB file**
+you can email or drop on a USB stick. Rebuild it after any `public/` change:
+
+```bash
+node build-single.mjs
+```
+
+### 2. Full local — app + database
+
+```bash
+npm install
+export DATABASE_URL="postgres://user:pass@localhost:5432/showrunner?sslmode=disable"
+export SEED_ROSTER=1              # optional: placeholder teammates for @mentions
+npm start                         # PORT, default 3100
+```
+
+First boot runs `initDB()` and seeds the templates from `templates.json` plus a
+default admin — **`admin` / `e360admin`** (override with `ADMIN_PASSWORD`;
+change it immediately). Health: `GET /api/health`.
+
+**No Postgres handy?** The suites are driven through a throwaway embedded
+cluster — see the harness note under *Suites* below. The database **must be
+UTF-8**; activity details and note bodies carry `→`, `—` and typographic quotes.
+
+### 3. Suites
+
+```bash
+DATABASE_URL="…" npm run smoke    # scripts/smoke.js — the end-to-end suite
+npm run flex:test                 # offline, no key needed
+npm run flex:probe                # needs FLEX_BASE_URL + FLEX_API_KEY
+```
+
+`smoke.js` boots the real server in-process on an ephemeral port and drives it
+over HTTP exactly as a browser would: `initDB` idempotency, the seed loader,
+auth (including a legacy sha256 password being re-hashed to bcrypt), one
+representative call per route family, the whole agent-API happy path with its
+confidence bands and idempotent replay, the §9 guardrails, the recap content
+firewall, spec-bind, and **zero-orphan cascade integrity across every wired
+table**. Details and failure-reading guidance in **[SMOKE.md](./SMOKE.md)**.
+
+The SPA suites are harnesses that load `public/` into a DOM shim and drive the
+real render + action code (demo mode, API mode against a live server, and a
+full live push into a local staffing app). They live in the working scratchpad
+rather than the repo.
+
+### Environment variables
+
+Every variable, with defaults and notes, is in **[SCHEMA.md § Environment](./SCHEMA.md)**
+and mirrored with inline commentary in **`.env.example`**. The ones that change
+behaviour rather than tuning it:
+
+| Var | Effect when unset |
+|---|---|
+| `DATABASE_URL` | the server will not boot (the SPA still runs in demo mode) |
+| `SCHEDULER_BASE_URL` | push-to-scheduler dry-run works; **live** push returns a 501 naming the missing var |
+| `FLEX_BASE_URL` / `FLEX_API_KEY` | `features.flex` is false; the SPA greys the Flex actions instead of offering a 501 |
+| `TOOLS_ORIGINS` | the spec-bind allowlist is **empty and fails closed** — every tool message is refused |
+| `STORAGE_DRIVER` | defaults to `local`; `smb`/`webdav` are stubs that throw a clear 501 |
+
+---
+
+## Integration status — where each one honestly stands
+
+| Integration | Status |
+|---|---|
+| **Push to scheduler** | **Proven locally.** Dry run is the default and returns the exact payloads it would send. The live path is real — not commented out — and is gated on `SCHEDULER_BASE_URL`; unset, it is a 501 that names the variable. Verified end-to-end against a real local staffing app (65 assertions), including idempotent re-push and a clean 502 when the scheduler is unreachable. Not yet pointed at production staffing. |
+| **Flex** | **Client ready, probes pending a key.** `lib/flex.js` is written and covered by 67 offline tests against recorded shapes. Nothing in `routes/` calls it yet — the per-show gear state is read/written directly, and the UI labels itself *modeled*. The API is BETA, so none of the recorded shapes are confirmed until `scripts/flex-probe.js` runs with a real key. |
+| **Spec bind** (`?bind-spec=1`) | **Verified both sides.** The popup carries the operator's session so the three spec tools never hold a credential; every inbound message is origin-checked against server-served `TOOLS_ORIGINS` (fail-closed). `bind-complete` carries the `stale` node list and `bind-cancelled` fires when the operator closes the popup — both are implemented in `bind.js` **and** handled in all three tools in `C:\code\e360-tools`. |
+| **NAS** | **Stubbed, pending Tailscale.** The path convention, metadata and cached render bundles are all real, and the `local` driver works. Byte-serving from the E360 NAS is not wired: `smb` and `webdav` are explicit stubs that throw a 501 telling you what to finish. The viewer renders the cached bundle or thumbnail, so nothing in the UI depends on NAS reachability at view time. |
+| **M365 / agent API** | Live and enforced server-side — scopes, confidence bands, rate limits, idempotency, and no `DELETE` anywhere under `/api/agent/*`. Agents propose; humans confirm. |
+
+---
+
+## Conventions / guardrails
+
+- Additive migrations only in `initDB()` — **never `DROP`.** Legacy columns stay.
+- **Wire every new table into the delete cascade** (`lib/db.js`) or you leak
+  orphans; the smoke suite fails loudly if you forget.
+- Roles are gated **server-side**. The UI hiding a button is a courtesy, not a
+  control.
+- Multi-row writes go through `withTx()`.
+- One decision, one expression: a rule that appears in two places will drift.
+  `hasFinance`, `canApprovePO` and `canApproveRecap` each exist exactly once and
+  every call site delegates to them.
+- The client recap is built by a generator that can only read client-safe
+  fields, and every human edit is re-checked on the way in. No cost, PO or
+  internal note is reachable from it.

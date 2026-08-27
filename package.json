@@ -1,0 +1,23 @@
+{
+  "name": "e360-showrunner",
+  "version": "2.0.0",
+  "description": "E360 Showrunner — project-management app for E360 Sport live-event LED/Print production. Separate service from the staffing/scheduler app; integrates via 'push to scheduler'. Serves its own SPA plus an agent-facing API (AGENT_API.md).",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "npm install",
+    "smoke": "node scripts/smoke.js",
+    "flex:test": "node scripts/flex-test.js",
+    "flex:probe": "node scripts/flex-probe.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "luxon": "^3.7.2",
+    "pg": "^8.11.3"
+  }
+}

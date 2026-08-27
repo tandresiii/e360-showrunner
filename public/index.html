@@ -1,0 +1,64 @@
+<title>e360 Showrunner</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="app.css">
+
+<div class="app">
+  <aside class="rail">
+    <div class="brand">
+      <div class="logo">e</div>
+      <div><b>Showrunner</b><span>e360 Sport</span></div>
+    </div>
+    <nav class="nav" id="nav">
+      <div class="lbl">Workspace</div>
+      <a data-view="projects"><span data-ic="grid"></span><span>Projects</span><span class="count" id="c-proj">6</span></a>
+      <a data-view="mytasks"><span data-ic="check"></span><span>My Tasks</span><span class="count" id="c-mine">0</span></a>
+      <a data-view="finance"><span data-ic="scale"></span><span>Finance</span><span class="count" id="c-fin">0</span></a>
+      <a data-view="purchasing"><span data-ic="cart"></span><span>Purchasing</span><span class="count" id="c-po">0</span></a>
+      <a data-view="calendar"><span data-ic="cal"></span><span>Calendar</span></a>
+      <a data-view="team"><span data-ic="users"></span><span>Team</span></a>
+      <a data-view="files"><span data-ic="folder"></span><span>Files</span></a>
+      <div class="lbl">Setup</div>
+      <a data-view="templates"><span data-ic="layers"></span><span>Templates</span></a>
+      <a data-view="settings"><span data-ic="gear"></span><span>Settings</span></a>
+    </nav>
+    <div class="foot">
+      <div class="avatar" id="meAvatar"></div>
+      <div class="who"><b id="meName">Tom Andres</b><span id="meRole">Owner · Admin</span></div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <button class="iconbtn navbtn" id="menuBtn" title="Menu" data-act="toggleNav"><span data-ic="menu"></span></button>
+      <div class="crumb" id="crumb"><b>Projects</b></div>
+      <div class="search"><span data-ic="search"></span><input placeholder="Search events, people, files…"></div>
+      <div class="spacer"></div>
+      <button class="iconbtn" id="themeBtn" title="Toggle theme"></button>
+      <button class="iconbtn" id="bellBtn" title="Inbox — mentions, replies &amp; agent activity" data-act="toggleBell"><span data-ic="bell"></span><span class="bell-badge" id="bellBadge" style="display:none"></span></button>
+      <button class="btn primary" id="newBtn"><span data-ic="plus"></span><span class="nb-lbl">New Event</span></button>
+    </div>
+    <div class="scroll" id="scroll"></div>
+  </div>
+</div>
+
+<div class="nav-scrim" id="navScrim" data-act="closeNav"></div>
+<div class="overlay" id="overlay"><div class="modal" id="modal"></div></div>
+<div class="toasts" id="toasts"></div>
+<div id="printArea"></div>
+
+<!-- plain scripts, dependency order — NO ES modules so file:// keeps working -->
+<script src="data.js"></script>
+<script src="api.js"></script>
+<script src="components.js"></script>
+<script src="views-notes.js"></script>
+<script src="views-finance.js"></script>
+<script src="views-purchasing.js"></script>
+<script src="views-folder.js"></script>
+<script src="views-dashboard.js"></script>
+<script src="views-global.js"></script>
+<script src="bind.js"></script>
+<script src="app.js"></script>

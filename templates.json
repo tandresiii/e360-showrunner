@@ -1,0 +1,193 @@
+{
+  "$schema_notes": "e360 Showrunner event-type seed templates. A Project Folder (engagement) holds 1+ Shows (dated productions). Instantiating a template on a Show materializes event_steps with due_date = show.event_date + due_offset_days (offset is negative = days BEFORE the event, 0 = event/install day, positive = after). depends_on references another step's exact title (across any lane in the same template) and is null when the step has no prerequisite. Every prerequisite's due_offset_days is <= its dependent's, so a back-scheduled date never falls after the step that needs it.",
+  "enums": {
+    "event_type": ["led", "print", "both"],
+    "lanes": ["client", "venue", "logistics", "crew", "gear", "deliverables"],
+    "owner_role": [
+      "sales",
+      "account_manager",
+      "pm",
+      "technical_director",
+      "content_manager",
+      "lead_tech",
+      "gear_lead",
+      "logistics_coordinator",
+      "graphic_designer",
+      "print_producer"
+    ],
+    "evidence_type": ["flex_element", "doc_link", "booking", "file", "none"],
+    "auto_source": ["spec_gen", "novaspec", "powerspec", "flex", "travel", "none"]
+  },
+  "spec_derivation_chain": {
+    "note": "Deliverables lane, LED/Both only. content spec (.e360, spec_gen) -> data cabling (.nsf, novaspec) -> power (.pcfg, powerspec) -> Flex pull sheet (gear count). Each is DERIVED from the prior; regenerating a parent marks every descendant stale. Modeled here via depends_on so a downstream step can be flagged when its upstream evidence is re-bound. See INTEGRATION.md part (a).",
+    "order": [
+      "Content spec sheet (.e360) generated",
+      "Data cabling map (.nsf) generated",
+      "Power spec (.pcfg) generated",
+      "Build pull sheet in Flex"
+    ]
+  },
+  "templates": [
+    {
+      "name": "LED field-board install",
+      "event_type": "led",
+      "description": "Traveling-crew perimeter LED for a stadium/arena match (grounded in the NW Stadium soccer field-board show: install match-day-minus-one, show power + feeder run, rent-your-own forklift, stagehands at load-in, strike same evening). Event date = match day. Full spec derivation chain (.e360 -> .nsf -> .pcfg -> pull sheet).",
+      "lanes": {
+        "client": [
+          { "title": "Sales books the event - contract signed", "due_offset_days": -60, "owner_role": "sales", "evidence_type": "doc_link", "auto_source": "none", "depends_on": null },
+          { "title": "Kickoff production call (client + venue)", "due_offset_days": -45, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Sales books the event - contract signed" },
+          { "title": "Lock show dates (load-in / match / strike)", "due_offset_days": -44, "owner_role": "pm", "evidence_type": "none", "auto_source": "none", "depends_on": "Kickoff production call (client + venue)" },
+          { "title": "Client production summary sent", "due_offset_days": -2, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Content loaded + QC'd on media server" },
+          { "title": "Post-event client recap sent", "due_offset_days": 3, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": null }
+        ],
+        "venue": [
+          { "title": "Venue advance - load-in window, dock, forklift access", "due_offset_days": -21, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Kickoff production call (client + venue)" },
+          { "title": "Confirm power source & feeder path (show power)", "due_offset_days": -18, "owner_role": "technical_director", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Venue advance - load-in window, dock, forklift access" },
+          { "title": "Confirm flight-case storage, gates & cable-ramp needs", "due_offset_days": -10, "owner_role": "lead_tech", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Venue advance - load-in window, dock, forklift access" },
+          { "title": "Confirm credentials / parking list", "due_offset_days": -7, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Venue advance - load-in window, dock, forklift access" }
+        ],
+        "logistics": [
+          { "title": "Book truck / freight", "due_offset_days": -21, "owner_role": "logistics_coordinator", "evidence_type": "booking", "auto_source": "none", "depends_on": "Lock show dates (load-in / match / strike)" },
+          { "title": "Book crew travel (flights + hotel)", "due_offset_days": -16, "owner_role": "logistics_coordinator", "evidence_type": "booking", "auto_source": "travel", "depends_on": "Assign lead tech + techs" },
+          { "title": "Confirm feeder cable & power distro", "due_offset_days": -14, "owner_role": "technical_director", "evidence_type": "booking", "auto_source": "none", "depends_on": "Confirm power source & feeder path (show power)" },
+          { "title": "Book stagehands / local labor", "due_offset_days": -6, "owner_role": "logistics_coordinator", "evidence_type": "booking", "auto_source": "none", "depends_on": "Lock show dates (load-in / match / strike)" },
+          { "title": "Rent forklift (drop-off day before load-in)", "due_offset_days": -6, "owner_role": "logistics_coordinator", "evidence_type": "booking", "auto_source": "none", "depends_on": "Venue advance - load-in window, dock, forklift access" }
+        ],
+        "crew": [
+          { "title": "Assign lead tech + techs", "due_offset_days": -21, "owner_role": "pm", "evidence_type": "none", "auto_source": "none", "depends_on": "Lock show dates (load-in / match / strike)" },
+          { "title": "Confirm crew availability", "due_offset_days": -18, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Assign lead tech + techs" },
+          { "title": "Crew call sheet published", "due_offset_days": -3, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Assign lead tech + techs" }
+        ],
+        "gear": [
+          { "title": "Create Flex event folder", "due_offset_days": -30, "owner_role": "gear_lead", "evidence_type": "file", "auto_source": "flex", "depends_on": "Lock show dates (load-in / match / strike)" },
+          { "title": "Build pull sheet in Flex", "due_offset_days": -14, "owner_role": "gear_lead", "evidence_type": "file", "auto_source": "flex", "depends_on": "Power spec (.pcfg) generated" },
+          { "title": "Gear prep / scan-out (pull + test)", "due_offset_days": -4, "owner_role": "gear_lead", "evidence_type": "file", "auto_source": "flex", "depends_on": "Build pull sheet in Flex" },
+          { "title": "Load truck", "due_offset_days": -2, "owner_role": "gear_lead", "evidence_type": "none", "auto_source": "none", "depends_on": "Gear prep / scan-out (pull + test)" },
+          { "title": "Gear return / scan-in at warehouse", "due_offset_days": 2, "owner_role": "gear_lead", "evidence_type": "file", "auto_source": "flex", "depends_on": null }
+        ],
+        "deliverables": [
+          { "title": "Content spec sheet (.e360) generated", "due_offset_days": -30, "owner_role": "technical_director", "evidence_type": "file", "auto_source": "spec_gen", "depends_on": "Lock show dates (load-in / match / strike)" },
+          { "title": "Data cabling map (.nsf) generated", "due_offset_days": -28, "owner_role": "technical_director", "evidence_type": "file", "auto_source": "novaspec", "depends_on": "Content spec sheet (.e360) generated" },
+          { "title": "Power spec (.pcfg) generated", "due_offset_days": -26, "owner_role": "technical_director", "evidence_type": "file", "auto_source": "powerspec", "depends_on": "Data cabling map (.nsf) generated" },
+          { "title": "Content specs issued to client / creative", "due_offset_days": -21, "owner_role": "content_manager", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Content spec sheet (.e360) generated" },
+          { "title": "Content deadline - client submits content", "due_offset_days": -7, "owner_role": "content_manager", "evidence_type": "file", "auto_source": "none", "depends_on": "Content specs issued to client / creative" },
+          { "title": "Content loaded + QC'd on media server", "due_offset_days": -3, "owner_role": "lead_tech", "evidence_type": "file", "auto_source": "none", "depends_on": "Content deadline - client submits content" },
+          { "title": "Show file / config built on media server", "due_offset_days": -2, "owner_role": "lead_tech", "evidence_type": "file", "auto_source": "none", "depends_on": "Content loaded + QC'd on media server" }
+        ]
+      }
+    },
+    {
+      "name": "Print job",
+      "event_type": "print",
+      "description": "Large-format print engagement (proofs, production, delivery/install) - e.g. the field-wall drape/cover that runs alongside an LED show. Flow: intake -> graphic design -> proof -> client approval -> into production -> tracking -> ship -> install -> return. Event date = install/delivery day.",
+      "lanes": {
+        "client": [
+          { "title": "Sales books print job - PO received", "due_offset_days": -30, "owner_role": "sales", "evidence_type": "doc_link", "auto_source": "none", "depends_on": null },
+          { "title": "Intake - gather specs, dims, materials, quantities", "due_offset_days": -28, "owner_role": "print_producer", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Sales books print job - PO received" },
+          { "title": "Client approves proof", "due_offset_days": -12, "owner_role": "account_manager", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Proof sent to client" },
+          { "title": "Delivery / install confirmed to client", "due_offset_days": -1, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Install on-site" }
+        ],
+        "venue": [
+          { "title": "Site visit / measurements", "due_offset_days": -25, "owner_role": "print_producer", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Intake - gather specs, dims, materials, quantities" },
+          { "title": "Confirm install access / load-in window", "due_offset_days": -5, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Site visit / measurements" }
+        ],
+        "logistics": [
+          { "title": "Into production - submit to printer / vendor", "due_offset_days": -10, "owner_role": "print_producer", "evidence_type": "booking", "auto_source": "none", "depends_on": "Files released to production (print-ready)" },
+          { "title": "Production tracking / QC check", "due_offset_days": -6, "owner_role": "print_producer", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Into production - submit to printer / vendor" },
+          { "title": "Ship / freight to venue", "due_offset_days": -3, "owner_role": "logistics_coordinator", "evidence_type": "booking", "auto_source": "none", "depends_on": "Production tracking / QC check" },
+          { "title": "Return / dispose after event", "due_offset_days": 3, "owner_role": "logistics_coordinator", "evidence_type": "none", "auto_source": "none", "depends_on": null }
+        ],
+        "crew": [
+          { "title": "Assign install crew", "due_offset_days": -10, "owner_role": "pm", "evidence_type": "none", "auto_source": "none", "depends_on": "Client approves proof" },
+          { "title": "Book install labor / stagehands", "due_offset_days": -5, "owner_role": "logistics_coordinator", "evidence_type": "booking", "auto_source": "none", "depends_on": "Assign install crew" }
+        ],
+        "gear": [
+          { "title": "Pull install hardware / rigging (Flex)", "due_offset_days": -5, "owner_role": "gear_lead", "evidence_type": "file", "auto_source": "flex", "depends_on": "Assign install crew" }
+        ],
+        "deliverables": [
+          { "title": "Graphic design / artwork build", "due_offset_days": -21, "owner_role": "graphic_designer", "evidence_type": "file", "auto_source": "none", "depends_on": "Site visit / measurements" },
+          { "title": "Internal proof / preflight", "due_offset_days": -16, "owner_role": "print_producer", "evidence_type": "file", "auto_source": "none", "depends_on": "Graphic design / artwork build" },
+          { "title": "Proof sent to client", "due_offset_days": -15, "owner_role": "account_manager", "evidence_type": "file", "auto_source": "none", "depends_on": "Internal proof / preflight" },
+          { "title": "Files released to production (print-ready)", "due_offset_days": -11, "owner_role": "print_producer", "evidence_type": "file", "auto_source": "none", "depends_on": "Client approves proof" },
+          { "title": "Install on-site", "due_offset_days": -1, "owner_role": "lead_tech", "evidence_type": "file", "auto_source": "none", "depends_on": "Ship / freight to venue" }
+        ]
+      }
+    },
+    {
+      "name": "Residency install",
+      "event_type": "led",
+      "description": "Initial permanent/seasonal install of an LED system at a venue that will host a series of matches (residency: install once, host many). Event date = go-live / install day (offset 0). Banks the residency's shared spec chain (.e360 -> .nsf -> .pcfg) and Flex folder, which member matches (see LOVB match) inherit. Longer horizon; ends in commissioning + client handoff, no same-day strike.",
+      "lanes": {
+        "client": [
+          { "title": "Residency agreement / contract signed", "due_offset_days": -75, "owner_role": "sales", "evidence_type": "doc_link", "auto_source": "none", "depends_on": null },
+          { "title": "Design & scope call (venue + client)", "due_offset_days": -60, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Residency agreement / contract signed" },
+          { "title": "Season schedule locked (match dates)", "due_offset_days": -55, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Design & scope call (venue + client)" },
+          { "title": "Handoff / training package to client", "due_offset_days": 1, "owner_role": "technical_director", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "System commissioned + calibrated on-site" }
+        ],
+        "venue": [
+          { "title": "Site survey (structural, power, sightlines)", "due_offset_days": -50, "owner_role": "technical_director", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Design & scope call (venue + client)" },
+          { "title": "Permanent power tie-in confirmed with venue", "due_offset_days": -35, "owner_role": "technical_director", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Site survey (structural, power, sightlines)" },
+          { "title": "Rigging / mounting plan approved by venue", "due_offset_days": -30, "owner_role": "technical_director", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Site survey (structural, power, sightlines)" },
+          { "title": "Load-in / install window confirmed", "due_offset_days": -21, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Season schedule locked (match dates)" }
+        ],
+        "logistics": [
+          { "title": "Book install truck / freight", "due_offset_days": -30, "owner_role": "logistics_coordinator", "evidence_type": "booking", "auto_source": "none", "depends_on": "Season schedule locked (match dates)" },
+          { "title": "Book install crew travel + lodging", "due_offset_days": -25, "owner_role": "logistics_coordinator", "evidence_type": "booking", "auto_source": "travel", "depends_on": "Assign install lead + crew" },
+          { "title": "Rent forklift / lift equipment", "due_offset_days": -10, "owner_role": "logistics_coordinator", "evidence_type": "booking", "auto_source": "none", "depends_on": "Load-in / install window confirmed" },
+          { "title": "Book local labor / stagehands for install", "due_offset_days": -10, "owner_role": "logistics_coordinator", "evidence_type": "booking", "auto_source": "none", "depends_on": "Load-in / install window confirmed" }
+        ],
+        "crew": [
+          { "title": "Assign install lead + crew", "due_offset_days": -35, "owner_role": "pm", "evidence_type": "none", "auto_source": "none", "depends_on": "Season schedule locked (match dates)" },
+          { "title": "Confirm crew availability for install window", "due_offset_days": -25, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Assign install lead + crew" },
+          { "title": "Install crew call sheet", "due_offset_days": -3, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Assign install lead + crew" }
+        ],
+        "gear": [
+          { "title": "Create residency Flex folder", "due_offset_days": -45, "owner_role": "gear_lead", "evidence_type": "file", "auto_source": "flex", "depends_on": "Season schedule locked (match dates)" },
+          { "title": "Build install pull sheet (Flex)", "due_offset_days": -25, "owner_role": "gear_lead", "evidence_type": "file", "auto_source": "flex", "depends_on": "Power spec (.pcfg) generated" },
+          { "title": "Gear prep / stage / scan-out", "due_offset_days": -5, "owner_role": "gear_lead", "evidence_type": "file", "auto_source": "flex", "depends_on": "Build install pull sheet (Flex)" },
+          { "title": "System commissioned + calibrated on-site", "due_offset_days": 0, "owner_role": "lead_tech", "evidence_type": "file", "auto_source": "flex", "depends_on": "Gear prep / stage / scan-out" }
+        ],
+        "deliverables": [
+          { "title": "System content spec (.e360) generated", "due_offset_days": -45, "owner_role": "technical_director", "evidence_type": "file", "auto_source": "spec_gen", "depends_on": "Site survey (structural, power, sightlines)" },
+          { "title": "Data cabling map (.nsf) generated", "due_offset_days": -42, "owner_role": "technical_director", "evidence_type": "file", "auto_source": "novaspec", "depends_on": "System content spec (.e360) generated" },
+          { "title": "Power spec (.pcfg) generated", "due_offset_days": -40, "owner_role": "technical_director", "evidence_type": "file", "auto_source": "powerspec", "depends_on": "Data cabling map (.nsf) generated" },
+          { "title": "Season content spec issued to client / creative", "due_offset_days": -30, "owner_role": "content_manager", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "System content spec (.e360) generated" },
+          { "title": "Commissioning report / calibration doc filed", "due_offset_days": 1, "owner_role": "lead_tech", "evidence_type": "file", "auto_source": "none", "depends_on": "System commissioned + calibrated on-site" }
+        ]
+      }
+    },
+    {
+      "name": "LOVB match",
+      "event_type": "led",
+      "description": "A single League One Volleyball match on a residency system that is already installed. Lightweight, short horizon (~3 weeks): no truck, forklift, install or strike - gear is resident. Inherits the residency's banked content spec; focus is operator crew, per-match content package, serve-clock/stat overlay, and match-day power-on. Event date = match day.",
+      "lanes": {
+        "client": [
+          { "title": "Confirm match date + broadcast window", "due_offset_days": -21, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": null },
+          { "title": "Match-day rundown / production notes to client", "due_offset_days": -2, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Confirm match date + broadcast window" }
+        ],
+        "venue": [
+          { "title": "Confirm venue access / call time for match", "due_offset_days": -10, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Confirm match date + broadcast window" },
+          { "title": "Verify resident power + system status", "due_offset_days": -5, "owner_role": "lead_tech", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Confirm venue access / call time for match" }
+        ],
+        "logistics": [
+          { "title": "Book operator travel (if traveling)", "due_offset_days": -10, "owner_role": "logistics_coordinator", "evidence_type": "booking", "auto_source": "travel", "depends_on": "Assign match-day operator(s)" },
+          { "title": "Local labor (if needed)", "due_offset_days": -5, "owner_role": "logistics_coordinator", "evidence_type": "booking", "auto_source": "none", "depends_on": null }
+        ],
+        "crew": [
+          { "title": "Assign match-day operator(s)", "due_offset_days": -14, "owner_role": "pm", "evidence_type": "none", "auto_source": "none", "depends_on": "Confirm match date + broadcast window" },
+          { "title": "Crew call sheet for match", "due_offset_days": -3, "owner_role": "pm", "evidence_type": "doc_link", "auto_source": "none", "depends_on": "Assign match-day operator(s)" }
+        ],
+        "gear": [
+          { "title": "Resident system health check (remote)", "due_offset_days": -7, "owner_role": "lead_tech", "evidence_type": "doc_link", "auto_source": "flex", "depends_on": null },
+          { "title": "Pre-match power-on + test pattern", "due_offset_days": 0, "owner_role": "lead_tech", "evidence_type": "file", "auto_source": "none", "depends_on": "Verify resident power + system status" }
+        ],
+        "deliverables": [
+          { "title": "Pull season content spec (inherited from residency)", "due_offset_days": -14, "owner_role": "content_manager", "evidence_type": "file", "auto_source": "none", "depends_on": "Confirm match date + broadcast window" },
+          { "title": "Match content package received", "due_offset_days": -5, "owner_role": "content_manager", "evidence_type": "file", "auto_source": "none", "depends_on": "Pull season content spec (inherited from residency)" },
+          { "title": "Content loaded + QC'd on media server", "due_offset_days": -1, "owner_role": "lead_tech", "evidence_type": "file", "auto_source": "none", "depends_on": "Match content package received" },
+          { "title": "Serve-clock / stat overlay config (Bolt6)", "due_offset_days": -1, "owner_role": "lead_tech", "evidence_type": "file", "auto_source": "none", "depends_on": "Content loaded + QC'd on media server" }
+        ]
+      }
+    }
+  ]
+}

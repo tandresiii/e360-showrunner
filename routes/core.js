@@ -1,0 +1,835 @@
+// ════════════════════════════════════════════════════════════════════════════
+// routes/core.js — projects (event folders), shows, steps, templates,
+//                  milestones, the activity feed, push-to-scheduler
+// ────────────────────────────────────────────────────────────────────────────
+// Hierarchy: PROJECT (event folder) -> SHOWS -> STEPS, with JOBS (the
+// commercial dimension) hanging off the project alongside the shows.
+//
+// Punch coverage: C (lanes come from event_types, per project type — a step's
+// lane is validated against ITS project's lane set, not a fixed 6), 4 (steps.
+// risk), 8 (milestones child table), 9 (RAG derived, rag_override wins),
+// 10 (projects.summary/source), 11 (activity.accent), 12 (shows.cabinets),
+// B (templates now carry owner_role and come from templates.json), H (the live
+// push path stays 501 — that is a separate, later decision).
+// ════════════════════════════════════════════════════════════════════════════
+
+'use strict';
+
+const express = require('express');
+const { pool, withTx, loadProject, loadShow, projectForRow, mintTempJobNumber,
+        deleteProjectCascade, deleteShowCascade } = require('../lib/db');
+const { requireAuth, requireRole, canEditProject, canUpdateStepStatus, roleRank,
+        hasFinance } = require('../lib/auth');
+const { asyncH, badRequest, forbidden, notFound, conflict, idParam, limitOf, offsetOf } = require('../lib/http');
+const { logActivity } = require('../lib/activity');
+const { lanesForType, allLaneKeys } = require('../lib/seed');
+const { resolveUsernames, recordMentions, parseMentions, notifyTargets } = require('../lib/mentions');
+const {
+  pick, has, dbToProject, dbToShow, deriveRag, dbToJob, dbToStep, dbToTemplate,
+  dbToTemplateStep, dbToActivity, dbToMilestone, dbToUser, stripMoney
+} = require('../lib/mappers');
+const {
+  PROJECT_TYPES, STAGES, RAGS, STEP_STATUSES, EVIDENCE_TYPES, AUTO_SOURCES,
+  oneOf, addDays, slug, isISODate, intOrNull
+} = require('../lib/enums');
+// The staffing-app client. The field mapping (M1–M14) lives there, not here,
+// so the dry run and the live push can never drift.
+const {
+  buildSchedulerPayloads, pushShowToScheduler, schedulerConfigured,
+  schedulerCredentialed, fetchRoster, validateForPush, deriveBookingCategory, mapEventType
+} = require('../lib/scheduler');
+
+const router = express.Router();
+router.use(requireAuth);
+
+// ── shared hydration ────────────────────────────────────────────────────────
+// `money` is the finance-capability gate (hardening 2): a job's contract value
+// is margin-equivalent, so it is stripped for a caller who may not see margin.
+// It DEFAULTS TO FALSE — a caller that forgets to pass the session gets the
+// redacted job, never the leaky one.
+async function jobsFor(projectId, q = pool, money = false) {
+  const r = await q.query(
+    `SELECT j.*, COALESCE(b.total,0) AS budget_total
+     FROM jobs j
+     LEFT JOIN (SELECT job_id, SUM(allotted) AS total FROM budget_lines GROUP BY job_id) b
+       ON b.job_id = j.id
+     WHERE j.project_id=$1 ORDER BY j.id`, [projectId]);
+  return r.rows.map((row) => stripMoney(dbToJob(row), money));
+}
+async function milestonesFor({ showId = null, projectId = null }, q = pool) {
+  const r = showId
+    ? await q.query('SELECT * FROM milestones WHERE show_id=$1 ORDER BY date, sort_order, id', [showId])
+    : await q.query('SELECT * FROM milestones WHERE project_id=$1 ORDER BY date, sort_order, id', [projectId]);
+  return r.rows.map(dbToMilestone);
+}
+// 9. attach the derived RAG so the mapper can resolve override > derived > stored.
+//
+// HARDENING 8. This is THE hydrateShow. routes/schedule.js had a second one of
+// the same name that attached `project` and `type` but no derived rag, so the
+// call sheet reported the STORED rag column while every other endpoint reported
+// the derived one — the same show, two colours, depending on which route you
+// asked. Schedule now calls this and passes its extras through `extra`.
+async function hydrateShow(row, q = pool, { withSteps = false, extra: more = null } = {}) {
+  if (!row) return null;
+  const steps = (await q.query(
+    'SELECT * FROM steps WHERE show_id=$1 ORDER BY sort_order ASC, id ASC', [row.id])).rows;
+  const extra = { rag: deriveRag(steps, row) || row.rag || 'idle' };
+  if (withSteps) extra.steps = steps.map(dbToStep);
+  return dbToShow(row, more ? { ...extra, ...more } : extra);
+}
+async function showsFor(projectId, q = pool) {
+  const r = await q.query(
+    'SELECT * FROM shows WHERE project_id=$1 ORDER BY event_date ASC, id ASC', [projectId]);
+  const out = [];
+  for (const row of r.rows) out.push(await hydrateShow(row, q));
+  return out;
+}
+// api.js hydrateProject(): jobs + shows + the auto-collapse `single` flag.
+async function hydrateProject(row, q = pool, { deep = true, session = null } = {}) {
+  if (!row) return null;
+  if (!deep) return dbToProject(row);
+  const shows = await showsFor(row.id, q);
+  return dbToProject(row, {
+    jobs: await jobsFor(row.id, q, hasFinance(session)),
+    milestones: await milestonesFor({ projectId: row.id }, q),
+    shows,
+    single: shows.length === 1,
+    show_count: shows.length
+  });
+}
+
+// The notification principle (Tony) now lives in lib/mentions.js so every
+// route family shares one implementation — see notifyTargets there.
+
+// ════════════════════════════════════════════════════════════════════════════
+// PROJECTS
+// ════════════════════════════════════════════════════════════════════════════
+router.get('/projects', asyncH(async (req, res) => {
+  const r = await pool.query(`SELECT * FROM projects ORDER BY created_at DESC, id DESC`);
+  const out = [];
+  for (const row of r.rows) out.push(await hydrateProject(row, pool, { session: req.session }));
+  res.json(out);
+}));
+
+router.get('/projects/:id', asyncH(async (req, res) => {
+  const p = await loadProject(idParam(req));
+  if (!p) throw notFound();
+  res.json(await hydrateProject(p, pool, { session: req.session }));
+}));
+
+// api.resolveFolder() — the auto-collapse rule lives HERE so every caller agrees.
+router.get('/projects/:id/folder', asyncH(async (req, res) => {
+  const p = await loadProject(idParam(req));
+  if (!p) throw notFound();
+  const project = await hydrateProject(p, pool, { session: req.session });
+  const single = project.shows.length === 1;
+  let show = null;
+  if (single) {
+    const row = await loadShow(project.shows[0].id);
+    show = await hydrateShow(row, pool, { withSteps: true });
+    show.project = dbToProject(p);
+    show.type = p.type;
+  }
+  res.json({ project, single, show });
+}));
+
+router.post('/projects', requireRole('pm'), asyncH(async (req, res) => {
+  const b = req.body || {};
+  const name = pick(b, 'name');
+  if (!name) throw badRequest('name required');
+  // A pm always owns what they create; manager+ may set any owner.
+  const owner = (roleRank(req.session.role) >= 3 && pick(b, 'owner'))
+    ? pick(b, 'owner') : req.session.username;
+  const row = await withTx(async (c) => {
+    const ins = await c.query(
+      `INSERT INTO projects (name, slug, client, type, stage, owner, description, summary, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [name, pick(b, 'slug') || slug(name), pick(b, 'client') || '',
+       oneOf(pick(b, 'type'), PROJECT_TYPES, 'led'), oneOf(pick(b, 'stage'), STAGES, 'lead'),
+       owner, pick(b, 'description') || '', pick(b, 'summary') || null, pick(b, 'source') || null]
+    );
+    const p = ins.rows[0];
+    // A one-off auto-creates its single job (HANDOFF: "One-offs auto-create
+    // their single job"), unless the caller says otherwise.
+    // POLISH_LIST #5: that job opens on a TEMP placeholder — nobody has a
+    // QuickBooks number the moment a folder is opened, and the work starts now.
+    if (pick(b, 'createJob', true) !== false) {
+      await c.query(
+        `INSERT INTO jobs (project_id, name, qb_job_number, qb_number_status, client,
+                           deal_type, description, contract_value)
+         VALUES ($1,$2,$3,'temp',$4,$5,$6,$7)`,
+        [p.id, pick(b, 'jobName') || name, await mintTempJobNumber(c), pick(b, 'client') || '',
+         oneOf(pick(b, 'dealType'), ['rental', 'sale'], 'rental'), '', 0]);
+    }
+    await logActivity(c, { projectId: p.id, actor: req.actor, action: 'project.create',
+      detail: name, accent: true });
+    await notifyTargets(c, { body: b, anchorType: 'project', anchorId: p.id, projectId: p.id,
+      showId: null, actor: req.actor, summary: `opened the folder “${name}” —` });
+    return p;
+  });
+  res.json(await hydrateProject(row, pool, { session: req.session }));
+}));
+
+router.put('/projects/:id', asyncH(async (req, res) => {
+  const p = await loadProject(idParam(req));
+  if (!p) throw notFound();
+  if (!canEditProject(req.session, p)) throw forbidden('Not allowed to edit this project');
+  const b = req.body || {};
+  const owner = (roleRank(req.session.role) >= 3 && pick(b, 'owner') != null) ? pick(b, 'owner') : p.owner;
+  const r = await pool.query(
+    `UPDATE projects SET name=$1, slug=$2, client=$3, type=$4, stage=$5, owner=$6,
+       description=$7, summary=$8, source=$9, updated_at=NOW() WHERE id=$10 RETURNING *`,
+    [pick(b, 'name', p.name), pick(b, 'slug', p.slug), pick(b, 'client', p.client),
+     oneOf(pick(b, 'type'), PROJECT_TYPES, p.type), oneOf(pick(b, 'stage'), STAGES, p.stage),
+     owner, pick(b, 'description', p.description),
+     has(b, 'summary') ? pick(b, 'summary') : p.summary,
+     has(b, 'source') ? pick(b, 'source') : p.source, p.id]
+  );
+  await logActivity(pool, { projectId: p.id, actor: req.actor, action: 'project.update',
+    detail: r.rows[0].name });
+  res.json(await hydrateProject(r.rows[0], pool, { session: req.session }));
+}));
+
+// Manual cascade, one transaction. lib/db.js deleteProjectCascade knows every
+// child table — a new table that is not listed there leaks rows.
+router.delete('/projects/:id', asyncH(async (req, res) => {
+  const p = await loadProject(idParam(req));
+  if (!p) throw notFound();
+  if (!canEditProject(req.session, p)) throw forbidden('Not allowed to delete this project');
+  await withTx(async (c) => { await deleteProjectCascade(c, p.id); });
+  res.json({ ok: true });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// SHOWS
+// ════════════════════════════════════════════════════════════════════════════
+router.get('/shows', asyncH(async (req, res) => {
+  const params = [];
+  let q = 'SELECT * FROM shows';
+  const projectId = intOrNull(pick(req.query, 'project_id'));
+  if (projectId) { params.push(projectId); q += ` WHERE project_id=$${params.length}`; }
+  q += ' ORDER BY event_date ASC, id ASC';
+  const r = await pool.query(q, params);
+  const out = [];
+  for (const row of r.rows) out.push(await hydrateShow(row));
+  res.json(out);
+}));
+
+// api.getShow(id) — the hydrated detail: steps, its project, its default job,
+// its type (type lives on the project), milestones.
+router.get('/shows/:id', asyncH(async (req, res) => {
+  const s = await loadShow(idParam(req));
+  if (!s) throw notFound();
+  const p = await loadProject(s.project_id);
+  const show = await hydrateShow(s, pool, { withSteps: true });
+  show.project = await hydrateProject(p, pool, { deep: false });
+  show.type = p ? p.type : 'led';
+  show.milestones = await milestonesFor({ showId: s.id });
+  show.job = s.default_job_id
+    ? stripMoney(dbToJob((await pool.query('SELECT * FROM jobs WHERE id=$1',
+        [s.default_job_id])).rows[0]), hasFinance(req.session)) : null;
+  show.lanes = await lanesForType(show.type);
+  res.json(show);
+}));
+
+router.post('/shows', requireRole('pm'), asyncH(async (req, res) => {
+  const b = req.body || {};
+  const projectId = intOrNull(pick(b, 'project_id'));
+  if (!projectId) throw badRequest('project_id required');
+  const project = await loadProject(projectId);
+  if (!project) throw notFound('Project not found');
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to add shows to this project');
+
+  const result = await withTx(async (c) => {
+    const name = pick(b, 'name') || '';
+    const ins = await c.query(
+      `INSERT INTO shows (project_id, name, slug, venue, city, load_in_date, event_date, strike_date,
+                          stage, rag, on_site_poc, owner, default_job_id, cabinets)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+      [project.id, name, pick(b, 'slug') || slug(name || project.name), pick(b, 'venue') || '',
+       pick(b, 'city') || '', pick(b, 'load_in_date') || '', pick(b, 'event_date') || '',
+       pick(b, 'strike_date') || '', oneOf(pick(b, 'stage'), STAGES, 'lead'),
+       oneOf(pick(b, 'rag'), RAGS, 'idle'), pick(b, 'on_site_poc') || '',
+       pick(b, 'owner') || project.owner || req.session.username,
+       intOrNull(pick(b, 'default_job_id')), parseInt(pick(b, 'cabinets'), 10) || 0]
+    );
+    const show = ins.rows[0];
+    // A show with no explicit job inherits the folder's first job.
+    if (!show.default_job_id) {
+      const j = await c.query('SELECT id FROM jobs WHERE project_id=$1 ORDER BY id LIMIT 1', [project.id]);
+      if (j.rows.length) {
+        await c.query('UPDATE shows SET default_job_id=$1 WHERE id=$2', [j.rows[0].id, show.id]);
+        show.default_job_id = j.rows[0].id;
+      }
+    }
+    let instantiated = 0;
+    const templateId = intOrNull(pick(b, 'template_id'));
+    if (templateId) instantiated = await instantiateTemplateOnShow(c, templateId, show, project);
+    await logActivity(c, { projectId: project.id, showId: show.id, actor: req.actor,
+      action: 'show.create', accent: true,
+      detail: (name || show.venue || '') + (instantiated ? ` (+${instantiated} steps)` : '') });
+    await notifyTargets(c, { body: b, anchorType: 'show', anchorId: show.id, projectId: project.id,
+      showId: show.id, actor: req.actor, summary: `added the show “${name || show.venue}” —` });
+    return { show, instantiated };
+  });
+  const out = await hydrateShow(result.show, pool, { withSteps: true });
+  out.instantiated_steps = result.instantiated;
+  res.json(out);
+}));
+
+router.put('/shows/:id', asyncH(async (req, res) => {
+  const s = await loadShow(idParam(req));
+  if (!s) throw notFound();
+  const project = await loadProject(s.project_id);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to edit this show');
+  const b = req.body || {};
+  const newEventDate = pick(b, 'event_date', s.event_date);
+
+  const row = await withTx(async (c) => {
+    const r = await c.query(
+      `UPDATE shows SET name=$1, slug=$2, venue=$3, city=$4, load_in_date=$5, event_date=$6,
+         strike_date=$7, stage=$8, rag=$9, rag_override=$10, on_site_poc=$11, owner=$12,
+         default_job_id=$13, cabinets=$14, summary=$15, source=$16, updated_at=NOW()
+       WHERE id=$17 RETURNING *`,
+      [pick(b, 'name', s.name), pick(b, 'slug', s.slug), pick(b, 'venue', s.venue),
+       pick(b, 'city', s.city), pick(b, 'load_in_date', s.load_in_date), newEventDate,
+       pick(b, 'strike_date', s.strike_date), oneOf(pick(b, 'stage'), STAGES, s.stage),
+       oneOf(pick(b, 'rag'), RAGS, s.rag),
+       // 9. the manager override: null clears it and RAG goes back to derived.
+       has(b, 'rag_override') ? oneOf(pick(b, 'rag_override'), RAGS, null) : s.rag_override,
+       pick(b, 'on_site_poc', s.on_site_poc), pick(b, 'owner', s.owner),
+       has(b, 'default_job_id') ? intOrNull(pick(b, 'default_job_id')) : s.default_job_id,
+       has(b, 'cabinets') ? (parseInt(pick(b, 'cabinets'), 10) || 0) : s.cabinets,
+       has(b, 'summary') ? pick(b, 'summary') : s.summary,
+       has(b, 'source') ? pick(b, 'source') : s.source, s.id]
+    );
+    // Keeping BOTH due_date and due_offset_days means a date change recomputes
+    // the back-schedule instead of stranding it (SCHEMA.md).
+    if (newEventDate !== s.event_date && isISODate(newEventDate)) {
+      const steps = await c.query(
+        'SELECT id, due_offset_days FROM steps WHERE show_id=$1 AND due_offset_days IS NOT NULL', [s.id]);
+      for (const st of steps.rows) {
+        await c.query('UPDATE steps SET due_date=$1, updated_at=NOW() WHERE id=$2',
+          [addDays(newEventDate, st.due_offset_days), st.id]);
+      }
+    }
+    await logActivity(c, { projectId: s.project_id, showId: s.id, actor: req.actor,
+      action: 'show.update', detail: r.rows[0].name });
+    await notifyTargets(c, { body: b, anchorType: 'show', anchorId: s.id, projectId: s.project_id,
+      showId: s.id, actor: req.actor, summary: `updated the show —` });
+    return r.rows[0];
+  });
+  res.json(await hydrateShow(row, pool, { withSteps: true }));
+}));
+
+router.delete('/shows/:id', asyncH(async (req, res) => {
+  const s = await loadShow(idParam(req));
+  if (!s) throw notFound();
+  const project = await loadProject(s.project_id);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to delete this show');
+  await withTx(async (c) => { await deleteShowCascade(c, s.id); });
+  res.json({ ok: true });
+}));
+
+// 8. milestones ("Content due", "Proof approved", "Freight", "Target").
+router.get('/shows/:id/milestones', asyncH(async (req, res) => {
+  res.json(await milestonesFor({ showId: idParam(req) }));
+}));
+router.post('/shows/:id/milestones', requireRole('pm'), asyncH(async (req, res) => {
+  const showId = idParam(req);
+  const s = await loadShow(showId);
+  if (!s) throw notFound('Show not found');
+  if (!canEditProject(req.session, await loadProject(s.project_id))) throw forbidden();
+  const label = pick(req.body, 'label');
+  if (!label) throw badRequest('label required');
+  const date = pick(req.body, 'date') || '';
+  if (date && !isISODate(date)) throw badRequest('date must be YYYY-MM-DD');
+  const r = await pool.query(
+    `INSERT INTO milestones (show_id, label, date, sort_order) VALUES ($1,$2,$3,$4) RETURNING *`,
+    [showId, label, date, parseInt(pick(req.body, 'sort_order'), 10) || 0]);
+  res.json(dbToMilestone(r.rows[0]));
+}));
+router.delete('/milestones/:id', requireRole('pm'), asyncH(async (req, res) => {
+  await pool.query('DELETE FROM milestones WHERE id=$1', [idParam(req)]);
+  res.json({ ok: true });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// STEPS
+// ════════════════════════════════════════════════════════════════════════════
+// C. A step's lane must be one of the lanes ITS project type declares. That is
+// read from `event_types`, so adding "Motion Graphics" with three new lanes is
+// a config row, not a deploy.
+async function assertLane(lane, project, q = pool) {
+  const known = await allLaneKeys(q);
+  if (!known.includes(lane)) throw badRequest(`Unknown lane '${lane}'`);
+  const allowed = await lanesForType(project ? project.type : 'led', q);
+  if (!allowed.includes(lane)) {
+    throw badRequest(`Lane '${lane}' is not part of the '${project ? project.type : 'led'}' event type ` +
+      `(its lanes: ${allowed.join(', ')})`);
+  }
+  return lane;
+}
+
+router.get('/steps', asyncH(async (req, res) => {
+  const where = [];
+  const params = [];
+  const add = (sql, v) => { params.push(v); where.push(sql.replace('$?', `$${params.length}`)); };
+  const showId = intOrNull(pick(req.query, 'show_id'));
+  const projectId = intOrNull(pick(req.query, 'project_id'));
+  if (showId) add('show_id=$?', showId);
+  if (projectId) add('project_id=$?', projectId);
+  if (req.query.lane) add('lane=$?', req.query.lane);
+  if (req.query.owner) add('LOWER(owner)=LOWER($?)', req.query.owner);
+  if (req.query.status) add('status=$?', req.query.status);
+  let q = 'SELECT * FROM steps';
+  if (where.length) q += ' WHERE ' + where.join(' AND ');
+  q += ' ORDER BY sort_order ASC, id ASC';
+  const r = await pool.query(q, params);
+  res.json(r.rows.map(dbToStep));
+}));
+
+router.get('/steps/:id', asyncH(async (req, res) => {
+  const r = await pool.query('SELECT * FROM steps WHERE id=$1', [idParam(req)]);
+  if (!r.rows.length) throw notFound();
+  res.json(dbToStep(r.rows[0]));
+}));
+
+// "My tasks" — every open step owned by the caller, across all folders.
+router.get('/my-steps', asyncH(async (req, res) => {
+  let who = req.session.username;
+  const asked = pick(req.query, 'username');
+  if (asked && asked !== who) {
+    if (roleRank(req.session.role) < 3) throw forbidden("Only manager+ may read another person's tasks");
+    who = asked;
+  }
+  const r = await pool.query(
+    `SELECT s.*, sh.name AS show_name, sh.venue AS show_venue, sh.project_id AS show_project_id
+     FROM steps s LEFT JOIN shows sh ON sh.id = s.show_id
+     WHERE LOWER(s.owner)=LOWER($1) AND s.status NOT IN ('done','na')
+     ORDER BY s.due_date ASC NULLS LAST, s.id ASC`, [who]);
+  res.json(r.rows.map((row) => ({
+    ...dbToStep(row),
+    show: row.show_id ? { id: row.show_id, name: row.show_name, venue: row.show_venue,
+                          project_id: row.show_project_id } : null
+  })));
+}));
+
+router.post('/steps', requireRole('pm'), asyncH(async (req, res) => {
+  const b = req.body || {};
+  const showId = intOrNull(pick(b, 'show_id'));
+  const projectId = intOrNull(pick(b, 'project_id'));
+  if (!showId && !projectId) throw badRequest('show_id or project_id required');
+  const title = pick(b, 'title');
+  if (!title) throw badRequest('title required');
+
+  const owningProject = await projectForRow({ show_id: showId, project_id: projectId });
+  if (!owningProject) throw notFound('Parent project/show not found');
+  if (!canEditProject(req.session, owningProject)) throw forbidden('Not allowed to add steps here');
+  const lane = await assertLane(pick(b, 'lane'), owningProject);
+
+  // due_date from an explicit date, or back-scheduled from the show's event date.
+  let dueDate = pick(b, 'due_date') || '';
+  const off = pick(b, 'due_offset_days');
+  if (!dueDate && off != null && showId) {
+    const show = await loadShow(showId);
+    if (show && show.event_date) dueDate = addDays(show.event_date, off);
+  }
+
+  const r = await pool.query(
+    `INSERT INTO steps (show_id, project_id, lane, title, status, owner, owner_role, due_date,
+       due_offset_days, evidence_type, evidence_ref, depends_on, auto_source, sort_order, notes, risk)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+    [showId, projectId, lane, title, oneOf(pick(b, 'status'), STEP_STATUSES, 'todo'),
+     pick(b, 'owner') || '', pick(b, 'owner_role') || null, dueDate,
+     off != null ? parseInt(off, 10) : null,
+     oneOf(pick(b, 'evidence_type'), EVIDENCE_TYPES, 'none'), pick(b, 'evidence_ref') || '',
+     intOrNull(pick(b, 'depends_on')), oneOf(pick(b, 'auto_source'), AUTO_SOURCES, 'none'),
+     parseInt(pick(b, 'sort_order'), 10) || 0, pick(b, 'notes') || '', !!pick(b, 'risk')]
+  );
+  await logActivity(pool, { projectId: owningProject.id, showId, actor: req.actor,
+    action: 'step.create', detail: `[${lane}] ${title}` });
+  res.json(dbToStep(r.rows[0]));
+}));
+
+router.put('/steps/:id', asyncH(async (req, res) => {
+  const cur = (await pool.query('SELECT * FROM steps WHERE id=$1', [idParam(req)])).rows[0];
+  if (!cur) throw notFound();
+  const project = await projectForRow(cur);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to edit this step');
+  const b = req.body || {};
+  const lane = has(b, 'lane') ? await assertLane(pick(b, 'lane'), project) : cur.lane;
+
+  let dueDate = has(b, 'due_date') ? pick(b, 'due_date') : cur.due_date;
+  const off = has(b, 'due_offset_days') ? intOrNull(pick(b, 'due_offset_days')) : cur.due_offset_days;
+  if (has(b, 'due_offset_days') && !has(b, 'due_date') && cur.show_id) {
+    const show = await loadShow(cur.show_id);
+    if (show && show.event_date && off != null) dueDate = addDays(show.event_date, off);
+  }
+
+  const r = await pool.query(
+    `UPDATE steps SET lane=$1, title=$2, status=$3, owner=$4, owner_role=$5, due_date=$6,
+       due_offset_days=$7, evidence_type=$8, evidence_ref=$9, depends_on=$10, auto_source=$11,
+       sort_order=$12, notes=$13, risk=$14, updated_at=NOW() WHERE id=$15 RETURNING *`,
+    [lane, pick(b, 'title', cur.title), oneOf(pick(b, 'status'), STEP_STATUSES, cur.status),
+     pick(b, 'owner', cur.owner), pick(b, 'owner_role', cur.owner_role), dueDate, off,
+     oneOf(pick(b, 'evidence_type'), EVIDENCE_TYPES, cur.evidence_type),
+     pick(b, 'evidence_ref', cur.evidence_ref),
+     has(b, 'depends_on') ? intOrNull(pick(b, 'depends_on')) : cur.depends_on,
+     oneOf(pick(b, 'auto_source'), AUTO_SOURCES, cur.auto_source),
+     has(b, 'sort_order') ? (parseInt(pick(b, 'sort_order'), 10) || 0) : cur.sort_order,
+     pick(b, 'notes', cur.notes),
+     has(b, 'risk') ? !!pick(b, 'risk') : cur.risk, cur.id]
+  );
+  await logActivity(pool, { projectId: project ? project.id : null, showId: cur.show_id,
+    actor: req.actor, action: 'step.update', detail: r.rows[0].title });
+  res.json(dbToStep(r.rows[0]));
+}));
+
+// Assigning work to someone else is a management act.
+router.put('/steps/:id/assign', requireRole('pm'), asyncH(async (req, res) => {
+  const cur = (await pool.query('SELECT * FROM steps WHERE id=$1', [idParam(req)])).rows[0];
+  if (!cur) throw notFound();
+  const project = await projectForRow(cur);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to assign on this project');
+  const owner = pick(req.body, 'owner', pick(req.body, 'username')) || '';
+  if (owner) {
+    const { unknown } = await resolveUsernames([owner]);
+    // Roster names are allowed too (local hires appear as steps' owners), but
+    // an unknown token is worth flagging rather than silently storing.
+    if (unknown.length) throw badRequest(`Unknown user '${owner}'`);
+  }
+  const r = await pool.query('UPDATE steps SET owner=$1, updated_at=NOW() WHERE id=$2 RETURNING *',
+    [owner, cur.id]);
+  await logActivity(pool, { projectId: project ? project.id : null, showId: cur.show_id,
+    actor: req.actor, action: 'step.assign', detail: `${cur.title} → ${owner || '(unassigned)'}` });
+  res.json(dbToStep(r.rows[0]));
+}));
+
+// The "techs update their own tasks" path: the step OWNER, or pm+ on the project.
+router.put('/steps/:id/status', asyncH(async (req, res) => {
+  const cur = (await pool.query('SELECT * FROM steps WHERE id=$1', [idParam(req)])).rows[0];
+  if (!cur) throw notFound();
+  const project = await projectForRow(cur);
+  if (!canUpdateStepStatus(req.session, cur, project)) throw forbidden('Not allowed to update this step');
+  const status = oneOf(pick(req.body, 'status'), STEP_STATUSES, null);
+  if (!status) throw badRequest('Invalid status');
+  const notes = has(req.body, 'notes') ? pick(req.body, 'notes') : cur.notes;
+  const risk = has(req.body, 'risk') ? !!pick(req.body, 'risk') : cur.risk;
+  const r = await pool.query(
+    'UPDATE steps SET status=$1, notes=$2, risk=$3, updated_at=NOW() WHERE id=$4 RETURNING *',
+    [status, notes, risk, cur.id]);
+  await logActivity(pool, { projectId: project ? project.id : null, showId: cur.show_id,
+    actor: req.actor, action: 'step.status', detail: `${cur.title} → ${status}`,
+    accent: status === 'done' || status === 'blocked' });
+  res.json(dbToStep(r.rows[0]));
+}));
+
+router.delete('/steps/:id', requireRole('pm'), asyncH(async (req, res) => {
+  const cur = (await pool.query('SELECT * FROM steps WHERE id=$1', [idParam(req)])).rows[0];
+  if (!cur) throw notFound();
+  const project = await projectForRow(cur);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to delete this step');
+  await withTx(async (c) => {
+    await c.query(`DELETE FROM notes WHERE anchor_type='step' AND anchor_id=$1`, [cur.id]);
+    await c.query(`DELETE FROM note_reads WHERE note_id NOT IN (SELECT id FROM notes)`);
+    await c.query(`DELETE FROM note_mentions WHERE note_id NOT IN (SELECT id FROM notes)`);
+    await c.query('UPDATE steps SET depends_on=NULL WHERE depends_on=$1', [cur.id]);
+    await c.query('DELETE FROM steps WHERE id=$1', [cur.id]);
+  });
+  await logActivity(pool, { projectId: project ? project.id : null, showId: cur.show_id,
+    actor: req.actor, action: 'step.delete', detail: cur.title });
+  res.json({ ok: true });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// TEMPLATES  (seeded from templates.json by lib/seed.js — punch item B)
+// ════════════════════════════════════════════════════════════════════════════
+router.get('/templates', asyncH(async (req, res) => {
+  const eventType = pick(req.query, 'event_type');
+  const r = eventType
+    ? await pool.query('SELECT * FROM event_type_templates WHERE event_type=$1 ORDER BY name', [eventType])
+    : await pool.query('SELECT * FROM event_type_templates ORDER BY event_type, name');
+  const steps = await pool.query('SELECT * FROM template_steps ORDER BY sort_order ASC, id ASC');
+  const byTpl = new Map();
+  for (const s of steps.rows) {
+    if (!byTpl.has(s.template_id)) byTpl.set(s.template_id, []);
+    byTpl.get(s.template_id).push(dbToTemplateStep(s));
+  }
+  const types = await pool.query('SELECT * FROM event_types ORDER BY sort_order');
+  const typeByKey = new Map(types.rows.map((t) => [t.key, t]));
+  res.json(r.rows.map((row) => dbToTemplate(row, {
+    steps: byTpl.get(row.id) || [],
+    // the front-end's listTemplates() shape: each entry carries its type def
+    def: typeByKey.get(row.event_type) || null
+  })));
+}));
+
+// api.getTemplate(type) keys by EVENT TYPE; the REST id also works.
+router.get('/templates/:key', asyncH(async (req, res) => {
+  const key = String(req.params.key);
+  const r = /^\d+$/.test(key)
+    ? await pool.query('SELECT * FROM event_type_templates WHERE id=$1', [parseInt(key, 10)])
+    : await pool.query('SELECT * FROM event_type_templates WHERE event_type=$1 ORDER BY id LIMIT 1', [key]);
+  if (!r.rows.length) throw notFound();
+  const t = r.rows[0];
+  const steps = await pool.query(
+    'SELECT * FROM template_steps WHERE template_id=$1 ORDER BY sort_order ASC, id ASC', [t.id]);
+  const type = await pool.query('SELECT * FROM event_types WHERE key=$1', [t.event_type]);
+  res.json(dbToTemplate(t, { steps: steps.rows.map(dbToTemplateStep), def: type.rows[0] || null }));
+}));
+
+// C. the lane sets themselves, so the front-end never hardcodes them either.
+router.get('/event-types', asyncH(async (req, res) => {
+  const types = await pool.query('SELECT * FROM event_types ORDER BY sort_order');
+  const lanes = await pool.query('SELECT * FROM lanes ORDER BY sort_order');
+  const laneByKey = new Map(lanes.rows.map((l) => [l.key, l]));
+  res.json({
+    lanes: lanes.rows,
+    types: types.rows.map((t) => ({ ...t, lane_defs: (t.lanes || []).map((k) => laneByKey.get(k)).filter(Boolean) }))
+  });
+}));
+
+router.post('/templates', requireRole('manager'), asyncH(async (req, res) => {
+  const b = req.body || {};
+  const name = pick(b, 'name');
+  if (!name) throw badRequest('name required');
+  const eventType = oneOf(pick(b, 'event_type'), PROJECT_TYPES, 'led');
+  const allowed = await lanesForType(eventType);
+  const t = await withTx(async (c) => {
+    const ins = await c.query(
+      'INSERT INTO event_type_templates (name, event_type, description) VALUES ($1,$2,$3) RETURNING *',
+      [name, eventType, pick(b, 'description') || '']);
+    const tid = ins.rows[0].id;
+    let i = 0;
+    for (const s of (pick(b, 'steps') || [])) {
+      const lane = pick(s, 'lane');
+      if (!allowed.includes(lane) || !s.title) continue;
+      await c.query(
+        `INSERT INTO template_steps (template_id, lane, title, due_offset_days, owner_role,
+           evidence_type, auto_source, depends_on_title, sort_order)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [tid, lane, s.title, intOrNull(pick(s, 'due_offset_days')), pick(s, 'owner_role') || null,
+         oneOf(pick(s, 'evidence_type'), EVIDENCE_TYPES, 'none'),
+         oneOf(pick(s, 'auto_source'), AUTO_SOURCES, 'none'),
+         pick(s, 'depends_on_title') || pick(s, 'depends_on') || '',
+         intOrNull(pick(s, 'sort_order')) != null ? intOrNull(pick(s, 'sort_order')) : i++]);
+    }
+    return ins.rows[0];
+  });
+  res.json(dbToTemplate(t));
+}));
+
+router.post('/shows/:id/instantiate-template', requireRole('pm'), asyncH(async (req, res) => {
+  const show = await loadShow(idParam(req));
+  if (!show) throw notFound('Show not found');
+  const project = await loadProject(show.project_id);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to modify this show');
+  const templateId = intOrNull(pick(req.body, 'template_id'));
+  if (!templateId) throw badRequest('template_id required');
+  const count = await withTx(async (c) => {
+    const n = await instantiateTemplateOnShow(c, templateId, show, project);
+    await logActivity(c, { projectId: project.id, showId: show.id, actor: req.actor,
+      action: 'template.instantiate', detail: `${n} steps from template ${templateId}`, accent: true });
+    return n;
+  });
+  res.json({ ok: true, instantiated_steps: count });
+}));
+
+// Materialize template_steps -> steps on a show. Computes due_date from the
+// show's event_date + the T-minus offset, then resolves depends_on_title to
+// the freshly-created step id. Lanes the show's type does not declare are
+// SKIPPED (not an error): the print template on a 'both' show still lands its
+// print lanes, which is exactly what a combined event needs.
+async function instantiateTemplateOnShow(c, templateId, show, project) {
+  const tpl = (await c.query(
+    'SELECT * FROM template_steps WHERE template_id=$1 ORDER BY sort_order ASC, id ASC',
+    [templateId])).rows;
+  if (!tpl.length) return 0;
+  const allowed = await lanesForType(project ? project.type : 'led', c);
+  const usable = tpl.filter((t) => allowed.includes(t.lane));
+  const titleToId = {};
+  let sort = 0;
+  for (const ts of usable) {
+    const due = (show.event_date && ts.due_offset_days != null)
+      ? addDays(show.event_date, ts.due_offset_days) : '';
+    const ins = await c.query(
+      `INSERT INTO steps (show_id, lane, title, status, owner_role, due_date, due_offset_days,
+         evidence_type, auto_source, sort_order)
+       VALUES ($1,$2,$3,'todo',$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [show.id, ts.lane, ts.title, ts.owner_role, due, ts.due_offset_days,
+       ts.evidence_type || 'none', ts.auto_source || 'none', sort++]);
+    titleToId[ts.title] = ins.rows[0].id;
+  }
+  for (const ts of usable) {
+    if (ts.depends_on_title && titleToId[ts.depends_on_title]) {
+      await c.query('UPDATE steps SET depends_on=$1 WHERE id=$2',
+        [titleToId[ts.depends_on_title], titleToId[ts.title]]);
+    }
+  }
+  return usable.length;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ACTIVITY FEED (read; writes happen internally via logActivity)
+// ════════════════════════════════════════════════════════════════════════════
+router.get('/activity', asyncH(async (req, res) => {
+  const where = [];
+  const params = [];
+  const add = (sql, v) => { params.push(v); where.push(sql.replace('$?', `$${params.length}`)); };
+  const showId = intOrNull(pick(req.query, 'show_id'));
+  const projectId = intOrNull(pick(req.query, 'project_id'));
+  const poId = intOrNull(pick(req.query, 'po_id'));
+  // POLISH_LIST #5: a job's own history — job.create, budget.line.*, and the
+  // job.number.confirm row that records the QuickBooks swap.
+  const jobId = intOrNull(pick(req.query, 'job_id'));
+  if (showId) add('show_id=$?', showId);
+  if (projectId) add('project_id=$?', projectId);
+  if (poId) add('po_id=$?', poId);
+  if (jobId) add('job_id=$?', jobId);
+  if (req.query.actor) add('actor=$?', req.query.actor);
+  let q = 'SELECT * FROM activity';
+  if (where.length) q += ' WHERE ' + where.join(' AND ');
+  params.push(limitOf(req, 100, 500));
+  q += ` ORDER BY created_at DESC, id DESC LIMIT $${params.length}`;
+  const r = await pool.query(q, params);
+  res.json(r.rows.map(dbToActivity));
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// PUSH TO SCHEDULER  (Showrunner show -> the staffing app)
+// ────────────────────────────────────────────────────────────────────────────
+// The field mapping now lives in lib/scheduler.js — ONE builder feeding both
+// paths, so the dry run shows byte-for-byte what the live push sends. That was
+// the whole point of keeping the dry run: it is the field-by-field source of
+// truth (SCHEMA.md's mapping table is generated from it).
+//
+// Punch H is RESOLVED, not flipped: the live path exists, but
+//   · it is session-only. An agent key still gets a 403 by route topology
+//     (AGENT_API §9 forbids publishing crew and bookings to an agent outright).
+//   · it is pm+ AND canEditProject.
+//   · with SCHEDULER_BASE_URL unset it is a 501 that names the missing var —
+//     the default posture, so nobody turns it on by accident.
+//   · it REFUSES rather than writes junk: no show name, no load-in date, or a
+//     crew name that does not match the staffing roster all abort with 422
+//     before a single byte crosses the wire (M6/M7/R23).
+// The auth model is programmatic login + 401 retry, NOT a static token: the
+// staffing app has no durable service credential and none is planned (§1.4.1,
+// R1). SCHEDULER_API_TOKEN is retired.
+// ════════════════════════════════════════════════════════════════════════════
+
+router.post('/shows/:id/push-to-scheduler', requireRole('pm'), asyncH(async (req, res) => {
+  const show = await loadShow(idParam(req));
+  if (!show) throw notFound('Show not found');
+  const project = await loadProject(show.project_id);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to push this show');
+
+  const force = !!pick(req.body, 'force');
+  if (show.scheduler_event_id && !force) {
+    throw conflict('Show already pushed to scheduler', {
+      schedulerEventId: show.scheduler_event_id,
+      hint: 'Pass { "force": true } to re-push (updates the linked event).'
+    });
+  }
+  const steps = (await pool.query('SELECT * FROM steps WHERE show_id=$1', [show.id])).rows;
+  const crew = (await pool.query('SELECT * FROM crew_assignments WHERE show_id=$1', [show.id])).rows;
+
+  // ── DRY RUN ───────────────────────────────────────────────────────────────
+  // Shows EXACTLY what live would send, including the travel legs that used to
+  // be missing entirely (M4). When the scheduler is reachable it also resolves
+  // crew names against the real roster so the operator sees the M6 problems
+  // here rather than discovering them mid-push.
+  if (!pick(req.body, 'live')) {
+    let roster = null;
+    let rosterNote = 'Crew names are NOT canonicalized in this dry run — the scheduler is not ' +
+                     'configured, so GET /api/roster could not be consulted (M6).';
+    if (schedulerCredentialed()) {
+      try { roster = await fetchRoster(); rosterNote = `Crew names checked against ${roster.length} roster rows.`; }
+      catch (e) { rosterNote = 'Roster lookup failed, so crew names are unchecked: ' + e.message; }
+    }
+    const payloads = buildSchedulerPayloads(project, show, steps, crew,
+      { roster, eventId: show.scheduler_event_id || null });
+    const problems = validateForPush(project, show, payloads, roster);
+    const base = process.env.SCHEDULER_BASE_URL || '<SCHEDULER_BASE_URL>';
+    return res.json({
+      dryRun: true,
+      note: 'No data sent. This is byte-for-byte what { "live": true } would send.',
+      ready: problems.length === 0,
+      problems,
+      rosterNote,
+      linkedEventId: show.scheduler_event_id || null,
+      targets: {
+        auth: 'POST ' + base + '/api/auth/login  (programmatic, 11h token cache, 401-retry)',
+        event: (show.scheduler_event_id ? 'PUT ' : 'POST ') + base + '/api/events' +
+               (show.scheduler_event_id ? '/' + show.scheduler_event_id + '  (read-modify-write)' : ''),
+        bookings: `POST /api/bookings  ×${payloads.bookings.length}`,
+        venueContacts: `POST /api/venue-contacts  ×${payloads.venueContacts.length}`,
+        clientContacts: `POST /api/client-contacts  ×${payloads.clientContacts.length}`,
+        travel: `POST /api/travel  ×${payloads.travel.length}  (upsert on travel_key)`,
+        childCleanup: 'DELETE the child ids recorded in shows.pushed_child_ids first (M8)'
+      },
+      payloads
+    });
+  }
+
+  // ── LIVE ──────────────────────────────────────────────────────────────────
+  if (!schedulerConfigured()) {
+    return res.status(501).json({
+      error: 'Live push to the scheduler is not configured.',
+      hint: 'Set SCHEDULER_BASE_URL (see .env.example), plus SCHEDULER_USER / SCHEDULER_PASS for the ' +
+            "dedicated 'showrunner' service account in the staffing app. SCHEDULER_API_TOKEN is retired — " +
+            'staffing sessions are in-memory with a 12h TTL, so a static token is dead within hours ' +
+            '(INTEGRATIONS_SPEC.md §1.4.1).'
+    });
+  }
+
+  const result = await pushShowToScheduler({
+    project, show, steps, crew,
+    tracked: show.pushed_child_ids || null,
+    // Persist the link the MOMENT the event exists. The fan-out is resumable,
+    // not atomic (§2.7): a failure past this point leaves a linked, partly
+    // populated event that a retry repairs, not an orphan a retry duplicates.
+    onEventId: async (eventId) => {
+      await pool.query(
+        'UPDATE shows SET scheduler_event_id=$1, scheduler_pushed_at=NOW(), updated_at=NOW() WHERE id=$2',
+        [eventId, show.id]);
+    }
+  });
+
+  await withTx(async (c) => {
+    await c.query(
+      `UPDATE shows SET scheduler_event_id=$1, pushed_child_ids=$2::jsonb, stage=$3,
+         scheduler_pushed_at=NOW(), updated_at=NOW() WHERE id=$4`,
+      [result.eventId, JSON.stringify(result.tracked),
+       show.stage === 'closed' ? show.stage : 'scheduled', show.id]);
+    await logActivity(c, {
+      projectId: project.id, showId: show.id, actor: req.actor,
+      action: 'scheduler.push',
+      detail: `${result.created ? 'created' : 'updated'} staffing event #${result.eventId} — ` +
+              `${result.counts.bookings} bookings, ${result.counts.venueContacts} venue contacts, ` +
+              `${result.counts.clientContacts} client contacts, ${result.counts.travel} travel legs`,
+      accent: true
+    });
+  });
+
+  res.json({
+    ok: true,
+    dryRun: false,
+    schedulerEventId: result.eventId,
+    created: result.created,
+    clientId: result.clientId,
+    counts: result.counts,
+    removed: result.removed,
+    crewNames: result.crewNames,
+    deepLink: `${process.env.SCHEDULER_BASE_URL.replace(/\/+$/, '')}/?event=${result.eventId}`
+  });
+}));
+
+module.exports = router;
+module.exports.instantiateTemplateOnShow = instantiateTemplateOnShow;
+module.exports.buildSchedulerPayloads = buildSchedulerPayloads;
+module.exports.deriveBookingCategory = deriveBookingCategory;
+module.exports.mapEventType = mapEventType;
+module.exports.hydrateProject = hydrateProject;
+module.exports.hydrateShow = hydrateShow;
+module.exports.notifyTargets = notifyTargets;

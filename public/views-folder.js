@@ -1,0 +1,937 @@
+/* ============================================================================
+   e360 SHOWRUNNER — SHOW VIEW (the tabbed per-show folder) + its tabs
+   ----------------------------------------------------------------------------
+   Renders whatever lanes the show's project TYPE declares — nothing here is
+   hardcoded to a lane set. A single-show folder auto-collapses straight into
+   this view (see app.js openFolder), so it reads exactly as the flat folder did.
+   ========================================================================== */
+
+/* ---------------------------------------------------------------- header -- */
+function viewShow(show, opts) {
+  opts = opts || {};
+  var p = show.project, r = rollup(show), chain = show.chain, gear = show.gear;
+  var single = p.single;
+  var title = single ? p.name : show.name;
+
+  var metas = (show.milestones || []).map(function (m, i) {
+    return '<div class="m"><div class="k">' + esc(m.label) + '</div><div class="val ' + (i === 0 ? 'tick' : '') + '">' + esc(fmtDate(m.date)) + '</div></div>';
+  }).join('');
+
+  /* proofs tab for print/both when proof data exists; bookings tab otherwise */
+  var hasProof = typeDef(show.type).lanes.some(function (l) { return l.key === 'proof'; }) && show.proofs && show.proofs.length;
+  var thirdTab = hasProof
+    ? '<button data-t="proofs">Proofs &amp; Approval <span class="n">' + show.proofs.length + '</span></button>'
+    : (show.bookings && show.bookings.length ? '<button data-t="bookings">Bookings <span class="n">' + show.bookings.length + '</span></button>' : '');
+  var hasDeliv = typeDef(show.type).lanes.some(function (l) { return l.key === 'deliverables'; });
+  var hasGear = typeDef(show.type).lanes.some(function (l) { return l.key === 'gear'; });
+  var specTab = hasDeliv ? '<button data-t="specs">Specs &amp; Chain' + (chainAnyStale(chain) ? ' <span class="n" style="color:var(--crit)">stale</span>' : '') + '</button>' : '';
+  var gearTab = hasGear ? '<button data-t="gear">Gear' + (gear.pulled ? ' <span class="n">' + gear.kit.pull.length + '</span>' : ' <span class="n">Flex</span>') + '</button>' : '';
+
+  /* the commercial dimension: which deal does this show bill to? */
+  var jobTag = jobChip(show.job);
+
+  /* money on this show: financial docs + expenses (the Financials tab) */
+  var finCount = show.files.filter(function (f) { return FIN_KINDS[f.kind]; }).length +
+    (show.expenses || []).length;
+  var finTab = '<button data-t="financials">Financials' + (finCount ? ' <span class="n">' + finCount + '</span>' : '') + '</button>';
+
+  /* photos live on their own tab (photo pass); Files counts documents only */
+  var phN = photoCount(show.id);
+  var phTab = '<button data-t="photos">Photos' + (phN ? ' <span class="n">' + phN + '</span>' : '') + '</button>';
+  var docN = show.files.filter(function (f) { return f.kind !== 'photo'; }).length;
+
+  /* the post-strike closeout deliverable (recap pass) — badge = its status */
+  var rec = recapForShow(show.id);
+  var recTab = '<button data-t="recap">Recap' + (rec
+    ? ' <span class="n"' + (rec.status === 'draft' ? ' style="color:var(--warn)"' : '') + '>' + esc(recapStatusMeta(rec).short) + '</span>'
+    : '') + '</button>';
+
+  var firstFile = show.files.length ? show.files[0].id : null;
+
+  /* schedule — the onsite call sheet; badge = how many scheduled days */
+  var schedDaysN = (show.schedule_items || []).length ? scheduleDays(show.id).length : 0;
+  var schedTab = '<button data-t="schedule">Schedule' + (schedDaysN ? ' <span class="n">' + schedDaysN + 'd</span>' : '') + '</button>';
+
+  return '<div class="ef-head">' +
+    '<div class="ef-top"><div>' +
+    '<div class="ef-title"><h1>' + esc(title) + '</h1>' + typeTag(show.type) + jobTag + ragPill(r.rag) + stagePill(show.stage) + '</div>' +
+    '<div class="ef-sub"><span>' + icon('users') + ' <b>' + esc(show.job ? show.job.client : p.client) + '</b></span>' +
+    '<span>' + icon('pin') + ' <b>' + esc(show.venue) + '</b></span>' +
+    '<span>Lead <b>' + esc(userName(show.owner)) + '</b></span>' +
+    '<span>On-site <b>' + esc(userName(show.on_site_poc)) + '</b></span></div>' +
+    '</div>' +
+    '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
+    (single ? '' : '<button class="btn ghost" ' + act('openFolder', p.id) + '>' + icon('folder') + 'Back to season</button>') +
+    (firstFile != null ? '<button class="btn ghost" ' + act('openViewer', firstFile) + '>' + icon('img') + 'Open in Viewer</button>' : '') +
+    '<button class="btn primary" ' + act('pushSched', show.id) + '>' + icon('send') + 'Push to Scheduler</button>' +
+    '</div></div>' +
+    '<div class="ef-meta">' + metas + '</div>' +
+    '</div>' +
+    '<div class="tabs" id="ftabs">' +
+    '<button data-t="overview" class="on">' + icon('grid') + 'Overview</button>' +
+    schedTab +
+    '<button data-t="pipeline">Pipeline <span class="n">' + r.total + '</span></button>' +
+    specTab + gearTab +
+    '<button data-t="files">Files <span class="n">' + docN + '</span></button>' +
+    phTab +
+    recTab +
+    finTab +
+    thirdTab +
+    '<button data-t="activity">Activity</button>' +
+    '</div>' +
+    '<div id="ftab"></div>';
+}
+
+function drawShowTab(show, t) {
+  var ft = $('#ftab'); if (!ft) return;
+  ft.innerHTML = t === 'overview' ? tabOverview(show)
+    : t === 'schedule' ? tabSchedule(show)
+    : t === 'pipeline' ? tabPipeline(show)
+    : t === 'specs' ? tabSpecs(show)
+    : t === 'gear' ? tabGear(show)
+    : t === 'files' ? tabFiles(show)
+    : t === 'photos' ? tabPhotos(show)
+    : t === 'recap' ? tabRecap(show)
+    : t === 'financials' ? tabFinancials(show)
+    : t === 'proofs' ? tabProofs(show)
+    : t === 'bookings' ? tabBookings(show)
+    : tabActivity(show);
+}
+function bindFolder(show) {
+  drawShowTab(show, 'overview');
+  document.querySelectorAll('#ftabs button').forEach(function (b) {
+    b.onclick = function () {
+      document.querySelectorAll('#ftabs button').forEach(function (x) { x.classList.remove('on'); });
+      b.classList.add('on');
+      drawShowTab(show, b.dataset.t);
+    };
+  });
+}
+function activeShowTab() { var b = document.querySelector('#ftabs button.on'); return b ? b.dataset.t : 'overview'; }
+function setFolderTab(tabKey) { var b = document.querySelector('#ftabs button[data-t="' + tabKey + '"]'); if (b) b.click(); }
+function refreshSpecTabBadge(show) {
+  var b = document.querySelector('#ftabs button[data-t="specs"]');
+  if (b) b.innerHTML = 'Specs &amp; Chain' + (chainAnyStale(show.chain) ? ' <span class="n" style="color:var(--crit)">stale</span>' : '');
+}
+
+/* -------------------------------------------------------------- overview -- */
+function tabOverview(show) {
+  var r = rollup(show);
+  var laneStat = laneSteps(show).map(function (x) {
+    var total = x.steps.length, d = x.steps.filter(function (s) { return normStatus(s.status) === 'done'; }).length;
+    var segs = total ? x.steps.map(function (s) { return '<i style="width:' + (100 / total) + '%;background:' + segColor(s) + '"></i>'; }).join('') : '<i style="width:100%;background:var(--surface-3)"></i>';
+    return '<div class="ls-row"><div class="nm">' + esc(x.lane.label) + '</div><div class="bar">' + segs + '</div><div class="frac">' + d + '/' + total + '</div></div>';
+  }).join('');
+
+  var openSteps = allSteps(show).filter(function (p) {
+    var s = normStatus(p.step.status); return s !== 'done' && s !== 'na';
+  }).sort(function (a, b) { return (a.step.due_date || '9999').localeCompare(b.step.due_date || '9999'); });
+
+  var nextOne = openSteps[0] || null;
+  var next = openSteps.slice(0, 5).map(function (p) {
+    return '<div class="next-item"><div class="txt">' + esc(p.step.title) + '<span>' + esc(p.lane.label) + ' · due ' + esc(fmtDate(p.step.due_date)) + '</span></div>' + statusPill(p.step.status) + ownerChip(p.step.owner) + '</div>';
+  }).join('') || '<div class="empty">All steps complete.</div>';
+
+  var biggest = r.blocked.length ? r.blocked[0] : (r.risk.length ? r.risk[0] : null);
+  var ragCol = { go: 'var(--go)', warn: 'var(--warn)', crit: 'var(--crit)', idle: 'var(--idle)' }[r.rag];
+
+  var health = '<div class="health"><div class="hrag" style="background:' + ragCol + '"></div>' +
+    '<div class="hbig">' + ragPill(r.rag) + '<div class="hp" style="color:' + ragCol + '">' + r.pct + '%</div><div class="hsub">' + r.done + ' / ' + r.total + ' steps done</div></div>' +
+    '<div class="hmet">' +
+    '<div class="hm"><div class="k">Blocked</div><div class="v" style="color:' + (r.blocked.length ? 'var(--crit)' : 'var(--text-2)') + '">' + r.blocked.length + '</div></div>' +
+    '<div class="hm"><div class="k">Late / overdue</div><div class="v" style="color:' + (r.late.length ? 'var(--warn)' : 'var(--text-2)') + '">' + r.late.length + '</div></div>' +
+    '<div class="hm"><div class="k">Next up</div><div class="v sm">' + (nextOne ? esc(nextOne.step.title) + ' <span style="color:var(--muted);font-weight:500">· ' + esc(fmtDate(nextOne.step.due_date)) + '</span>' : '—') + '</div></div>' +
+    '<div class="hm"><div class="k">Biggest risk</div><div class="v sm" style="color:' + (biggest ? 'var(--crit)' : 'var(--text-2)') + '">' + (biggest ? esc(biggest.step.title) : 'None — on track') + '</div></div>' +
+    '</div></div>';
+
+  var lateList = r.late.length ? '<div class="panel"><h3>Blocked &amp; late · ' + r.late.length + '</h3><div class="next-list">' +
+    r.late.slice(0, 6).map(function (p) {
+      var why = normStatus(p.step.status) === 'blocked' ? '<span class="pill crit"><span class="dot"></span>Blocked</span>'
+        : (p.step.risk ? '<span class="pill warn"><span class="dot"></span>At risk</span>' : '<span class="pill crit"><span class="dot"></span>Overdue</span>');
+      return '<div class="next-item"><div class="txt">' + esc(p.step.title) + '<span>' + esc(p.lane.label) + ' · due ' + esc(fmtDate(p.step.due_date)) + '</span></div>' + why + ownerChip(p.step.owner) + '</div>';
+    }).join('') + '</div></div>' : '';
+
+  var nx = showNext(show);
+  /* budget burn for the show's job — visible to everyone (margin is not) */
+  var jfin = show.default_job_id ? financeForJob(show.default_job_id) : null;
+  var burnRow = jfin && jfin.budget_total
+    ? '<div class="g"><span class="k">Job budget burn</span><span class="mono" style="color:' + burnColor(jfin.burnPct) + '">' +
+      Math.round(jfin.burnPct) + '% · ' + esc(fmtMoney(jfin.actual)) + '</span></div>'
+    : '';
+  var glance = '<div class="glance">' +
+    '<div class="g"><span class="k">Overall</span>' + ragPill(r.rag) + '</div>' +
+    '<div class="g"><span class="k">Steps done</span><span class="mono">' + r.done + ' / ' + r.total + ' (' + r.pct + '%)</span></div>' +
+    '<div class="g"><span class="k">Blocked</span><span class="mono" style="color:' + (r.blocked.length ? 'var(--crit)' : 'var(--text-2)') + '">' + r.blocked.length + '</span></div>' +
+    '<div class="g"><span class="k">At risk</span><span class="mono" style="color:' + (r.risk.length ? 'var(--warn)' : 'var(--text-2)') + '">' + r.risk.length + '</span></div>' +
+    '<div class="g"><span class="k">Biggest risk</span><span style="color:var(--crit);font-weight:600;text-align:right;max-width:150px">' + (biggest ? esc(biggest.step.title) : '—') + '</span></div>' +
+    '<div class="g"><span class="k">Next milestone</span><span class="mono">' + esc(nx.v) + '</span></div>' +
+    '<div class="g"><span class="k">Billed to</span><span class="mono">' + esc(show.job ? show.job.qb_job_number : '—') + '</span>' + dealTag(show.job) + '</div>' +
+    burnRow +
+    '</div>';
+
+  var summary = show.summary || show.project.summary || '';
+  var source = show.source || show.project.source || '';
+
+  return health + poRiskStrip(show) + '<div class="ov">' +
+    '<div style="display:flex;flex-direction:column;gap:16px">' +
+    '<div class="panel"><h3>Status by lane · ' + esc(typeLabel(show.type)) + '</h3><div class="lane-status">' + laneStat + '</div></div>' +
+    lateList +
+    '<div class="panel"><h3>Next up</h3><div class="next-list">' + next + '</div></div>' +
+    '</div>' +
+    '<div style="display:flex;flex-direction:column;gap:16px">' +
+    '<div class="panel summary"><div class="sig">' + icon('bolt') + 'AI summary</div><p>' + esc(summary) + '</p><div class="src">' + esc(source) + '</div></div>' +
+    photoStrip(show) +
+    recapOverviewLine(show) +
+    '<div class="panel"><h3>At a glance</h3>' + glance + '</div>' +
+    /* the show's conversation layer — anchored notes (notes pass) */
+    notesPanel('show', show.id, { collapse: 2 }) +
+    '</div>' +
+    '</div>';
+}
+
+/* ============================================================ schedule --
+   The onsite call sheet, live: day-by-day schedule timeline · crew with
+   flights + hotels · phone-ready POCs · "my day" filter · print path.
+   Phone-first: everything here must survive a 390px screen at 6am.
+   ========================================================================== */
+var SCHED_UI = { day: {}, my: false };
+
+function schedSelectedDay(show, days) {
+  var pick = SCHED_UI.day[show.id];
+  if (pick && days.indexOf(pick) >= 0) return pick;
+  if (days.indexOf(TODAY_ISO) >= 0) return TODAY_ISO;
+  var up = days.filter(function (d) { return d >= TODAY_ISO; });
+  return up[0] || days[days.length - 1];
+}
+function schedWhoChips(item) {
+  var w = item.who;
+  if (w === 'all' || w == null) return '<span class="sched-who">' + inlineIcon('users') + 'All crew</span>';
+  if (Object.prototype.toString.call(w) === '[object Array]') {
+    return w.map(function (u) {
+      return ROSTER[u] ? '<span class="sched-who">' + av(u) + esc(firstName(u)) + '</span>' : '<span class="sched-who">' + esc(u) + '</span>';
+    }).join('');
+  }
+  return '<span class="sched-who">' + inlineIcon('bolt') + esc(ROLES[w] ? ROLES[w].name + 's' : String(w)) + '</span>';
+}
+function schedItemHTML(item, editable, nowHM, isToday) {
+  var k = SCHED_KINDS[item.kind] || SCHED_KINDS.work;
+  var past = isToday && nowHM && item.start_time < nowHM;
+  var edit = editable
+    ? '<button class="iconbtn sched-edit" title="Edit item" ' + act('schedEdit', item.id) + '>' + icon('pencil') + '</button>' : '';
+  return '<div class="sched-item' + (past ? ' past' : '') + '">' +
+    '<div class="sched-time">' + esc(fmtHM(item.start_time)) + (item.end_time ? '<span>–' + esc(fmtHM(item.end_time)) + '</span>' : '') + '</div>' +
+    '<span class="sched-dot" style="background:' + esc(k.color) + '" title="' + esc(k.label) + '"></span>' +
+    '<div class="sched-body"><div class="sched-tt"><b>' + esc(item.title) + '</b>' + edit + '</div>' +
+    (item.detail ? '<div class="sched-detail">' + esc(item.detail) + '</div>' : '') +
+    '<div class="sched-meta">' + schedWhoChips(item) +
+    (item.location ? '<span class="sched-loc">' + inlineIcon('pin') + esc(item.location) + '</span>' : '') +
+    '</div></div></div>';
+}
+function schedPocCard(kind, name, sub, phone) {
+  return '<div class="poc-card"><div class="poc-t"><span>' + esc(kind) + '</span><b>' + esc(name) + '</b>' +
+    (sub ? '<i>' + esc(sub) + '</i>' : '') + '</div>' +
+    (phone ? '<a class="btn sm poc-tel" href="' + esc(telHref(phone)) + '">' + icon('phone') + esc(phone) + '</a>' : '') + '</div>';
+}
+function schedCrewCard(c, show) {
+  var t = c.travel;
+  var isMe = c.username === ME;
+  var head = '<div class="cc-h">' +
+    (c.username ? av(c.username) : '<span class="avatar" style="background:var(--surface-3);color:var(--text-2)">' + esc((c.name || '?').split(' ').map(function (w) { return w[0]; }).join('').slice(0, 2).toUpperCase()) + '</span>') +
+    '<div class="cc-n"><b>' + esc(crewName(c)) + (isMe ? ' <span class="mini auto">you</span>' : '') + '</b><span>' + esc(c.role_on_site) + (c.username ? '' : ' · local') + '</span></div>' +
+    '<span class="cc-call" title="Call time">' + inlineIcon('clock') + esc(fmtHM(c.call_time)) + '</span></div>';
+  var rows = '';
+  if (t) {
+    rows += '<div class="cc-row">' + inlineIcon('send') + '<div><b>In</b> ' + esc(legLine(t.out)) +
+      (t.out && t.out.record_locator ? ' <span class="mono cc-conf">' + esc(t.out.record_locator) + '</span>' : '') + '</div></div>';
+    rows += '<div class="cc-row">' + inlineIcon('send') + '<div><b>Out</b> ' + esc(legLine(t.back)) +
+      (t.back && t.back.record_locator ? ' <span class="mono cc-conf">' + esc(t.back.record_locator) + '</span>' : '') + '</div></div>';
+    if (t.hotel) rows += '<div class="cc-row">' + inlineIcon('moon') + '<div><b>' + esc(t.hotel.name) + '</b> · conf <span class="mono cc-conf">' + esc(t.hotel.conf) + '</span>' +
+      '<span class="cc-sub">' + esc(t.hotel.address) + ' · ' + esc(fmtDate(t.hotel.checkin)) + '–' + esc(fmtDate(t.hotel.checkout)) + '</span></div></div>';
+  } else {
+    rows += '<div class="cc-row cc-localrow">' + inlineIcon('pin') + '<div>Local crew — no travel booked</div></div>';
+  }
+  var ph = crewPhone(c);
+  if (ph) rows += '<div class="cc-row"><a class="cc-tel" href="' + esc(telHref(ph)) + '">' + inlineIcon('phone') + esc(ph) + '</a></div>';
+  return '<div class="crewcard' + (isMe ? ' me' : '') + '">' + head + rows + '</div>';
+}
+
+function tabSchedule(show) {
+  var editable = canEditSchedule(show);
+  var items = scheduleForShow(show.id), days = scheduleDays(show.id), crew = crewForShow(show.id);
+  var poc = ROSTER[show.on_site_poc] || null;
+  var title = showLabel(show);
+
+  /* ---- empty state — most shows start here ------------------------------- */
+  if (!items.length) {
+    return '<div class="gear-empty">' + icon('cal') +
+      '<div style="font-weight:600;font-size:14px">No schedule yet</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:460px;margin-left:auto;margin-right:auto;line-height:1.5">The day-by-day call sheet for onsite crew — load-in times, everyone’s flights and hotels, POCs and the schedule. Generate a starting point from the ' + esc(typeLabel(show.type)) + ' template, or build it by hand.</div>' +
+      '<div style="display:flex;gap:9px;justify-content:center;margin-top:16px;flex-wrap:wrap">' +
+      '<button class="btn primary" ' + toastAttrs('Generate from template', 'Seeds load-in / show / strike days from the ' + typeLabel(show.type) + ' template — modeled') + '>' + icon('bolt') + 'Generate from template</button>' +
+      (editable ? '<button class="btn ghost" ' + act('schedAdd', show.id) + '>' + icon('plus') + 'Add first item</button>' : '') +
+      '</div></div>';
+  }
+
+  var day = schedSelectedDay(show, days);
+  var isToday = day === TODAY_ISO;
+  var nowHM = null;
+  if (isToday) { var nd = new Date(); nowHM = (nd.getHours() < 10 ? '0' : '') + nd.getHours() + ':' + (nd.getMinutes() < 10 ? '0' : '') + nd.getMinutes(); }
+
+  /* ---- header strip: the four times + radio + dress ---------------------- */
+  var strip = '<div class="gtotals sched-strip">' +
+    [['Load-in', show.load_in_time], ['Doors', show.doors_time], ['Show', show.event_time], ['Strike', show.strike_time]].map(function (t) {
+      return '<div class="gt"><div class="k">' + esc(t[0]) + '</div><div class="v mono">' + esc(fmtHM(t[1])) + '</div></div>';
+    }).join('') +
+    (show.radio_channel ? '<div class="gt"><div class="k">Radio</div><div class="v" style="font-size:15px;padding-top:5px">' + esc(show.radio_channel) + '</div></div>' : '') +
+    (show.dress_code ? '<div class="gt"><div class="k">Dress</div><div class="v" style="font-size:13px;padding-top:7px;font-family:var(--font-body);font-weight:600">' + esc(show.dress_code) + '</div></div>' : '') +
+    '</div>';
+  var venueLine = '<div class="hint" style="margin:-6px 0 14px">' + icon('pin') + '<span><b>' + esc(show.venue) + '</b>' +
+    (show.venue_address ? ' — ' + esc(show.venue_address) : '') +
+    (show.parking_notes ? ' · ' + esc(show.parking_notes) : '') + '</span></div>';
+
+  /* ---- day chips + my-day + actions -------------------------------------- */
+  var chips = days.map(function (d) {
+    var tag = schedDayTag(show, d);
+    return '<button class="daychip' + (d === day ? ' on' : '') + (d === TODAY_ISO ? ' today' : '') + '" ' + act('schedDay', show.id, d) + '>' +
+      '<b>' + esc(fmtDayDate(d)) + '</b>' + (tag ? '<span>' + esc(tag) + '</span>' : '') +
+      (d === TODAY_ISO ? '<span class="td-dot"></span>' : '') + '</button>';
+  }).join('');
+  var bar = '<div class="sched-bar">' +
+    '<div class="daychips">' + chips + '</div>' +
+    '<span style="flex:1"></span>' +
+    '<button class="btn sm ' + (SCHED_UI.my ? 'primary' : 'ghost') + '" ' + act('schedMyDay', show.id) + ' title="Just my items + my travel">' + icon('check') + 'My day</button>' +
+    (editable ? '<button class="btn sm ghost" ' + act('schedAdd', show.id) + '>' + icon('plus') + 'Add item</button>' : '') +
+    '<button class="btn sm ghost" ' + act('schedPreview', show.id) + '>' + icon('eye') + 'Sheet</button>' +
+    '<button class="btn sm primary" ' + act('schedPrint', show.id) + '>' + icon('print') + 'Print call sheet</button>' +
+    '</div>';
+
+  /* ---- timeline for the selected day ------------------------------------- */
+  var dayItems = items.filter(function (it) { return it.day === day; });
+  if (SCHED_UI.my) dayItems = dayItems.filter(function (it) { return schedItemFor(it, ME); });
+  var tl = '';
+  var nowPlaced = !isToday;
+  dayItems.forEach(function (it) {
+    if (!nowPlaced && it.start_time >= nowHM) {
+      tl += '<div class="sched-now"><span>Now · ' + esc(fmtHM(nowHM)) + '</span></div>';
+      nowPlaced = true;
+    }
+    tl += schedItemHTML(it, editable, nowHM, isToday);
+  });
+  if (!nowPlaced) tl += '<div class="sched-now"><span>Now · ' + esc(fmtHM(nowHM)) + '</span></div>';
+  if (!dayItems.length) tl = '<div class="empty" style="padding:24px">' + (SCHED_UI.my ? 'Nothing on your sheet for this day — you’re clear.' : 'Nothing scheduled this day yet.') + '</div>';
+  var legend = SCHED_KIND_ORDER.map(function (k) {
+    return '<span class="rl"><b style="background:' + esc(SCHED_KINDS[k].color) + '"></b>' + esc(SCHED_KINDS[k].label) + '</span>';
+  }).join('');
+  var tag = schedDayTag(show, day);
+  var tlPanel = '<div class="panel"><h3>' + esc(fmtDayDate(day)) + (tag ? ' · ' + esc(tag) : '') +
+    (SCHED_UI.my ? ' · <span style="color:var(--accent)">my day</span>' : '') + '</h3>' +
+    '<div class="sched-list">' + tl + '</div>' +
+    '<div class="rag-legend" style="margin-top:14px">' + legend + '</div></div>';
+
+  /* ---- right rail: my call · POCs · weather ------------------------------ */
+  var mine = crewFor(show.id, ME);
+  var myCard = mine
+    ? '<div class="panel sched-me"><h3>Your day</h3><div class="glance">' +
+      '<div class="g"><span class="k">Call time</span><span class="mono" style="color:var(--accent);font-weight:600">' + esc(fmtHM(mine.call_time)) + '</span></div>' +
+      '<div class="g"><span class="k">Role on site</span><span style="font-weight:600">' + esc(mine.role_on_site) + '</span></div>' +
+      (mine.travel ? '<div class="g"><span class="k">In</span><span class="mono" style="font-size:11.5px;text-align:right">' + esc(legLine(mine.travel.out)) + '</span></div>' +
+        '<div class="g"><span class="k">Out</span><span class="mono" style="font-size:11.5px;text-align:right">' + esc(legLine(mine.travel.back)) + '</span></div>' +
+        (mine.travel.hotel ? '<div class="g"><span class="k">Hotel</span><span style="font-size:12px;text-align:right">' + esc(mine.travel.hotel.name) + ' · <span class="mono">' + esc(mine.travel.hotel.conf) + '</span></span></div>' : '')
+        : '<div class="g"><span class="k">Travel</span><span style="color:var(--muted)">local — no travel</span></div>') +
+      '</div></div>'
+    : '';
+  var pocPanel = '<div class="panel"><h3>Points of contact</h3><div class="poc-list">' +
+    (poc ? schedPocCard('On-site lead', poc.name, poc.title, poc.phone) : '') +
+    (show.venue_poc ? schedPocCard('Venue', show.venue_poc.name, show.venue_poc.title, show.venue_poc.phone) : '') +
+    (show.client_poc ? schedPocCard('Client', show.client_poc.name, show.client_poc.title, show.client_poc.phone) : '') +
+    '</div><div class="perm-note">' + inlineIcon('phone') + ' Tap a number to call — this panel is the 6am problem-solver.</div></div>';
+  var weather = '<div class="hint" style="margin-top:0">' + icon('sun') + '<span><b>Weather</b> — forecast lands with the live backend; check radar before an outdoor load-in.</span></div>';
+
+  /* ---- crew grid ---------------------------------------------------------- */
+  var crewShown = SCHED_UI.my && mine ? [mine] : crew;
+  var crewPanel = crew.length
+    ? '<div class="panel" style="margin-top:16px"><h3>Crew on site · ' + crewShown.length + (SCHED_UI.my ? ' of ' + crew.length : '') + '</h3>' +
+      '<div class="sched-crew">' + crewShown.map(function (c) { return schedCrewCard(c, show); }).join('') + '</div>' +
+      '<div class="perm-note">' + inlineIcon('send') + ' Travel reads back from the staffing app (travel_info + hotel bookings) once promoted — one record, both systems.</div></div>'
+    : '';
+
+  return strip + venueLine + bar +
+    '<div class="ov sched-ov">' + tlPanel +
+    '<div style="display:flex;flex-direction:column;gap:16px">' + myCard + pocPanel + weather + '</div></div>' +
+    crewPanel;
+}
+
+/* -------------------------------------------------------------- pipeline -- */
+var ATTACH_LANES = { deliverables: 1, proof: 1, approval: 1, design: 1, production: 1, tracking: 1 };
+function taskCard(lane, s) {
+  var isDone = normStatus(s.status) === 'done';
+  var flag = s.auto_source && s.auto_source !== 'none' ? 'auto' : (s.depends_on ? 'dep' : '');
+  var mini = flag ? '<span class="mini ' + flag + '">' + (flag === 'auto' ? 'auto-gen' : 'depends') + '</span>' : '';
+  var lateCls = (normStatus(s.status) === 'blocked' || s.risk || isOverdue(s)) ? 'late' : '';
+  var pill = isDone ? '' : (s.risk ? '<span class="pill warn"><span class="dot"></span>At risk</span>' : statusPill(s.status));
+  var attach = ATTACH_LANES[lane.key] ? '<button class="attachbtn" title="Attach a file to this step" ' + act('attachStep', s.id) + '>' + icon('link') + '</button>' : '';
+  /* anchored thread on the step (notes pass): count chip -> inline expand */
+  var nN = noteCount('step', s.id);
+  var noteBtn = '<button class="cchip' + (nN ? ' has' : '') + '" title="' + (nN ? nN + ' note' + (nN === 1 ? '' : 's') + ' on this step' : 'Add a note to this step') + '" ' +
+    act('noteToggleStep', s.id) + '>' + icon('chat') + (nN ? '<span>' + nN + '</span>' : '') + '</button>';
+  var thread = NOTES_UI.openSteps[s.id]
+    ? '<div class="task-thread">' + notesThread('step', s.id) + '</div>' : '';
+  return '<div class="task ' + (isDone ? 'done' : '') + '">' +
+    '<div class="tt"><div class="chk" ' + act('toggleStep', s.id) + '>' + icon('check') + '</div><div class="txt">' + esc(s.title) + '</div></div>' +
+    '<div class="tm">' + pill + '<span class="due ' + lateCls + '">' + esc(fmtDate(s.due_date)) + '</span>' + mini + noteBtn + attach + '<span style="flex:1"></span>' + assignableOwner(s) +
+    '</div>' + thread + '</div>';
+}
+function tabPipeline(show) {
+  var lanes = laneSteps(show).map(function (x) {
+    var done = x.steps.filter(function (s) { return normStatus(s.status) === 'done'; }).length;
+    var body = x.steps.length ? x.steps.map(function (s) { return taskCard(x.lane, s); }).join('') : '<div class="lane-empty">no steps yet</div>';
+    return '<div class="lane"><div class="lane-h"><span class="ld" style="background:' + esc(x.lane.color) + '"></span><b>' + esc(x.lane.label) + '</b><span class="frac">' + done + '/' + x.steps.length + '</span></div><div class="lane-b">' + body + '</div></div>';
+  }).join('');
+  return '<div class="lanes">' + lanes + '</div>';
+}
+
+/* --------------------------------------------------- specs & chain tab ---- */
+function chainStrip(show) {
+  var chain = show.chain;
+  var nodes = [{ k: 'content', cx: '.e360', cn: 'Content spec', tool: 'Spec Sheet Gen' },
+    { k: 'cabling', cx: '.nsf', cn: 'Data cabling', tool: 'NovaSpec' },
+    { k: 'power', cx: '.pcfg', cn: 'Power', tool: 'PowerSpec' },
+    { k: 'pull', cx: 'pull sheet', cn: 'Flex gear list', tool: 'Flex' }];
+  var html = nodes.map(function (nd, i) {
+    var n = chain[nd.k], up = CHAIN_UP[nd.k], upgen = up ? chain[up].gen : true, stale = isStale(chain, nd.k);
+    var cls = !n.gen ? 'ungen' : (stale ? 'stale' : '');
+    /* FIX (was '<span class="cs">awaiting '+st[up]+'</span>' -> [object Object]) */
+    var status = !n.gen
+      ? (upgen ? '<span class="cs">ready to generate</span>' : '<span class="cs">awaiting ' + esc(CHAIN_LABEL[up]) + '</span>')
+      : stale
+        ? '<span class="stale-chip">' + icon('alert') + 'stale · built vs rev ' + n.derivedRev + ', upstream ' + chain[up].rev + '</span>'
+        : '<span class="fresh-chip">in sync · rev ' + n.rev + '</span>';
+    var meta = n.gen ? ('v' + n.rev + ' · ' + firstName(n.by) + ' · ' + fmtDate(n.when)) : (upgen ? 'not generated' : 'blocked upstream');
+    var btns;
+    if (nd.k === 'pull') {
+      btns = '<button class="btn sm ghost" ' + act('gotoTab', null, 'gear') + '>' + icon('box') + (n.gen ? 'Gear tab' : 'Pull in Gear') + '</button>';
+    } else if (!n.gen) {
+      btns = upgen ? '<button class="btn sm primary" ' + act('specGen', show.id, nd.k) + '>' + icon('bolt') + 'Generate</button>' : '<span class="cs">generate upstream first</span>';
+    } else {
+      btns = '<button class="btn sm ' + (stale ? 'primary' : 'ghost') + '" ' + act('specGen', show.id, nd.k) + '>' + icon('refresh') + (stale ? 'Regenerate' : 'Regen') + '</button>' +
+        '<button class="btn sm ghost" ' + act('openChainFile', show.id, nd.k) + '>' + icon('eye') + 'View</button>';
+    }
+    var arrow = i < nodes.length - 1 ? '<div class="carrow">' + icon('chevR') + '</div>' : '';
+    return '<div class="cnode ' + cls + '"><div class="ct"><span class="cx">' + esc(nd.cx) + '</span><span class="cn">' + esc(nd.cn) + '</span></div>' +
+      '<div class="cs">' + esc(nd.tool) + ' · ' + esc(meta) + '</div><div>' + status + '</div><div class="cbtns">' + btns + '</div></div>' + arrow;
+  }).join('');
+  return '<div class="chain">' + html + '</div>';
+}
+function tabSpecs(show) {
+  var stale = chainAnyStale(show.chain);
+  return '<div class="callout"><div class="ci">' + icon('layers') + '</div><div><b>Generate a spec, and it binds to this folder</b>' +
+    '<p>The three generators produce a <b>derivation chain</b>: content <code>.e360</code> derives cabling <code>.nsf</code>, which derives power <code>.pcfg</code>, which derives the Flex <b>pull sheet</b>. Each generated spec caches a render bundle to the DB (viewable + printable by anyone) with the source file on the NAS.</p></div></div>' +
+    (stale ? '<div class="hint" style="margin:-6px 0 16px;color:var(--crit)">' + icon('alert') + '<b>Stale downstream specs</b> — an upstream spec was regenerated. Re-generate the flagged nodes so cabling / power / pull sheet match the current content revision.</div>' : '') +
+    '<div class="panel" style="margin-bottom:16px"><h3>Derivation chain — content → cabling → power → pull sheet</h3>' + chainStrip(show) +
+    '<div class="perm-note">' + inlineIcon('bolt') + ' Regenerating any upstream spec bumps its revision, which flags every downstream artifact <b>stale</b> until re-generated. Mirrors the staffing spec columns (<span class="mono">e360_spec_* / nsf_* / pcfg_*</span>) + rev-based stale-flagging.</div></div>' +
+    '<div class="panel"><h3>Two-tier storage</h3>' + twoTier(show) + '</div>';
+}
+
+/* ------------------------------------------------------------- gear tab --- */
+function tabGear(show) {
+  var g = show.gear, chain = show.chain;
+  var linkState = g.linked
+    ? '<b>Linked · Flex Event Folder</b><span>element ' + esc(g.elementId || '') + ' · ' + esc(g.pulled ? ('gear list ' + g.docNumber + ' attached') : 'no gear list attached') + '</span>'
+    : '<b>Not linked to Flex</b><span>Create or link an Event Folder, then pull its Pull Sheet + Manifest</span>';
+  var actions = g.linked
+    ? '<button class="btn ghost" ' + toastAttrs('View in Flex', 'f5/ui/#element/' + (g.elementId || '').slice(0, 8) + '…') + '>' + icon('link') + 'View in Flex</button>' +
+      '<button class="btn primary" ' + act('flexPull', show.id) + '>' + icon('download') + (g.pulled ? 'Re-pull from Flex' : 'Pull from Flex') + '</button>'
+    : '<button class="btn ghost" ' + act('flexLink', show.id) + '>' + icon('link') + 'Link existing</button>' +
+      '<button class="btn primary" ' + act('flexCreate', show.id) + '>' + icon('folder') + 'Create Flex Folder</button>';
+  var flexbar = '<div class="flexbar"><div class="fi">' + icon('box') + '</div><div class="fx">' + linkState + '</div><div class="fa">' + actions + '</div></div>';
+  var note = '<div class="hint" style="margin:-4px 0 14px">' + icon('bolt') + '<b>Modeled</b> — live Flex wiring is deploy-time. Real path: <span class="mono">create-element</span> → <span class="mono">available-gear-lists</span> → <span class="mono">attach-gear-list</span> under the <span class="mono">/f5</span> prefix, auth <span class="mono">X-Auth-Token</span>, UTC-<span class="mono">Z</span> dates (probe-verified).</div>';
+  if (!g.pulled) {
+    return flexbar + note + poGearStrip(show) + '<div class="gear-empty">' + icon('box') + '<div style="font-weight:600;font-size:14px">No gear list pulled yet</div><div style="font-size:12.5px;margin-top:7px;max-width:440px;margin-left:auto;margin-right:auto;line-height:1.5">Once the Flex Event Folder is linked, <b>Pull from Flex</b> walks the folder tree, identifies the Pull Sheet + Manifest by definition ID, and caches them here — viewable and printable by anyone with folder access.</div></div>';
+  }
+  var vk = g.view === 'manifest' ? 'manifest' : 'pull';
+  var toggle = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px"><div class="gear-toggle">' +
+    '<button class="' + (g.view === 'pull-sheet' ? 'on' : '') + '" ' + act('gearView', show.id, 'pull-sheet') + '>' + icon('box') + 'Pull Sheet</button>' +
+    '<button class="' + (g.view === 'manifest' ? 'on' : '') + '" ' + act('gearView', show.id, 'manifest') + '>' + icon('truck') + 'Manifest</button></div>' +
+    '<span style="flex:1"></span>' +
+    '<button class="btn sm ghost" ' + act('openChainFile', show.id, vk) + '>' + icon('eye') + 'Open in Viewer</button>' +
+    '<button class="btn sm primary" ' + act('printChainFile', show.id, vk) + '>' + icon('print') + 'Print</button></div>';
+  var pd = chain.power.gen
+    ? (isStale(chain, 'pull') ? '<span class="stale-chip">' + icon('alert') + 'stale vs .pcfg — re-pull</span>' : '<span class="fresh-chip">in sync with .pcfg</span>')
+    : '<span class="cs">not yet derived from a .pcfg power spec</span>';
+  var deriveLine = '<div class="perm-note" style="margin:0 0 12px">' + inlineIcon('server') + ' Gear count derives from the power layout — ' + pd + '</div>';
+  var body = g.view === 'manifest' ? manifestBody(g) : pullBody(g);
+  return flexbar + note + poGearStrip(show) + toggle + deriveLine + body;
+}
+function pullBody(g) {
+  var lines = g.kit.pull.reduce(function (a, c) { return a + c.items.length; }, 0);
+  var units = g.kit.pull.reduce(function (a, c) { return a + c.items.reduce(function (x, i) { return x + i.qty; }, 0); }, 0);
+  var totals = '<div class="gtotals"><div class="gt"><div class="k">Categories</div><div class="v">' + g.kit.pull.length + '</div></div>' +
+    '<div class="gt"><div class="k">Line items</div><div class="v">' + lines + '</div></div>' +
+    '<div class="gt"><div class="k">Total units</div><div class="v">' + units + '</div></div>' +
+    '<div class="gt"><div class="k">Gear list</div><div class="v" style="font-size:15px">' + esc(g.docNumber) + '</div></div></div>';
+  var cats = g.kit.pull.map(function (c) {
+    var items = c.items.map(function (it) { return '<div class="gitem"><span class="gnm">' + esc(it.name) + '</span><span class="gid">' + esc(it.resourceId) + '</span><span class="gqty">× ' + esc(it.qty) + '</span></div>'; }).join('');
+    return '<div class="gcat"><div class="gch"><b>' + esc(c.cat) + '</b><span class="gn">' + c.items.length + ' line' + (c.items.length > 1 ? 's' : '') + '</span></div>' + items + '</div>';
+  }).join('');
+  return totals + '<div style="margin-top:12px">' + cats + '</div>';
+}
+function manifestBody(g) {
+  var rows = g.kit.manifest.map(function (m) {
+    return '<tr><td><b style="font-weight:600">' + esc(m.case) + '</b>' + (m.loose ? ' <span class="ser">loose</span>' : '') + '</td><td class="mono">' + esc(m.size) + '</td><td class="mono">' + esc(m.weight) + ' lb</td><td style="color:var(--muted)">' + esc(m.contents) + '</td></tr>';
+  }).join('');
+  var totW = g.kit.manifest.reduce(function (a, m) { return a + m.weight; }, 0);
+  var heaviest = g.kit.manifest.reduce(function (a, m) { return Math.max(a, m.weight); }, 0);
+  return '<div class="gtotals" style="margin-top:0;margin-bottom:12px"><div class="gt"><div class="k">Flight cases</div><div class="v">' + g.kit.manifest.length + '</div></div>' +
+    '<div class="gt"><div class="k">Total weight</div><div class="v">' + esc(totW.toLocaleString()) + ' <small style="font-size:12px;color:var(--muted)">lb</small></div></div>' +
+    '<div class="gt"><div class="k">Heaviest case</div><div class="v">' + heaviest + ' lb</div></div>' +
+    '<div class="gt"><div class="k">Cabinet cases</div><div class="v">' + g.kit.cabCases + '</div></div></div>' +
+    '<div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Flight case</th><th>Dimensions</th><th>Weight</th><th>Contents</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>' +
+    '<div class="hint">' + icon('bolt') + 'Case manifest for logistics + storage planning — the count owed on calls like the STL manifest. On push it rides the packet as the Flex Manifest gear list.</div>';
+}
+
+/* ------------------------------------------------------------- files tab -- */
+/* documents only — photos have their own gallery tab next door (photo pass) */
+function tabFiles(show) {
+  var docs = show.files.filter(function (f) { return f.kind !== 'photo'; });
+  var phN = photoCount(show.id);
+  var cards = docs.map(function (f) {
+    return '<button class="file" ' + act('openViewer', f.id) + '>' +
+      '<div class="thumb">' + icon(fileIcon(f)) + '<span class="ext">' + esc(f.ext) + '</span></div>' +
+      '<div class="fb"><b>' + esc(f.name) + '</b><span>' + esc(f.meta) + '</span></div></button>';
+  }).join('');
+  return recapFilesBlock(show) +
+    '<div class="files-head"><h3>Files · ' + docs.length + '</h3>' +
+    '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
+    (phN ? '<button class="btn ghost" ' + act('gotoTab', null, 'photos') + '>' + icon('cam') + phN + ' photo' + (phN === 1 ? '' : 's') + '</button>' : '') +
+    '<button class="btn primary" ' + act('addFile', show.id) + '>' + icon('plus') + 'Add file</button></div></div>' +
+    '<div class="dz" ' + act('addFile', show.id) + ' data-drop="' + show.id + '">' +
+    '<div class="dzi">' + icon('download') + '</div><b>Drop files here or click to browse</b><span>PDF · proof · contract · image · spec — modeled, stored on the e360 NAS</span></div>' +
+    '<div class="file-grid">' + cards +
+    '<button class="file" ' + act('addFile', show.id) + ' style="border-style:dashed"><div class="thumb">' + icon('plus') + '</div><div class="fb"><b>Add file</b><span>click to browse</span></div></button></div>' +
+    '<div class="hint">' + icon('bolt') + 'Click any file to open it in the Multimedia Viewer. Files also land here when attached in context — from a Bookings row or a Deliverables / Proof step.</div>';
+}
+
+/* ---------------------------------------------------------- bookings tab -- */
+/* A booking is cost-bearing, so it can OVERRIDE the show's default job — a
+   single show can split across two deals (league LED + a team's own buy). */
+function tabBookings(show) {
+  var rows = show.bookings.map(function (b) {
+    var s = normStatus(b.status);
+    var lbl = s === 'done' ? 'Confirmed' : s === 'in_progress' ? 'Pending' : s === 'blocked' ? 'Blocked' : 'Needed';
+    var override = b.job_id && b.job_id !== show.default_job_id ? JOBS_BY_ID[b.job_id] : null;
+    return '<tr><td><b style="font-weight:600">' + esc(b.category) + '</b>' +
+      (override ? ' <span class="tag" title="' + esc(override.client + ' · ' + override.description) + '">Job ' + esc(override.qb_job_number) + '</span>' : '') + '</td>' +
+      '<td>' + esc(b.vendor) + '</td>' +
+      '<td><span class="pill ' + esc(STATUS[s].pill) + '"><span class="dot"></span>' + esc(lbl) + '</span></td>' +
+      '<td style="text-align:right"><span style="display:inline-flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">' +
+      '<button class="btn sm ghost" ' + act('attachBooking', b.id) + '>' + icon('link') + 'Attach</button>' +
+      (s === 'done' ? '<button class="btn sm ghost" ' + toastAttrs('Confirmation', 'Opened booking paperwork') + '>' + icon('file') + 'Paperwork</button>'
+        : '<button class="btn sm ghost" ' + toastAttrs('Assigned', 'Booking task assigned') + '>Assign</button>') +
+      '</span></td></tr>';
+  }).join('');
+  var split = show.bookings.some(function (b) { return b.job_id && b.job_id !== show.default_job_id; });
+  return '<div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Booking</th><th>Vendor</th><th>Status</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>' +
+    '<div class="hint">' + icon('bolt') + 'Every confirmed booking keeps its paperwork here — so anyone can pick up the event and see exactly what’s locked. On push, these map to staffing <b>/api/bookings</b>.</div>' +
+    (split ? '<div class="hint">' + icon('scale') + 'Rows tagged with a different <b>job number</b> bill to another deal in this folder — this show’s costs split across two jobs.</div>' : '');
+}
+
+/* ---------------------------------------------------------- activity tab -- */
+/* activity is stored structured {actor, action, detail, ts} — the bold-actor
+   formatting happens HERE, never in the data. */
+function tabActivity(show) {
+  var items = show.activity.map(function (a) {
+    /* actor may be 'agent:<username>' (AGENT_API attribution) -> "Tom's agent" */
+    var line = (a.actor ? '<b>' + esc(actorName(a.actor)) + '</b> ' : '') + esc(a.action) + (a.detail ? ' <span style="color:var(--muted)">· ' + esc(a.detail) + '</span>' : '');
+    return '<div class="tl-item ' + (a.accent ? 'accent' : '') + '"><div class="node"></div><div class="a-t">' + line + '</div><div class="a-m">' + esc(fmtTs(a.ts)) + '</div></div>';
+  }).join('');
+  return '<div class="panel"><div class="timeline">' + items + '</div></div>';
+}
+
+/* ------------------------------------------------------ proofs & approval -- */
+function tabProofs(show) {
+  var flow = [{ k: 'Design', ic: 'pencil', sub: firstName('jhawk'), st: 'done' },
+    { k: 'Internal QC', ic: 'checkC', sub: firstName('lfarkos'), st: 'done' },
+    { k: 'Sent to client', ic: 'send', sub: 'R2', st: 'done' },
+    { k: 'Client markup', ic: 'mail', sub: 'logged', st: 'done' },
+    { k: 'Approved', ic: 'lock', sub: 'e-sign', st: 'done' },
+    { k: 'Released to floor', ic: 'print', sub: 'print queue', st: 'active' }];
+  var steps = flow.map(function (f, i) {
+    var sep = i < flow.length - 1 ? '<span class="fsep">' + icon('chevR') + '</span>' : '';
+    return '<div class="fstep ' + f.st + '"><div class="fi">' + icon(f.ic) + '</div><div class="ft"><b>' + esc(f.k) + '</b><span>' + esc(f.sub) + '</span></div></div>' + sep;
+  }).join('');
+  var approvedFile = show.files.filter(function (f) { return f.kind === 'proof'; })[0];
+  var proofs = show.proofs.map(function (p) {
+    var rounds = p.rounds.map(function (r) {
+      return '<div class="round"><div class="rn">' + esc(r.round) + '</div><div class="rc"><div class="rnote">' + esc(r.note) + '</div><div class="rd">' + psPill(r.status) + ' sent ' + esc(fmtDate(r.date)) + '</div></div></div>';
+    }).join('');
+    var actions = p.status === 'approved'
+      ? (approvedFile ? '<button class="btn sm ghost" ' + act('openViewer', approvedFile.id) + '>' + icon('eye') + 'View approved proof</button>' : '')
+      : '<button class="btn sm" ' + act('proofApprove', p.id) + '>' + icon('check') + 'Approve</button>' +
+        '<button class="btn sm ghost" ' + act('proofRevise', p.id) + '>' + icon('pencil') + 'Request changes</button>';
+    return '<div class="proof"><div class="proof-h"><div class="pth">' + proofThumbSVG() + '</div><div class="pn"><b>' + esc(p.name) + '</b><span>' + esc(p.code + ' · ' + p.client) + '</span></div>' + psPill(p.status) + '</div>' +
+      '<div class="rounds">' + rounds + '</div>' +
+      '<div class="proof-foot"><span class="who">' + icon('clock') + ' ' + p.rounds.length + ' round' + (p.rounds.length > 1 ? 's' : '') + '</span><span class="sp"></span>' + actions + '</div></div>';
+  }).join('');
+  return '<div class="panel" style="margin-bottom:16px"><h3>Approval flow</h3><div class="flow">' + steps + '</div>' +
+    '<div class="perm-note">' + inlineIcon('lock') + ' Once a proof is approved it is locked and versioned — the approved file is what releases to the print floor, and it is what the Viewer prints.</div></div>' +
+    '<div class="proofs">' + proofs + '</div>';
+}
+
+/* ============================================================= photos tab --
+   The per-show gallery (photo pass): masonry grid in day groups (the call
+   sheet's day language — Load-in · Show day · Strike), tag filter chips,
+   recap-pick stars (pm+ curation the recap pass consumes), inline confirm /
+   reject on agent proposals. Clicking any photo opens the Viewer lightbox.
+   ========================================================================== */
+var PH_UI = { tag: {}, editCap: null };   /* per-show filter · viewer caption edit */
+
+function phNasHint(show) {
+  return '\\\\e360-nas\\showrunner\\P' + show.project_id + '-' + show.project.slug +
+    '\\S' + show.id + '-' + show.slug + '\\photo\\';
+}
+function phTakenHM(f) { return fmtHM(String(f.taken_at || '').slice(11, 16)); }
+/* the quiet bolt that says "an agent filed this" — full story in the title */
+function photoAgentMark(f) {
+  if (!f.provenance) return '';
+  return '<span class="ph-agent" title="' + esc('organized by ' + actorLabel(null, f.provenance) + ' · ' +
+    (f.provenance.source_label || 'camera-roll sync') + ' · ' + Math.round(f.provenance.confidence) + '% match') + '">' +
+    inlineIcon('bolt') + '</span>';
+}
+function photoStarBtn(f) {
+  if (PH_EDIT_ROLES[CURRENT_USER.role]) {
+    return '<button class="ph-star' + (f.recap_pick ? ' on' : '') + '" title="' +
+      (f.recap_pick ? 'Recap pick — click to remove' : 'Star for the client recap') + '" ' +
+      act('photoPick', f.id) + '>' + icon('star') + '</button>';
+  }
+  return f.recap_pick ? '<span class="ph-star on static" title="Recap pick">' + icon('star') + '</span>' : '';
+}
+
+function photoCard(f) {
+  var w = Number(f.width) || 3, h = Number(f.height) || 2;
+  var proposed = f.status === 'proposed';
+  var review = proposed
+    ? '<div class="ph-rev"><button class="btn sm primary" ' + act('photoConfirm', f.id) + '>' + icon('check') + 'Confirm</button>' +
+      '<button class="btn sm ghost" ' + act('photoReject', f.id) + '>' + icon('x') + 'Reject</button></div>'
+    : '';
+  return '<div class="ph-card' + (proposed ? ' proposed' : '') + '" ' + act('openViewer', f.id) + '>' +
+    '<div class="ph-fig" style="aspect-ratio:' + w + '/' + h + '">' +
+    '<img src="' + esc(f.thumb) + '" alt="' + esc(f.caption || f.name) + '" loading="lazy">' +
+    (proposed ? '<span class="pill warn ph-prop"><span class="dot"></span>Proposed' +
+      (f.provenance ? ' · ' + Math.round(f.provenance.confidence) + '%' : '') + '</span>' : '') +
+    photoStarBtn(f) + '</div>' +
+    '<div class="ph-cap"><b>' + esc(f.caption || f.name) + '</b>' +
+    '<span class="ph-sub">' + esc(phTakenHM(f) + (f.shot_by ? ' · ' + firstName(f.shot_by) : '')) + photoAgentMark(f) + '</span>' +
+    review + '</div></div>';
+}
+
+function tabPhotos(show) {
+  var photos = photosForShow(show.id);
+
+  /* ---- empty state — quiet; the agent fills this in ----------------------- */
+  if (!photos.length) {
+    return '<div class="gear-empty">' + icon('cam') +
+      '<div style="font-weight:600;font-size:14px">Photos land here when your agent syncs them</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:480px;margin-left:auto;margin-right:auto;line-height:1.5">Shoot the show — each teammate’s agent sorts, names and tags their camera roll into this event’s NAS folder and the gallery fills in by itself. Confident matches file directly; uncertain ones wait as <b>proposed</b> for a human eye.</div>' +
+      '<div class="mono" style="margin-top:14px;font-size:11px;color:var(--muted);word-break:break-all">' + esc(phNasHint(show)) + '</div></div>';
+  }
+
+  var picksN = photos.filter(function (f) { return f.recap_pick; }).length;
+  var propN = photos.filter(function (f) { return f.status === 'proposed'; }).length;
+  var cur = PH_UI.tag[show.id] || null;
+
+  /* ---- filter chips: all · ★ picks · every tag with its count ------------- */
+  var chips = '<button class="ph-chip' + (!cur ? ' on' : '') + '" ' + act('phTag', show.id, '*') + '>All <span class="n">' + photos.length + '</span></button>';
+  if (picksN) {
+    chips += '<button class="ph-chip pick' + (cur === '★' ? ' on' : '') + '" title="Recap picks — what the client recap will lead with" ' +
+      act('phTag', show.id, '★') + '>' + inlineIcon('star') + 'Picks <span class="n">' + picksN + '</span></button>';
+  }
+  chips += photoTagCounts(photos).map(function (t) {
+    return '<button class="ph-chip' + (cur === t.tag ? ' on' : '') + '" ' + act('phTag', show.id, t.tag) + '>' +
+      esc(t.tag) + ' <span class="n">' + t.n + '</span></button>';
+  }).join('');
+  var bar = '<div class="ph-bar">' + chips + '<span style="flex:1"></span>' +
+    (propN ? '<span class="pill warn"><span class="dot"></span>' + propN + ' proposed</span>' : '') +
+    '</div>';
+
+  /* ---- apply the filter --------------------------------------------------- */
+  var shown = photos.filter(function (f) {
+    if (!cur) return true;
+    if (cur === '★') return !!f.recap_pick;
+    return (f.tags || []).indexOf(cur) >= 0;
+  });
+
+  /* ---- day groups — the call sheet's day language ------------------------- */
+  var byDay = {}, days = [];
+  shown.forEach(function (f) {
+    var d = String(f.taken_at || '').slice(0, 10);
+    if (!byDay[d]) { byDay[d] = []; days.push(d); }
+    byDay[d].push(f);
+  });
+  days.sort();
+  var groups = days.map(function (d) {
+    var tag = schedDayTag(show, d);
+    return '<div class="ph-day"><div class="ph-dh"><b>' + esc(fmtDayDate(d)) + '</b>' +
+      (tag ? '<span class="ph-dtag">' + esc(tag) + '</span>' : '') +
+      '<span class="ph-dn">' + byDay[d].length + ' photo' + (byDay[d].length === 1 ? '' : 's') + '</span></div>' +
+      '<div class="ph-masonry">' + byDay[d].map(photoCard).join('') + '</div></div>';
+  }).join('') || '<div class="empty">Nothing matches that filter.</div>';
+
+  return bar + groups +
+    '<div class="hint">' + icon('server') + '<span>Originals live on the NAS — <span class="mono">' + esc(phNasHint(show)) +
+    '</span> — the app holds metadata + a thumbnail. The ★ picks feed the post-event client recap.</span></div>';
+}
+
+/* ---- overview strip: recap picks / latest, linking into the gallery ------- */
+function photoStrip(show) {
+  var photos = photosForShow(show.id);
+  if (!photos.length) return '';
+  var picksN = photos.filter(function (f) { return f.recap_pick; }).length;
+  var thumbs = recapStripPhotos(show.id, 5).map(function (f) {
+    return '<button class="ph-th" ' + act('openViewer', f.id) + ' title="' + esc(f.caption || f.name) + '">' +
+      '<img src="' + esc(f.thumb) + '" alt="' + esc(f.caption || f.name) + '" loading="lazy">' +
+      (f.recap_pick ? '<span class="st">' + icon('star') + '</span>' : '') + '</button>';
+  }).join('');
+  return '<div class="panel"><h3>Photos · ' + photos.length + (picksN ? ' <span style="color:var(--warn)">· ' + picksN + ' picks</span>' : '') + '</h3>' +
+    '<div class="ph-strip">' + thumbs + '</div>' +
+    '<button class="n-more" ' + act('gotoTab', null, 'photos') + '>' + inlineIcon('cam') + ' Open the photo gallery</button></div>';
+}
+
+/* ============================================================== recap tab --
+   The post-event client recap (recap pass): the closeout deliverable, drafted
+   by the show owner's agent from the folder's own record and held DRAFT-FIRST
+   until a human edits and approves it. Rendered as a live document — every
+   section edits in place while it is a draft, using the photo-caption editor's
+   pattern (one open editor at a time, Save / Cancel, api.* does the guarding).
+
+   The tab never composes client text itself: it renders recap.body, which the
+   content firewall in data.js already guaranteed is client-safe.
+   ========================================================================== */
+var RECAP_UI = { edit: null };     /* 'headline' | 'closing' | 'n:<i>' | 'h:<i>' | 's:<i>' */
+
+function rcPen(show, key, title) {
+  return '<button class="iconbtn rc-pen" title="' + esc(title) + '" ' + act('rcEdit', show.id, key) + '>' + icon('pencil') + '</button>';
+}
+function rcDel(show, key, title) {
+  return '<button class="iconbtn rc-pen" title="' + esc(title) + '" ' + act('rcDel', show.id, key) + '>' + icon('trash') + '</button>';
+}
+/* one open editor at a time — #rcIn (+ #rcIn2 for a stat's value) */
+function rcEditor(show, key, value, rows, second) {
+  return '<div class="rc-ed">' +
+    (second == null
+      ? '<textarea id="rcIn" class="note-in" rows="' + Number(rows || 2) + '">' + esc(value) + '</textarea>'
+      : '<div class="rc-ed2"><input id="rcIn" class="cell-in" value="' + esc(value) + '" placeholder="label">' +
+        '<input id="rcIn2" class="cell-in" value="' + esc(second) + '" placeholder="value"></div>') +
+    '<div class="rc-edbtns"><span class="rc-edhint">' + inlineIcon('lock') + ' Client-facing — internal numbers are refused</span>' +
+    '<button class="btn sm ghost" ' + act('rcCancel') + '>Cancel</button>' +
+    '<button class="btn sm primary" ' + act('rcSave', show.id, key) + '>' + icon('check') + 'Save</button></div></div>';
+}
+
+function recapBanner(show, rec) {
+  var m = recapStatusMeta(rec);
+  var who = actorName(rec.generated_by);
+  if (rec.status === 'draft') {
+    return '<div class="rc-banner draft"><div class="rcb-i">' + icon('bolt') + '</div>' +
+      '<div class="rcb-t"><b>Draft — awaiting review</b>' +
+      '<span>Drafted by ' + esc(who) + ' ' + esc(fmtTs(rec.generated_at)) +
+      (rec.edited_by ? ' · edited by ' + esc(firstName(rec.edited_by)) + ' ' + esc(fmtTs(rec.edited_at)) : '') +
+      ' · nothing leaves until a human approves it.</span>' + provBadge(rec.provenance) + '</div>' +
+      '<span class="pill ' + esc(m.pill) + '"><span class="dot"></span>' +
+      esc(canApproveRecap(show) ? 'Waiting on you' : 'Waiting on ' + (firstName(show.owner) || 'the owner')) +
+      '</span></div>';
+  }
+  if (rec.status === 'approved') {
+    return '<div class="rc-banner approved"><div class="rcb-i">' + icon('checkC') + '</div>' +
+      '<div class="rcb-t"><b>Approved by ' + esc(userName(rec.approved_by)) + '</b>' +
+      '<span>' + esc(fmtTs(rec.approved_at)) + ' · locked for send. Drafted by ' + esc(who) + '.</span></div>' +
+      '<span class="pill go"><span class="dot"></span>Approved</span></div>';
+  }
+  return '<div class="rc-banner sent"><div class="rcb-i">' + icon('send') + '</div>' +
+    '<div class="rcb-t"><b>Sent to ' + esc(rec.sent_to || 'the client') + '</b>' +
+    '<span>' + esc(fmtTs(rec.sent_at)) + ' · recorded by hand — this app has no outbound path.</span></div>' +
+    '<span class="pill idle">Sent</span></div>';
+}
+
+function recapActionBar(show, rec) {
+  var editable = canEditRecap(show) && rec.status === 'draft';
+  var approver = canApproveRecap(show);
+  var b = [];
+  if (rec.status === 'draft') {
+    if (canEditRecap(show)) b.push('<button class="btn sm ghost" ' + act('rcGenerate', show.id) + ' title="Replaces this draft — including your edits — from the folder’s current record">' + icon('refresh') + 'Regenerate</button>');
+    if (approver) b.push('<button class="btn sm primary" ' + act('rcApprove', show.id) + '>' + icon('checkC') + 'Approve</button>');
+  } else if (rec.status === 'approved') {
+    if (canEditRecap(show)) b.push('<button class="btn sm primary" ' + act('rcMarkSent', show.id) + '>' + icon('send') + 'Mark sent</button>');
+    if (approver) b.push('<button class="btn sm ghost" ' + act('rcReopen', show.id) + '>' + icon('pencil') + 'Reopen for edits</button>');
+  }
+  b.push('<button class="btn sm ghost" ' + act('rcPreview', show.id) + '>' + icon('eye') + 'View sheet</button>');
+  b.push('<button class="btn sm ghost" ' + act('rcPrint', show.id) + '>' + icon('print') + 'Print</button>');
+  return '<div class="rc-bar">' +
+    '<span class="rc-barlbl">' + (editable ? inlineIcon('pencil') + ' Editing the draft in place' : inlineIcon('lock') + ' Read-only') + '</span>' +
+    '<span style="flex:1"></span>' + b.join('') + '</div>';
+}
+
+function recapPhotoStrip(show, rec, editable) {
+  var photos = recapPhotos(rec);
+  var cards = photos.map(function (f, i) {
+    var ctrl = editable
+      ? '<div class="rcp-ctl">' +
+        '<button class="iconbtn" title="Move earlier" ' + act('rcPhotoMove', f.id, 'up') + '>' + icon('chevL') + '</button>' +
+        '<button class="iconbtn" title="Move later" ' + act('rcPhotoMove', f.id, 'down') + '>' + icon('chevR') + '</button>' +
+        '<button class="iconbtn" title="Remove from the recap" ' + act('rcPhotoRemove', f.id) + '>' + icon('x') + '</button></div>'
+      : '';
+    return '<div class="rc-ph"><div class="rcp-fig"><img src="' + esc(f.thumb) + '" alt="' + esc(f.caption || f.name) + '" loading="lazy">' +
+      '<span class="rcp-n">' + (i + 1) + '</span>' + ctrl + '</div>' +
+      '<div class="rcp-cap">' + esc(f.caption || f.name) + '</div></div>';
+  }).join('') || '<div class="empty" style="padding:18px">No photos on this recap yet.</div>';
+  var pool = editable ? recapPhotoPool(rec, show.id) : [];
+  var add = pool.length
+    ? '<div class="rc-add"><span class="rc-addl">' + inlineIcon('plus') + ' Add from this show’s gallery</span>' +
+      pool.slice(0, 8).map(function (f) {
+        return '<button class="rc-addth" title="' + esc(f.caption || f.name) + '" ' + act('rcPhotoAdd', f.id) + '>' +
+          '<img src="' + esc(f.thumb) + '" alt="' + esc(f.caption || f.name) + '" loading="lazy">' +
+          (f.recap_pick ? '<span class="st">' + icon('star') + '</span>' : '') + '</button>';
+      }).join('') + '</div>'
+    : '';
+  return '<div class="rc-blk"><div class="rc-lbl">Photos · ' + photos.length +
+    '<span class="rc-lsub">the ★ recap picks, in the order the client sees them</span></div>' +
+    '<div class="rc-phs">' + cards + '</div>' + add + '</div>';
+}
+
+function tabRecap(show) {
+  var rec = recapForShow(show.id);
+
+  /* ---- empty state — the closeout step nobody has taken yet -------------- */
+  if (!rec) {
+    return '<div class="gear-empty">' + icon('send') +
+      '<div style="font-weight:600;font-size:14px">No recap yet — generate a draft from this show’s data</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:500px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+      'The post-strike closeout: the show owner’s agent writes what happened, the highlights and the show stats out of this folder’s own record, and pulls in the photos someone starred as recap picks. You edit it, you approve it, and only then can it be marked sent — the app has no way to send anything by itself.</div>' +
+      (canEditRecap(show)
+        ? '<div style="display:flex;gap:9px;justify-content:center;margin-top:16px;flex-wrap:wrap">' +
+          '<button class="btn primary" ' + act('rcGenerate', show.id) + '>' + icon('bolt') + 'Generate a draft</button>' +
+          (photoCount(show.id) ? '<button class="btn ghost" ' + act('gotoTab', null, 'photos') + '>' + icon('star') + 'Star recap picks first</button>' : '') +
+          '</div>'
+        : '<div class="perm-note" style="margin-top:14px">Drafting a recap requires pm, manager or admin.</div>') +
+      '</div>';
+  }
+
+  var b = rec.body || {};    /* api.js already guards rec.body — match it here */
+  var editable = canEditRecap(show) && rec.status === 'draft';
+
+  /* ---- headline --------------------------------------------------------- */
+  var head = '<div class="rc-blk"><div class="rc-lbl">Headline</div>' +
+    (RECAP_UI.edit === 'headline' && editable
+      ? rcEditor(show, 'headline', b.headline, 2)
+      : '<div class="rc-row"><h2 class="rc-headline">' + esc(b.headline) + '</h2>' +
+        (editable ? rcPen(show, 'headline', 'Edit the headline') : '') + '</div>') + '</div>';
+
+  /* ---- narrative --------------------------------------------------------- */
+  var paras = (b.narrative || []).map(function (p, i) {
+    var key = 'n:' + i;
+    if (RECAP_UI.edit === key && editable) return rcEditor(show, key, p, 5);
+    return '<div class="rc-row rc-para"><p>' + esc(p) + '</p>' +
+      (editable ? rcPen(show, key, 'Edit this paragraph') + ((b.narrative.length > 1) ? rcDel(show, key, 'Remove this paragraph') : '') : '') + '</div>';
+  }).join('');
+  var narr = '<div class="rc-blk"><div class="rc-lbl">Narrative<span class="rc-lsub">what happened, in the client’s language</span></div>' +
+    paras + (editable ? '<button class="rc-addbtn" ' + act('rcAdd', show.id, 'narrative') + '>' + icon('plus') + 'Add a paragraph</button>' : '') + '</div>';
+
+  /* ---- highlights -------------------------------------------------------- */
+  var hls = (b.highlights || []).map(function (h, i) {
+    var key = 'h:' + i;
+    if (RECAP_UI.edit === key && editable) return rcEditor(show, key, h, 2);
+    return '<div class="rc-row rc-hlrow"><span class="rc-bullet"></span><span class="rc-hltx">' + esc(h) + '</span>' +
+      (editable ? rcPen(show, key, 'Edit this highlight') + rcDel(show, key, 'Remove this highlight') : '') + '</div>';
+  }).join('') || '<div class="empty" style="padding:14px">No highlights yet.</div>';
+  var hlBlk = '<div class="rc-blk"><div class="rc-lbl">Highlights<span class="rc-lsub">from the completed lanes + the starred photos</span></div>' +
+    hls + (editable ? '<button class="rc-addbtn" ' + act('rcAdd', show.id, 'highlight') + '>' + icon('plus') + 'Add a highlight</button>' : '') + '</div>';
+
+  /* ---- stats — client-safe fields only ----------------------------------- */
+  var stats = (b.stats || []).map(function (st, i) {
+    var key = 's:' + i;
+    if (RECAP_UI.edit === key && editable) return rcEditor(show, key, st.label, 1, st.value);
+    return '<div class="rc-stcell"><span>' + esc(st.label) + '</span><b>' + esc(st.value) + '</b>' +
+      (editable ? '<div class="rc-stctl">' + rcPen(show, key, 'Edit this stat') + rcDel(show, key, 'Remove this stat') + '</div>' : '') + '</div>';
+  }).join('') || '<div class="empty" style="padding:14px">No stats yet.</div>';
+  var statBlk = '<div class="rc-blk"><div class="rc-lbl">Show stats<span class="rc-lsub">client-safe figures only — no money ever reaches this list</span></div>' +
+    '<div class="rc-stgrid">' + stats + '</div>' +
+    (editable ? '<button class="rc-addbtn" ' + act('rcAdd', show.id, 'stat') + '>' + icon('plus') + 'Add a stat</button>' : '') + '</div>';
+
+  /* ---- closing ----------------------------------------------------------- */
+  var close = '<div class="rc-blk"><div class="rc-lbl">Closing</div>' +
+    (RECAP_UI.edit === 'closing' && editable
+      ? rcEditor(show, 'closing', b.closing, 3)
+      : '<div class="rc-row rc-para"><p>' + esc(b.closing) + '</p>' +
+        (editable ? rcPen(show, 'closing', 'Edit the closing') : '') + '</div>') + '</div>';
+
+  var firewall = '<div class="hint" style="margin-top:16px">' + icon('lock') +
+    '<span><b>Client-facing content firewall.</b> This document is built by one generator that can only read client-safe fields — no cost, no purchase order, no internal note is reachable from it — and every edit you type is checked on the way in. Try pasting a dollar figure into a paragraph: it will be refused, with the reason.</span></div>';
+  var sendNote = '<div class="hint">' + icon('send') +
+    '<span><b>“Mark sent” sends nothing.</b> It records that a person sent this recap and who it went to. No agent in this system has an outbound path, and neither does this app — the send itself happens in the owner’s own mail.</span></div>';
+
+  return recapBanner(show, rec) + recapActionBar(show, rec) +
+    '<div class="ov rc-ov"><div class="rc-doc">' + head + narr + hlBlk + statBlk +
+    recapPhotoStrip(show, rec, editable) + close + '</div>' +
+    '<div style="display:flex;flex-direction:column;gap:16px">' +
+    '<div class="panel"><h3>Sheet preview</h3>' +
+    '<div class="rc-mini">' + recapSheet(show, rec) + '</div>' +
+    '<button class="n-more" ' + act('rcPreview', show.id) + '>' + inlineIcon('eye') + ' Open the full sheet</button></div>' +
+    notesPanel('show', show.id, { title: 'Closeout notes', collapse: 1 }) +
+    '</div></div>' + firewall + sendNote;
+}
+
+/* ---- overview: the quiet closeout line when a recap exists ---------------- */
+function recapOverviewLine(show) {
+  var rec = recapForShow(show.id);
+  if (!rec) return '';
+  var m = recapStatusMeta(rec);
+  var sub = rec.status === 'draft' ? 'drafted by ' + actorName(rec.generated_by) + ' · awaiting review'
+    : rec.status === 'approved' ? 'approved by ' + firstName(rec.approved_by) + ' · ready to send'
+    : 'sent ' + fmtDate(rec.sent_at) + (rec.sent_to ? ' to ' + rec.sent_to : '');
+  return '<div class="panel rc-ovline"><h3>Closeout · client recap</h3>' +
+    '<button class="rc-ovbtn" ' + act('gotoTab', null, 'recap') + '>' +
+    '<span class="rc-ovi">' + icon('send') + '</span>' +
+    '<span class="rc-ovt"><b>' + esc(recapPhotos(rec).length + ' photos · ' + ((rec.body || {}).highlights || []).length + ' highlights') + '</b>' +
+    '<span>' + esc(sub) + '</span></span>' +
+    '<span class="pill ' + esc(m.pill) + '"><span class="dot"></span>' + esc(m.short) + '</span></button></div>';
+}
+
+/* ---- files tab: an approved recap presents as a DELIVERABLE, not a doc ----
+   It is deliberately not a files row — it never touches the Files or Photos
+   counts. It uses the file-card visual language and opens the client sheet. */
+function recapFilesBlock(show) {
+  var rec = recapForShow(show.id);
+  if (!rec || rec.status === 'draft') return '';
+  var m = recapStatusMeta(rec);
+  return '<div class="files-head" style="margin-top:0"><h3>Deliverables · 1</h3>' +
+    '<span class="pill ' + esc(m.pill) + '"><span class="dot"></span>' + esc(m.label) + '</span></div>' +
+    '<div class="file-grid" style="margin-bottom:18px">' +
+    '<button class="file deliv" ' + act('rcPreview', show.id) + '>' +
+    '<div class="thumb deliv">' + icon('send') + '<span class="ext">recap</span></div>' +
+    '<div class="fb"><b>' + esc((rec.body || {}).headline) + '</b><span>' +
+    esc('Client recap · ' + (rec.status === 'sent'
+      ? 'sent ' + fmtDate(rec.sent_at) + (rec.sent_to ? ' to ' + rec.sent_to : '')
+      : 'approved ' + fmtDate(rec.approved_at) + ' by ' + firstName(rec.approved_by))) + '</span></div></button></div>';
+}
+
+/* ---- bell row: a draft recap waiting on the person who can approve it ----- */
+function recapReviewRow(rec) {
+  var s = SHOWS_BY_ID[rec.show_id];
+  var n = ((rec.body || {}).photo_ids || []).length;
+  return '<div class="feed-item proposed">' +
+    '<div class="fico">' + icon('send') + '</div>' +
+    '<div class="ftx"><b>' + esc(actorName(rec.generated_by)) + '</b> drafted the client recap — ' + esc((rec.body || {}).headline) +
+    '<span class="fsub">' + esc((s ? showLabel(s) : '') + ' · ' + n + ' photo' + (n === 1 ? '' : 's') + ' · nothing goes out until you approve it') + '</span>' +
+    provBadge(rec.provenance) +
+    '<div class="fbtns"><button class="btn sm primary" ' + act('rcReview', rec.show_id) + '>' + icon('eye') + 'Review</button></div></div></div>';
+}
+
+/* ---- bell row for a proposed photo (renderInbox delegates here) ----------- */
+function photoProposalRow(f) {
+  var s = SHOWS_BY_ID[f.show_id];
+  return '<div class="feed-item proposed">' +
+    '<div class="ph-bth"><img src="' + esc(f.thumb) + '" alt="' + esc(f.caption || f.name) + '"></div>' +
+    '<div class="ftx"><b>' + esc(actorLabel(f.uploaded_by, f.provenance)) + '</b> proposed a photo — ' + esc(f.caption || f.name) +
+    '<span class="fsub">' + esc(s ? showLabel(s) : '') + '</span>' + provBadge(f.provenance) +
+    '<div class="fbtns"><button class="btn sm primary" ' + act('photoConfirm', f.id) + '>' + icon('check') + 'Confirm</button>' +
+    '<button class="btn sm ghost" ' + act('photoReject', f.id) + '>' + icon('x') + 'Reject</button>' +
+    '<button class="btn sm ghost" ' + act('openViewer', f.id) + '>' + icon('eye') + 'View</button></div></div></div>';
+}
