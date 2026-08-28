@@ -775,20 +775,34 @@ async function call(method, p, { token, body, raw, headers = {} } = {}) {
   const stepOf = (r, id) => r.steps.find((s) => s.id === id) || {};
 
   // ── the fault that actually happened ──────────────────────────────────────
-  const pMisspelled = await storageProbe({ timeoutMs: 4000, write: false },
+  // Production had ALLOW_SELF_SIGNED=1 set, on the service that wanted it,
+  // meaning exactly one thing — and the app ignored it in silence while
+  // /api/health printed "verified". The short spelling is now honoured, and
+  // WHICH spelling took effect is reported, so it is understood without being
+  // hidden.
+  const pShort = await storageProbe({ timeoutMs: 4000, write: false },
     probeEnv({ ALLOW_SELF_SIGNED: '1' }));
-  ok('an env var nobody reads (ALLOW_SELF_SIGNED) is reported as IGNORED, by name',
-     pMisspelled.config.ignoredEnvVars.some(
-       (v) => v.set === 'ALLOW_SELF_SIGNED' && v.meant === 'NAS_WEBDAV_ALLOW_SELF_SIGNED'),
-     pMisspelled.config.ignoredEnvVars);
-  ok('...and the verdict says it out loud rather than burying it in a field',
-     pMisspelled.verdict.some((v) => /IGNORED ENV/.test(v) && /ALLOW_SELF_SIGNED/.test(v)),
-     pMisspelled.verdict);
-  ok('...and the same var spelled RIGHT is not reported as ignored',
-     storageProbe.length >= 0 &&
+  ok('ALLOW_SELF_SIGNED=1 is honoured, not ignored in silence',
+     pShort.config.allowSelfSigned === true, pShort.config);
+  ok('...and the report names WHICH spelling took effect',
+     pShort.config.allowSelfSignedFrom === 'ALLOW_SELF_SIGNED', pShort.config.allowSelfSignedFrom);
+  ok('...so the certificate stops being the fault: TLS is accepted and PROPFIND runs',
+     stepOf(pShort, 'propfind').ok === true, stepOf(pShort, 'propfind'));
+  ok('the canonical spelling still wins when both are set',
      (await storageProbe({ timeoutMs: 4000, write: false },
        probeEnv({ NAS_WEBDAV_ALLOW_SELF_SIGNED: '1', ALLOW_SELF_SIGNED: '1' })
-     )).config.ignoredEnvVars.length === 0);
+     )).config.allowSelfSignedFrom === 'NAS_WEBDAV_ALLOW_SELF_SIGNED');
+  ok('the driver honours it too, not just the probe — one rule, read twice',
+     makeWebdavDriver(probeEnv({ ALLOW_SELF_SIGNED: '1' })).info().tls === 'self-signed-allowed');
+  // Vars we will NOT guess at still get named rather than swallowed.
+  const pTypo = await storageProbe({ timeoutMs: 4000, write: false },
+    probeEnv({ NAS_WEBDAV_ALLOW_SELF_SIGNED: '1', TAILSCALE_AUTH_KEY: 'x' }));
+  ok('a near-miss we will not guess at is still reported as IGNORED, by name',
+     pTypo.config.ignoredEnvVars.some((v) => v.set === 'TAILSCALE_AUTH_KEY' && v.meant === 'TAILSCALE_AUTHKEY'),
+     pTypo.config.ignoredEnvVars);
+  ok('...and the verdict says it out loud rather than burying it in a field',
+     pTypo.verdict.some((v) => /IGNORED ENV/.test(v) && /TAILSCALE_AUTH_KEY/.test(v)),
+     pTypo.verdict);
 
   // ── the certificate, measured instead of labelled ─────────────────────────
   const pStrict = await storageProbe({ timeoutMs: 4000, write: false }, probeEnv());
