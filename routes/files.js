@@ -103,18 +103,26 @@ async function chainFor(showId, q = pool) {
 // credential — user/pass are reported as booleans and the probe's own Basic
 // header is built and discarded inside lib/storage.js.
 //
-// Body (all optional): { timeoutMs: 8000, write: true }
+// Body (all optional): { timeoutMs: 8000, write: true, deep: false, ports: [] }
 //   · timeoutMs budgets EACH step, so nine hung layers still answer inside one
 //     HTTP request. Range 1000-60000.
 //   · write:false stops after PROPFIND — a read-only first run against a live
 //     share, for when you do not yet trust what this thing will do.
+//   · deep:true adds the follow-up questions for the case the nine steps
+//     cannot answer on their own: a port sweep of the NAS through the tunnel,
+//     and a plaintext byte-flow ladder that says whether ANY byte comes back
+//     and whether the answer depends on how many were sent. Slower, and
+//     off by default, because it opens a dozen extra connections.
+//   · ports overrides what deep sweeps.
 // It cleans up after itself: the probe collection is deleted on the way out and
 // the response says whether that succeeded.
 router.post('/admin/storage-probe', requireRole('admin'), asyncH(async (req, res) => {
   const b = req.body || {};
   const out = await storageProbe({
     timeoutMs: pick(b, 'timeoutMs') || pick(b, 'timeout_ms'),
-    write: pick(b, 'write') !== false
+    write: pick(b, 'write') !== false,
+    deep: pick(b, 'deep') === true,
+    ports: Array.isArray(pick(b, 'ports')) ? pick(b, 'ports') : null
   });
   // 200 whatever the verdict: a probe that reports "step 3 hung" has SUCCEEDED
   // at its job, and a non-2xx would make curl and the SPA hide the body that is

@@ -108,4 +108,10 @@ The test for every feature: *a change made anywhere becomes visible to everyone 
 - **Future unlock**: cross-event gear search over snapshots ("when did we last send the Lex 400 · which shows used BP2s"), gear-usage stats per season. The snapshot table is the foundation.
 - Fits the north star: the gear record becomes part of the event folder's permanent truth, not tribal memory in Flex.
 
+## Spec lifecycle controls (Tom, 2026-08-28)
+"Should be able to delete spec sheets, or unbind them from a show, or mark them old — sometimes specs change after sending one." Supersede-on-rebind already exists (bind the new spec → old auto-marks superseded, kept for history). Build the manual half:
+- **Mark outdated / withdraw** a bound spec WITHOUT a replacement (status 'superseded' or a new 'withdrawn', chain node reverts to needs-spec, downstream stale-flags) — for when the deal changed and no new spec exists yet.
+- **Unbind** (detach from the chain node, file survives as a plain document) vs **Delete** (the route exists, admin/uploader-gated — needs a UI affordance with a real confirm; spec_renders cascade already handled).
+- **Version history UI**: per chain node, a "versions" list showing superseded/withdrawn specs (they're queryable by status today, just unsurfaced) — open/print any old rev, see who bound what when. Discoverability note on the Specs tab: "binding a new spec retires this one automatically."
+
 ## (more team wishes to be added here as responses come in)

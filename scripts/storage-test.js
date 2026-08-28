@@ -900,6 +900,45 @@ async function call(method, p, { token, body, raw, headers = {} } = {}) {
        return stepOf(r, 'propfind').ok === false && /1200ms/.test(stepOf(r, 'propfind').error || '');
      })());
 
+  // ── deep mode: the questions the nine steps cannot answer ─────────────────
+  // A TLS-only port hanging up on a plaintext request is a HEALTHY server, and
+  // the distinction deep mode has to get right is REACTED vs SILENT. Our TLS
+  // test server destroys the socket on a plaintext request, which is exactly
+  // the reaction a Synology's nginx gives — so this asserts the report calls
+  // that "the far end reacted", not "nothing came back".
+  const pDeep = await storageProbe({ timeoutMs: 3000, deep: true, ports: [pDavPort, 9] },
+    probeEnv({ NAS_WEBDAV_ALLOW_SELF_SIGNED: '1' }));
+  ok('deep mode sweeps ports through the tunnel and separates open from closed',
+     pDeep.deep.ports.length === 2 &&
+     pDeep.deep.ports.find((p) => p.port === pDavPort).open === true &&
+     pDeep.deep.ports.find((p) => p.port === 9).open === false, pDeep.deep.ports);
+  ok('deep mode runs a size ladder and times the first byte back',
+     pDeep.deep.wire.length >= 4 && pDeep.deep.wire.every((w) => Number.isFinite(w.connectMs)),
+     pDeep.deep.wire.map((w) => `${w.sent}B=${w.endedBy}`).join(' '));
+  ok('a TLS port that hangs up on plaintext is scored as REACTED, not as silence — ' +
+     'the difference between a healthy server and a dead tunnel',
+     pDeep.deep.wire.every((w) => w.reacted === true) &&
+     /reacts at every size/.test(pDeep.deep.note), pDeep.deep.note);
+  ok('...and deep mode does not disturb the nine steps', pDeep.ok === true, pDeep.firstFailure);
+  ok('the deep note reaches the verdict, where an operator will actually read it',
+     pDeep.verdict.some((v) => /^DEEP: /.test(v)), pDeep.verdict);
+
+  // Total silence is the OTHER answer, and it has to be distinguishable. A
+  // server that accepts a connection and never speaks is the exact shape of
+  // the production fault this whole file exists for.
+  const mute = net.createServer((s) => { s.on('data', () => {}); });   // accept, never answer
+  const mutePort = await listen(mute);
+  const pMute = await storageProbe({ timeoutMs: 1200, deep: true, ports: [mutePort] },
+    probeEnv({ NAS_WEBDAV_URL: `https://localhost:${mutePort}/showrunner`,
+               NAS_WEBDAV_ALLOW_SELF_SIGNED: '1' }));
+  ok('a far end that accepts the connection and never speaks: TLS is the step that fails...',
+     stepOf(pMute, 'socks-connect').ok === true && stepOf(pMute, 'tls').ok === false,
+     pMute.steps.map((s) => `${s.id}=${s.ok}`).join(' '));
+  ok('...and deep mode names it as silence, not as a certificate or a permission problem',
+     pMute.deep.wire.every((w) => w.reacted === false) && /NOTHING came back/.test(pMute.deep.note),
+     pMute.deep.note);
+  await close(mute);
+
   await close(pSocks.server);
   await close(pDav.server);
 
