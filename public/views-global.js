@@ -812,7 +812,15 @@ function viewerFileName(f) {
 function vPrevOpenBlob(blob, f) {
   var url = URL.createObjectURL(blob);
   var w = null;
-  try { w = window.open(url, '_blank', 'noopener'); } catch (_) { w = null; }
+  /* NOT window.open(url, '_blank', 'noopener'). Per spec, a features string
+     carrying `noopener` makes open() return NULL — on success as well as on a
+     blocked pop-up — so the two outcomes become indistinguishable and every
+     successful open would toast "your browser blocked it". The handle is what
+     tells them apart, so it is asked for and then severed by hand. */
+  try {
+    w = window.open(url, '_blank');
+    if (w) { try { w.opener = null; } catch (_) {} }
+  } catch (_) { w = null; }
   setTimeout(function () { try { URL.revokeObjectURL(url); } catch (_) {} }, VPREV_TAB_MS);
   if (w) toast('Opened in a new tab', viewerFileName(f));
   else toast('Your browser blocked the new tab', 'Allow pop-ups for Showrunner, or use Download.');
