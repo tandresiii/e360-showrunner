@@ -735,10 +735,45 @@ function photoSheet(show, f) {
     '</div></div>';
 }
 
+/* ── THE FABRICATION LINE, viewer half (2026-08-27) ────────────────────────
+   ledSpecSheet / printSpecSheet / nsfSpecSheet / pcfgSpecSheet and the two gear
+   sheets draw a PLAUSIBLE document: "10 mm pitch", "2 × NovaStar MX40 Pro", a
+   generated pixel map, invented flight cases. In demo mode that is the product.
+   Against a real server, printing those numbers on top of somebody's REAL bound
+   spec is how a fabricated fact reaches a warehouse — the same failure that put
+   a canned .e360 in Tom's production folder.
+
+   So in API mode the viewer shows what it actually KNOWS: the file's own
+   metadata, and where the drawing really lives. Rendering the cached bundle
+   (GET /api/shows/:id/spec-render/:node — it carries svg/html/png) is the right
+   long answer and wants an async viewer; this is the honest short one. */
+function boundDocSheet(show, f, doctype, kicker) {
+  var rows = [['File', f.name || '—'], ['Revision', f.ver || '—'],
+    ['Type', (f.spec_type ? '.' + f.spec_type : (f.ext ? '.' + f.ext : '—'))],
+    ['Dimensions', f.dim || '—'], ['Filed by', f.by || '—'], ['Notes', f.meta || '—']]
+    .map(function (r) { return '<tr><td>' + esc(r[0]) + '</td><td>' + esc(r[1]) + '</td></tr>'; }).join('');
+  return '<div class="sheet">' + sheetTop(doctype) + '<div class="sh-body">' +
+    '<div class="sh-kick">' + esc(kicker) + '</div><h2>' + esc(show.name) + '</h2>' + boundLine(show) + '<hr>' +
+    '<table class="spec-tbl">' + rows + '</table><hr>' +
+    '<div class="sh-cap">Showrunner does not redraw this document. The drawing lives in the ' +
+    'render bundle the tool bound, and in the source file on the NAS — open it there. ' +
+    'Nothing on this page is inferred.</div></div></div>';
+}
+
 /* gear is required only for pullsheet / manifest classes */
 function sheetHTML(show, f, gear) {
   var c = fileClass(f);
+  var live = typeof SR !== 'undefined' && SR.isApi();
   if (c === 'photo') return photoSheet(show, f);
+  if (live && (c === 'e360' || c === 'nsf' || c === 'pcfg')) {
+    return boundDocSheet(show, f,
+      '.' + String(c).toUpperCase() + ' · BOUND SPEC',
+      c === 'e360' ? 'Content spec' : c === 'nsf' ? 'Data cabling spec' : 'Power spec');
+  }
+  if (live && (c === 'pullsheet' || c === 'manifest')) {
+    return boundDocSheet(show, f, c === 'pullsheet' ? 'FLEX · PULL SHEET' : 'FLEX · CASE MANIFEST',
+      c === 'pullsheet' ? 'Gear pull sheet' : 'Case manifest');
+  }
   if (c === 'e360') return show.type === 'print' ? printSpecSheet(show, f) : ledSpecSheet(show, f);
   if (c === 'nsf') return nsfSpecSheet(show, f);
   if (c === 'pcfg') return pcfgSpecSheet(show, f);

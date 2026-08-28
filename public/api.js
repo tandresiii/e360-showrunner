@@ -552,12 +552,27 @@ var api = (function () {
      `kit` is a pure function of the cabinet count (GET supplies `cabinets`;
      PUT does not, so the previous value is carried forward), and `view` is
      pure UI state that must survive a round trip. */
+  /* An EMPTY kit — same shape as buildKit()'s, no contents. API mode gets this
+     one. buildKit() invents a plausible LED package (cabinets, processors,
+     flight cases, weights) from nothing but a cabinet count; against a real
+     server that is a fabrication wearing the costume of a Flex pull. Until a
+     real pull sheet has been fetched there is nothing to show, and showing
+     nothing is the honest answer. */
+  function emptyKit(n) {
+    return { pull: [], manifest: [], cabCases: 0, cabinets: Number(n) || 0 };
+  }
+
   function normGear(showId, g) {
     g = g || {};
     var s = SHOWS_BY_ID[Number(showId)];
     var prev = (s && s.gear) || {};
     if (g.cabinets == null) g.cabinets = prev.cabinets != null ? prev.cabinets : (s && s.cabinets) || 72;
-    if (!g.kit) g.kit = prev.kit && prev.cabinets === g.cabinets ? prev.kit : buildKit(g.cabinets || 72);
+    /* DEMO keeps its toy kit; API mode never manufactures gear. */
+    if (!g.kit) {
+      g.kit = prev.kit && prev.cabinets === g.cabinets ? prev.kit
+        : (API() ? emptyKit(g.cabinets) : buildKit(g.cabinets || 72));
+    }
+    if (g.deepLink === undefined) g.deepLink = '';
     if (!g.view) g.view = prev.view || 'pull-sheet';
     if (g.elementId === undefined) g.elementId = g.element_id || null;
     if (!g.gearListType) g.gearListType = g.gear_list_type || 'pull-sheet';
@@ -1085,6 +1100,32 @@ var api = (function () {
         return ok(s.gear);
       }
       return SR.put('/api/shows/' + Number(showId) + '/gear', patch || {}).then(function (g) {
+        g = normGear(showId, g);
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (s) s.gear = g;
+        return g;
+      });
+    },
+
+    /* THE REAL ONE. POSTs to Flex through the server and returns whatever Flex
+       said: {elementId, elementNumber, deepLink, name, notes, contacts:{client,
+       venue}, dates, gear}. There is no demo branch on purpose — demo mode must
+       never reach a route that writes into a live rental system, and app.js
+       decides which world it is in before it calls this. */
+    flexCreateElement: function (showId, opts) {
+      if (!API()) return fail('flexCreateElement is API-mode only — demo mode simulates locally');
+      var body = { create_contacts: !!(opts && opts.createContacts) };
+      return SR.post('/api/shows/' + Number(showId) + '/flex/create-element', body)
+        .then(function (r) {
+          var s = SHOWS_BY_ID[Number(showId)];
+          if (s && r && r.gear) s.gear = normGear(showId, r.gear);
+          return r;
+        });
+    },
+    /* Forget the pointer. Never touches the folder in Flex. */
+    flexUnlink: function (showId) {
+      if (!API()) return fail('flexUnlink is API-mode only');
+      return SR.del('/api/shows/' + Number(showId) + '/flex/element').then(function (g) {
         g = normGear(showId, g);
         var s = SHOWS_BY_ID[Number(showId)];
         if (s) s.gear = g;

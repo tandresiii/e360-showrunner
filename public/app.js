@@ -383,8 +383,37 @@ async function sendNotifies(anchorType, anchorId, text) {
   return ' · notified ' + names;
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   THE FABRICATION LINE  (2026-08-27, after Show 1)
+   ────────────────────────────────────────────────────────────────────────────
+   Showrunner grew up as a prototype whose whole job was to LOOK finished, so a
+   dozen actions manufacture plausible data: a content spec with a canned pixel
+   map, a pull sheet with invented flight cases, a Flex element id hashed out of
+   the show number. In DEMO mode that is the product. In API mode it is a lie
+   that gets WRITTEN TO THE DATABASE — Tom opened Show 1's Specs & Chain tab in
+   production and the app filed a fabricated .e360 under his real job number.
+
+   THE RULE, and it has no exceptions:
+     in API mode nothing is ever created except from real user input or a real
+     integration response.
+
+   `demoOnly()` is the gate. Every fabricator calls it FIRST and returns if it
+   answers true. It is deliberately loud: a person who pressed a button gets
+   told why nothing happened and what the real path is, because a button that
+   silently does nothing is the second-worst outcome after one that lies.
+   ══════════════════════════════════════════════════════════════════════════ */
+function apiMode() { return typeof SR !== 'undefined' && SR.isApi(); }
+function demoOnly(title, detail) {
+  if (!apiMode()) return false;
+  toast(title, detail);
+  return true;
+}
+
 /* ---- spec derivation chain ------------------------------------------------ */
 async function bindChainFile(show, key) {
+  /* Belt and braces. specGen() already refuses in API mode; this is the second
+     lock, on the function that actually writes the row. */
+  if (apiMode()) return;
   var n = show.chain[key];
   if (key === 'content') {
     var ex = show.files.filter(function (f) { return f.kind === 'spec' && (!f.spec_type || f.spec_type === 'e360'); })[0];
@@ -402,6 +431,7 @@ async function bindChainFile(show, key) {
     ver: 'v' + n.rev, size: m.size, dim: m.dim, by: n.by, meta: 'derived from ' + m.up + ' · cached render in DB' });
 }
 async function bindGearFiles(show) {
+  if (apiMode()) return;              /* second lock — see THE FABRICATION LINE */
   var g = show.gear;
   show.files = show.files.filter(function (f) { return f.chain_key !== 'pull' && f.chain_key !== 'manifest'; });
   await api.addFile(show.id, { name: show.name + ' — Flex Pull Sheet', ext: 'pdf', kind: 'other', artifact: 'pullsheet',
@@ -410,6 +440,12 @@ async function bindGearFiles(show) {
     ver: 'v1', size: 0, dim: g.kit.manifest.length + ' cases', by: 'dvargas', meta: 'flight-case manifest · logistics', chain_key: 'manifest' });
 }
 async function specGen(showId, key) {
+  /* THE ONE THAT BIT TOM. In API mode this used to POST a files row carrying a
+     canned .e360 — 10mm pitch, two MX40s, a placeholder pixel map — against a
+     real job. Showrunner does not own a spec generator; the three desktop tools
+     do, and they push a real bundle into the ?bind-spec=1 popup. */
+  if (demoOnly('Nothing generated — and that is the fix',
+      'Showrunner cannot author a spec. Generate it in E360 Spec / NovaSpec / PowerSpec and bind it from there; the bound file lands here.')) return;
   var show = await api.getShow(showId);
   var chain = show.chain, up = CHAIN_UP[key];
   if (up && !chain[up].gen) { toast('Generate upstream first', CHAIN_LABEL[up] + ' is required'); return; }
@@ -443,23 +479,128 @@ async function printChainFile(showId, key) {
   printSheet(show, f, show.gear);
 }
 
-/* ---- Flex (modeled) ------------------------------------------------------- */
+/* ════════════════════════════════════════════════════════════════════════════
+   FLEX — real in API mode, simulated in demo, never the two confused
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Tom's default: create the client / venue contacts in Flex when they are not
+   already in the directory, so the folder lands fully populated. Remembered for
+   the session only — a per-user preference is a later, real decision. */
+var FLEX_CREATE_CONTACTS = true;
+function flexToggleContacts(showId) {
+  FLEX_CREATE_CONTACTS = !FLEX_CREATE_CONTACTS;
+  toast(FLEX_CREATE_CONTACTS ? 'Missing contacts will be created' : 'Missing contacts will be skipped',
+    FLEX_CREATE_CONTACTS
+      ? 'A client or venue with no exact match in Flex gets created, then linked.'
+      : 'A client or venue with no exact match is left blank on the folder.');
+  return refreshShowTab(showId, 'gear');
+}
+
+/* one line of plain English per contact, for the toast and the panel */
+function flexContactLine(contacts) {
+  if (!contacts) return '';
+  var bits = [];
+  ['client', 'venue'].forEach(function (k) {
+    var c = contacts[k];
+    if (!c) return;
+    if (c.outcome === 'matched') bits.push(k + ' linked');
+    else if (c.outcome === 'created') bits.push(k + ' created in Flex');
+    else bits.push(k + ' LEFT BLANK');
+  });
+  return bits.join(' · ');
+}
+
 async function flexCreate(showId) {
   var show = await api.getShow(showId), g = show.gear;
-  if (g.linked) { toast('Already linked', 'Flex Event Folder ' + (g.elementId || '').slice(0, 8) + '… exists'); return; }
-  var eid = g.elementId || modeledUuid(showId);
-  await api.updateGear(showId, { linked: true, elementId: eid });
-  toast('Flex folder created', 'Event Folder element ' + eid.slice(0, 8) + '… — modeled; POST /f5/api/element at deploy');
+
+  /* DEMO: keep the toy, label it as one. */
+  if (!apiMode()) {
+    if (g.linked) { toast('Already linked (demo)', 'Simulated Event Folder ' + (g.elementId || '').slice(0, 8) + '… exists'); return; }
+    var fake = g.elementId || demoModeledUuid(showId);
+    await api.updateGear(showId, { linked: true, elementId: fake });
+    toast('DEMO SIMULATION — no folder was created',
+      'Nothing was sent to Flex. Element ' + fake.slice(0, 8) + '… is generated locally so the screens have something to show.');
+    await refreshShowTab(showId, 'gear');
+    return;
+  }
+
+  /* API: the server has to be wired for Flex at all. */
+  var cfg = await SR.serverConfig();
+  if (!(cfg && cfg.features && cfg.features.flex)) {
+    toast('Flex is not configured on this server',
+      'FLEX_BASE_URL and FLEX_API_KEY are unset. Nothing was created — ask for them to be set, then try again.');
+    return;
+  }
+  if (g.linked && g.elementId && !g.fabricated) {
+    toast('Already linked', 'Flex Event Folder ' + g.elementId + ' — open it with View in Flex.');
+    return;
+  }
+
+  var r;
+  try {
+    r = await api.flexCreateElement(showId, { createContacts: FLEX_CREATE_CONTACTS });
+  } catch (e) {
+    var msg = String((e && e.message) || e);
+    toast(e && e.status === 501 ? 'Flex is not configured' : 'Flex folder NOT created', msg);
+    return;
+  }
+  var line = flexContactLine(r && r.contacts);
+  toast('Flex Event Folder created — ' + (r.name || ''),
+    'Element ' + r.elementId + (line ? ' · ' + line : ''));
+  /* An omitted contact is not a footnote: the folder is live and incomplete. */
+  ['client', 'venue'].forEach(function (k) {
+    var c = r.contacts && r.contacts[k];
+    if (c && c.outcome === 'omitted' && c.name) {
+      toast('Flex ' + k + ' left blank', c.name + ' — ' + c.reason);
+    }
+  });
   await refreshShowTab(showId, 'gear');
 }
+
 async function flexLink(showId) {
-  var show = await api.getShow(showId), g = show.gear;
-  var eid = g.elementId || modeledUuid(showId);
-  await api.updateGear(showId, { linked: true, elementId: eid });
-  toast('Linked to Flex', 'Verified Event Folder (def 358f312c-…) — modeled');
+  /* DEMO keeps the modeled link. API mode asks for a REAL id — pasting the
+     folder's deep link is the normal way anyone has one to hand. */
+  if (!apiMode()) {
+    var show = await api.getShow(showId), g = show.gear;
+    var eid = g.elementId || demoModeledUuid(showId);
+    await api.updateGear(showId, { linked: true, elementId: eid });
+    toast('DEMO SIMULATION — nothing was verified', 'A local id stands in for a real Event Folder.');
+    await refreshShowTab(showId, 'gear');
+    return;
+  }
+  PENDING_FLEX_LINK = Number(showId);
+  openModal('Link an existing Flex Event Folder',
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">Paste the folder’s <b>element id</b>, or the whole <span class="mono">/f5/ui/#element/…</span> link out of your browser. Showrunner stores the id — it creates nothing.</p>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Flex element id or link',
+      '<input id="flexeid" class="cell-in" placeholder="4b0b74e9-6480-43b3-821f-247f3adf45d2">') + '</div>' +
+    '<div class="hint" style="margin:6px 0 12px">' + icon('alert') + 'Only an id you can actually see in Flex. A guessed id points this show at somebody else’s folder.</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:6px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('flexLinkSave') + '>' + icon('link') + 'Link</button></div>');
+}
+var PENDING_FLEX_LINK = null;
+async function flexLinkSave() {
+  var showId = PENDING_FLEX_LINK;
+  if (!showId) return;
+  var el = document.getElementById('flexeid');
+  var raw = String((el && el.value) || '').trim();
+  var m = raw.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  if (!m) { toast('That is not a Flex element id', 'Expected a UUID, or a link containing one. Nothing was linked.'); return; }
+  closeM();
+  PENDING_FLEX_LINK = null;
+  await api.updateGear(showId, { linked: true, element_id: m[0], elementId: m[0] });
+  toast('Linked to Flex', 'Element ' + m[0] + ' — Showrunner stored the id you gave it.');
   await refreshShowTab(showId, 'gear');
 }
+
 async function flexPull(showId) {
+  /* The pull is NOT wired. It used to invent a gear list id, two PDF rows and a
+     pull-sheet chain revision out of buildKit(). lib/flex.js can really walk the
+     folder tree (flexFindGearListsUnder / flexFetchGearList) but no route calls
+     it yet, so in API mode the honest answer is "not yet". */
+  if (demoOnly('Pull from Flex is not wired yet',
+      'The Event Folder link is real; reading its pull sheet back is the next integration. Nothing was invented, and nothing was filed.')) return;
   var show = await api.getShow(showId), g = show.gear, chain = show.chain;
   if (!g.linked) { toast('Link a Flex folder first', 'Create or link the Event Folder, then pull'); return; }
   await api.updateGear(showId, { pulled: true, gearListId: g.gearListId || ('a220432c-s' + showId + '-gl'), gearListType: 'pull-sheet' });
@@ -468,7 +609,7 @@ async function flexPull(showId) {
     by: 'dvargas', when: TODAY_ISO
   });
   await bindGearFiles(show);
-  toast('Pulled from Flex', g.kit.pull.length + ' categories · ' + g.kit.manifest.length + ' cases · gear list ' + g.docNumber);
+  toast('Pulled from Flex (demo)', g.kit.pull.length + ' categories · ' + g.kit.manifest.length + ' cases · gear list ' + g.docNumber);
   var fresh = await refreshShowTab(showId, 'gear');
   refreshSpecTabBadge(fresh);
 }
@@ -1948,6 +2089,8 @@ var ACTIONS = {
   printChainFile: function (t, id, k) { return printChainFile(id, k); },
   flexCreate:    function (t, id) { return flexCreate(id); },
   flexLink:      function (t, id) { return flexLink(id); },
+  flexLinkSave:  function () { return flexLinkSave(); },
+  flexToggleContacts: function (t, id) { return flexToggleContacts(id); },
   flexPull:      function (t, id) { return flexPull(id); },
   gearView:      function (t, id, k) { return gearView(id, k); },
   gotoTab:       function (t, id, k) { setFolderTab(k); },

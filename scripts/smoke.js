@@ -2196,6 +2196,237 @@ const DEL = (p, o) => call('DELETE', p, o);
 
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // 16. FLEX — the REAL create-element route
+  // ──────────────────────────────────────────────────────────────────────────
+  // NOTHING here touches the live Flex tenant. Phase 1 runs against the test
+  // environment exactly as deployed (no FLEX_* vars) and proves the 501 and the
+  // role gate. Phase 2 sets the vars to an UNROUTABLE host and swaps global
+  // fetch for a stub that passes every non-Flex URL straight through to the
+  // real one — so the smoke server is still driven over real HTTP while every
+  // Flex call is answered locally. A live write from a test suite is how you
+  // end up with rubbish Event Folders in the warehouse's browse list.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('16. Flex — the create-element route (stubbed; NO live Flex)');
+
+  const flexLib = require('../lib/flex');
+  const FLEX_ENV_BEFORE = { url: process.env.FLEX_BASE_URL, key: process.env.FLEX_API_KEY };
+  delete process.env.FLEX_BASE_URL;
+  delete process.env.FLEX_API_KEY;
+
+  const fxShow = await POST('/api/shows', {
+    project_id: P, name: TAG + ' Big Ten vs. SEC — Wrigley Field', venue: 'Wrigley Field',
+    city: 'Chicago, IL', load_in_date: '2026-11-12', event_date: '2026-11-14',
+    strike_date: '2026-11-15'
+  }, { token: A });
+  const FX = fxShow.body.id;
+  // the clock times live on the call sheet, not on the show create (HARDENING 16)
+  const fxTimes = await PUT(`/api/shows/${FX}/call-sheet`,
+    { doors_time: '17:30', event_time: '19:00', strike_time: '23:00' }, { token: A });
+  ok('16: a show with an em-dash in its name and three clock times exists',
+     FX > 0 && fxTimes.status === 200, { show: fxShow.body.id, times: fxTimes.body });
+
+  // ── phase 1: unconfigured, which is what the test environment really is ────
+  const fxTech = await POST(`/api/shows/${FX}/flex/create-element`, {}, { token: TECHT });
+  ok('16 GATE: a tech is refused BEFORE any configuration question is asked',
+     fxTech.status === 403, fxTech.body);
+  const fxNoCfg = await POST(`/api/shows/${FX}/flex/create-element`, {}, { token: A });
+  ok('16: with FLEX_* unset the answer is 501 — an ops answer, not a bug report',
+     fxNoCfg.status === 501, fxNoCfg.body);
+  ok('16: ...and the 501 NAMES both missing variables and where to get them',
+     /FLEX_BASE_URL/.test(fxNoCfg.body.error) && /FLEX_API_KEY/.test(fxNoCfg.body.error)
+     && /staffing/.test(fxNoCfg.body.error), fxNoCfg.body.error);
+  const gearNoCfg = await GET(`/api/shows/${FX}/gear`, { token: A });
+  ok('16: an unconfigured server offers NO deep link rather than a broken one',
+     gearNoCfg.status === 200 && gearNoCfg.body.deepLink === '', gearNoCfg.body);
+
+  // ── phase 2: configured against an unroutable host, fetch stubbed ─────────
+  const FLEX_STUB_BASE = 'https://flex-stub.invalid';
+  process.env.FLEX_BASE_URL = FLEX_STUB_BASE;
+  process.env.FLEX_API_KEY = 'smoke-stub-key';
+  flexLib.flexResetUserCache();
+
+  const flexCalls = [];
+  let contactCreateFails = false;
+  const STUB_DIRECTORY = [
+    { id: 'ct-lovb', name: 'League One Volleyball', deleted: false },
+    { id: 'ct-tom', name: 'Tom Andres', deleted: false },
+    { id: 'ct-ufl', name: 'UFL', deleted: false }
+  ];
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.indexOf(FLEX_STUB_BASE) !== 0) return realFetch(url, opts);
+    flexCalls.push({ url: u, method: opts.method || 'GET',
+                     body: opts.body ? JSON.parse(opts.body) : null,
+                     headers: opts.headers || {} });
+    const json = (body, status) => ({
+      ok: !status || (status >= 200 && status < 300), status: status || 200, statusText: 'OK',
+      headers: { get: () => 'application/json' }, text: async () => JSON.stringify(body)
+    });
+    if (/\/user-profile\/current-user$/.test(u)) {
+      return json({ userId: 'stub-user', contactId: 'ct-tom', name: 'Tom Andres' });
+    }
+    if (/\/api\/contact\b/.test(u) && (opts.method || 'GET') === 'POST') {
+      if (contactCreateFails) return json({ exceptionMessage: 'contact create not permitted' }, 403);
+      return json({ id: 'ct-CREATED', name: JSON.parse(opts.body).name, organization: true });
+    }
+    if (/\/api\/contact/.test(u)) {
+      return json({ content: STUB_DIRECTORY, totalElements: STUB_DIRECTORY.length, totalPages: 1,
+                    size: 200, number: 0, last: true });
+    }
+    if (/\/api\/element$/.test(u) && opts.method === 'POST') {
+      return json({ elementId: 'stub-element-0001', elementNumber: null,
+                    elementName: JSON.parse(opts.body).name, definitionName: 'Event Folder' });
+    }
+    return json({ exceptionMessage: 'no stub for ' + u }, 404);
+  };
+
+  const fxPm2 = await POST(`/api/shows/${FX}/flex/create-element`, {}, { token: PM2T });
+  ok('16 GATE: a pm who does not own the folder is refused even when Flex IS configured',
+     fxPm2.status === 403, fxPm2.body);
+  const fxGhost = await POST('/api/shows/99999999/flex/create-element', {}, { token: A });
+  ok('16: an unknown show is a 404, and nothing was sent to Flex',
+     fxGhost.status === 404 && !flexCalls.some((c) => /\/api\/element$/.test(c.url)), fxGhost.body);
+
+  flexCalls.length = 0;
+  const fxMade = await POST(`/api/shows/${FX}/flex/create-element`, {}, { token: A });
+  ok('16: the owning admin creates the folder', fxMade.status === 200, fxMade.body);
+  ok('16: the stored id is the one FLEX RETURNED, not one the app invented',
+     fxMade.body.elementId === 'stub-element-0001', fxMade.body.elementId);
+  ok('16: the response carries a real deep link with the # SPA marker',
+     fxMade.body.deepLink === FLEX_STUB_BASE + '/f5/ui/#element/stub-element-0001',
+     fxMade.body.deepLink);
+
+  const fxPost = flexCalls.find((c) => /\/api\/element$/.test(c.url) && c.method === 'POST');
+  ok('16: exactly ONE element POST went out', !!fxPost
+     && flexCalls.filter((c) => /\/api\/element$/.test(c.url)).length === 1, flexCalls.map((c) => c.method + ' ' + c.url));
+  ok('16: the key rides in X-Auth-Token, never Authorization',
+     fxPost.headers['X-Auth-Token'] === 'smoke-stub-key' && !fxPost.headers.Authorization,
+     Object.keys(fxPost.headers));
+  ok('16 BUG 1: the /f5 prefix is present exactly once',
+     fxPost.url === FLEX_STUB_BASE + '/f5/api/element', fxPost.url);
+  ok('16: the em-dash in the show name became a hyphen before it left the building',
+     fxPost.body.name === TAG + ' Big Ten vs. SEC - Wrigley Field', fxPost.body.name);
+  ok('16 BUG 2/3: every date is Z-suffixed with no offset, and none is midnight UTC',
+     ['plannedStartDate', 'plannedEndDate', 'loadInDate', 'loadOutDate']
+       .every((k) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(fxPost.body[k])
+                     && !/T00:00:00Z$/.test(fxPost.body[k])),
+     fxPost.body);
+  ok('16: plannedStart is load-in −3d and plannedEnd is strike +7d, at Central noon (CST = 18:00Z)',
+     fxPost.body.plannedStartDate === '2026-11-09T18:00:00Z'
+     && fxPost.body.plannedEndDate === '2026-11-22T18:00:00Z', fxPost.body);
+  ok('16: loadInDate is the load-in and loadOutDate is the STRIKE',
+     fxPost.body.loadInDate === '2026-11-12T18:00:00Z'
+     && fxPost.body.loadOutDate === '2026-11-15T18:00:00Z', fxPost.body);
+  ok('16: the times the Flex form cannot hold ride in the notes',
+     fxPost.body.notes.split('\n')[0] === 'Event: 2026-11-14 · Doors 17:30 · Show 19:00 · Strike 23:00',
+     fxPost.body.notes);
+  ok('16: a client already in the directory is MATCHED and sent by id',
+     fxPost.body.clientId === 'ct-lovb' && fxMade.body.contacts.client.outcome === 'matched',
+     fxMade.body.contacts.client);
+  ok('16: a venue that is NOT in the directory is CREATED, then sent by id',
+     fxPost.body.venueId === 'ct-CREATED' && fxMade.body.contacts.venue.outcome === 'created',
+     fxMade.body.contacts.venue);
+  const ctPost = flexCalls.find((c) => /\/api\/contact/.test(c.url) && c.method === 'POST');
+  ok('16: the created contact carries name + organization + company, and nothing else',
+     !!ctPost && ctPost.body.name === 'Wrigley Field' && ctPost.body.organization === true
+     && ctPost.body.company === 'Wrigley Field' && Object.keys(ctPost.body).length === 3,
+     ctPost && ctPost.body);
+  ok('16: the directory was read ONCE for both lookups',
+     flexCalls.filter((c) => /\/api\/contact/.test(c.url) && c.method === 'GET').length === 1,
+     flexCalls.filter((c) => /\/api\/contact/.test(c.url)).map((c) => c.method));
+
+  const fxRow = await pool.query('SELECT * FROM flex_state WHERE show_id=$1', [FX]);
+  ok('16: the RETURNED id is what got persisted, and the row reads linked',
+     fxRow.rows[0].linked === true && fxRow.rows[0].element_id === 'stub-element-0001',
+     fxRow.rows[0]);
+  const fxAct = await pool.query(
+    `SELECT * FROM activity WHERE show_id=$1 AND action='flex.create'`, [FX]);
+  ok('16: one activity line, naming the element and both contact outcomes',
+     fxAct.rows.length === 1 && /stub-element-0001/.test(fxAct.rows[0].detail)
+     && /client matched/.test(fxAct.rows[0].detail) && /venue created/.test(fxAct.rows[0].detail),
+     fxAct.rows[0] && fxAct.rows[0].detail);
+  const fxGear = await GET(`/api/shows/${FX}/gear`, { token: A });
+  ok('16: GET /gear now serves the deep link too, so a reload keeps the link',
+     fxGear.body.deepLink === FLEX_STUB_BASE + '/f5/ui/#element/stub-element-0001'
+     && fxGear.body.fabricated === false, fxGear.body);
+
+  flexCalls.length = 0;
+  const fxAgain = await POST(`/api/shows/${FX}/flex/create-element`, {}, { token: A });
+  ok('16: a second create on a linked show is a 409 — one show, one folder',
+     fxAgain.status === 409 && /already linked/i.test(fxAgain.body.error), fxAgain.body);
+  ok('16: ...and the 409 sent NOTHING to Flex', flexCalls.length === 0, flexCalls);
+
+  // ── the prototype's fabricated ids are replaceable, not permanent ─────────
+  const fxShow2 = await POST('/api/shows', {
+    project_id: P, name: TAG + ' fabricated link', venue: 'Nowhere Arena',
+    load_in_date: '2026-11-12', event_date: '2026-11-14', strike_date: '2026-11-15'
+  }, { token: A });
+  const FX2 = fxShow2.body.id;
+  await PUT(`/api/shows/${FX2}/gear`,
+    { linked: true, element_id: '1a2b3c4d-b1cc-4e90-83ce-bbd69eb3e4fa' }, { token: A });
+  const fabGear = await GET(`/api/shows/${FX2}/gear`, { token: A });
+  ok('16: a modeled id is FLAGGED as fabricated and offered no deep link',
+     fabGear.body.fabricated === true && fabGear.body.deepLink === '', fabGear.body);
+  flexCalls.length = 0;
+  contactCreateFails = true;
+  const fxReplace = await POST(`/api/shows/${FX2}/flex/create-element`,
+    { create_contacts: true }, { token: A });
+  ok('16: a real create REPLACES a fabricated link instead of 409-ing forever',
+     fxReplace.status === 200 && fxReplace.body.elementId === 'stub-element-0001', fxReplace.body);
+  ok('16: a FAILED contact create does not fail the folder — the venue is omitted and SAID SO',
+     fxReplace.body.contacts.venue.outcome === 'omitted'
+     && /creating it in Flex failed/i.test(fxReplace.body.contacts.venue.reason),
+     fxReplace.body.contacts.venue);
+  const fxPost2 = flexCalls.find((c) => /\/api\/element$/.test(c.url) && c.method === 'POST');
+  ok('16: ...so venueId is ABSENT from the payload, never null',
+     !('venueId' in fxPost2.body) && fxPost2.body.clientId === 'ct-lovb', Object.keys(fxPost2.body));
+  ok('16: ...and the venue NAME still reaches Flex, on its own notes line',
+     /^Venue: Nowhere Arena \(not linked in Flex\)$/m.test(fxPost2.body.notes), fxPost2.body.notes);
+  contactCreateFails = false;
+
+  // ── the toggle OFF is the staffing app's proven never-send behaviour ──────
+  const fxShow3 = await POST('/api/shows', {
+    project_id: P, name: TAG + ' toggle off', venue: 'Unknown Field',
+    event_date: '2026-11-14'
+  }, { token: A });
+  const FX3 = fxShow3.body.id;
+  flexCalls.length = 0;
+  const fxOff = await POST(`/api/shows/${FX3}/flex/create-element`,
+    { create_contacts: false }, { token: A });
+  ok('16: with the toggle OFF an unmatched venue is omitted and NO contact is created',
+     fxOff.status === 200 && fxOff.body.contacts.venue.outcome === 'omitted'
+     && !flexCalls.some((c) => /\/api\/contact/.test(c.url) && c.method === 'POST'),
+     fxOff.body.contacts.venue);
+  ok('16: ...and the reason says the option was off, not that Flex refused',
+     /create missing contacts.*off/i.test(fxOff.body.contacts.venue.reason),
+     fxOff.body.contacts.venue.reason);
+  const fxPost3 = flexCalls.find((c) => /\/api\/element$/.test(c.url) && c.method === 'POST');
+  ok('16: a show with only an event date still gets a start date (event −3d), and NO loadInDate',
+     fxPost3.body.plannedStartDate === '2026-11-11T18:00:00Z'
+     && !('loadInDate' in fxPost3.body) && !('loadOutDate' in fxPost3.body),
+     fxPost3.body);
+
+  const fxUnlink = await DEL(`/api/shows/${FX}/flex/element`, { token: A });
+  ok('16: unlink forgets the pointer and clears the deep link',
+     fxUnlink.status === 200 && fxUnlink.body.linked === false
+     && !fxUnlink.body.elementId && fxUnlink.body.deepLink === '', fxUnlink.body);
+  const fxUnlinkTech = await DEL(`/api/shows/${FX}/flex/element`, { token: TECHT });
+  ok('16 GATE: a tech cannot unlink either', fxUnlinkTech.status === 403, fxUnlinkTech.body);
+
+  // ── nothing leaves this suite pointing at a live tenant ───────────────────
+  ok('16: every Flex call in this section went to the STUB host, never to Flex',
+     flexCalls.every((c) => c.url.indexOf(FLEX_STUB_BASE) === 0), flexCalls.map((c) => c.url));
+  global.fetch = realFetch;
+  if (FLEX_ENV_BEFORE.url) process.env.FLEX_BASE_URL = FLEX_ENV_BEFORE.url;
+  else delete process.env.FLEX_BASE_URL;
+  if (FLEX_ENV_BEFORE.key) process.env.FLEX_API_KEY = FLEX_ENV_BEFORE.key;
+  else delete process.env.FLEX_API_KEY;
+  flexLib.flexResetUserCache();
+  ok('16: the environment is restored and global fetch is the real one again',
+     global.fetch === realFetch && !process.env.FLEX_BASE_URL === !FLEX_ENV_BEFORE.url);
+
   section('6. cascade integrity — a folder with a child of EVERY type');
   const before = await childCounts(P);
   ok('the smoke folder has children of every wired type',

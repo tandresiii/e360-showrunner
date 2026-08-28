@@ -462,7 +462,23 @@ Note: `plannedStartDate` comes back **without** the `Z` it was sent with. Note a
 ```
 `loadInDate`/`loadOutDate` are omitted entirely when null (`:301-302`). Date derivation: `plannedStartDate = (shipOutDate || setup) − 3 days`; `plannedEndDate = (shipReturnDate || breakdown) + 7 days`, falling back to `plannedStart`; `loadInDate = setup` (with `setupTime` if it matches `HH:MM`); `loadOutDate = breakdown` (`staffing/server.js:277-289`).
 
-**Never send** (`flex_integration_plan.md:190-197`): `clientId`, `secondaryClientId`, `billToId`, `venueId`, `secondaryVenueId`, `facilityId` (all FK refs into Flex's contact DB, needing a lookup flow that doesn't exist), `locationId` (Flex defaults to the user's homebase), `currencyId`, `statusId` (let Flex default), any `customField*Value`, `salesPersonId`, `accountExecutiveId` (not visible on the Event Folder form).
+**Never send** (`flex_integration_plan.md:190-197`): `secondaryClientId`, `billToId`, `secondaryVenueId`, `facilityId`, `locationId` (Flex defaults to the user's homebase), `currencyId`, `statusId` (let Flex default), any `customField*Value`, `salesPersonId`, `accountExecutiveId` (not visible on the Event Folder form).
+
+> **Amended 2026-08-27 (Tom).** `clientId` and `venueId` LEFT the never-send list. The original reason was "an FK into Flex's contact DB, needing a lookup flow that doesn't exist" — Showrunner now has that flow (§3.4.1). They are still never *guessed*: the caller resolves an id or the key is absent from the payload entirely.
+
+#### 3.4.1 The contact directory — and the create nobody has watched
+
+Three facts, read off the live tenant on 2026-08-27 (artifacts: `flex-probe/contact-page0.json`, `contact-one.json`):
+
+- **C1 — the shape.** `GET /f5/api/contact` answers a Spring page envelope `{content:[…], totalElements:24, totalPages:2, size:20, number:0, last}`. Each row is the *identity* projection only: `{id, name, preferredDisplayString, barcode, deleted, shortName, domainId:'contact', className:'CONTACT', shortNameOrName}`. There is no type discriminator on the listing — a person and a stadium look identical.
+- **C2 — every filter is ignored.** `?searchText=`, `?name=` and `?query=` all return the same unfiltered page; only `size=` is honoured (`size=200` returns all 24 in one call, on any `page`). **Match locally, over the whole directory.** `lib/flex.js flexListContacts()` pages defensively and dedupes by id, because a `page` parameter that is silently ignored will otherwise return the first page forever.
+- **C3 — the full record.** `GET /f5/api/contact/{id}` returns ~60 fields. An organisation contact ("Kansas City Municipal") carries `{name, organization:true, company:'<same name>', addresses:[…]}`. That is where the create payload comes from.
+
+**The create is UNPROBED.** `OPTIONS /f5/api/contact` answers `Allow: POST,GET,HEAD,OPTIONS`, so the verb exists; the body `{name, organization:true, company:name}` is inferred from C3 and has never been executed. `flexCreateContact()` therefore treats *any* failure — non-2xx, or a 2xx carrying no id — as a reason to **omit the field and say so**, never as a reason to fail the folder create. The first live execution is the conductor's post-deploy run on Show 1.
+
+**The v1 resolution rule** (`flexResolveContact`): exact local match → use that id · no match and "create missing contacts" is ON → POST the contact, use the returned id · no match with it OFF, or the create failed → **omit the field and report the reason**. Matching is case-insensitive and whitespace-collapsed but still EXACT — the real directory holds `Hard Rock  Stadium` and `Allegiant ` with the spacing a human typed, while `Citrus Sports Group` and `Citrus Sports group  Co` are two different contacts and must stay so. `deleted:true` rows never match.
+
+**What the operator is told.** `POST /api/shows/:id/flex/create-element` returns `contacts:{client:{outcome,id,name,reason}, venue:{…}}` with `outcome` one of `matched | created | omitted`, and the omitted name is additionally written into the folder's `notes` (`Venue: Wrigley Field (not linked in Flex)`). A folder that lands without its venue says so twice rather than looking complete.
 
 **Name sanitization:** `flexSanitizeName` maps `[–—―−]` → `-` (`staffing/server.js:92-94`). Flex silently strips em-dashes; do this before every POST.
 

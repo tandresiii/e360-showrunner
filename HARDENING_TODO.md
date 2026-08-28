@@ -7,6 +7,10 @@ Source of truth for current behavior remains the six test suites.
 **Suites after the pass: 1,279 assertions green** — smoke 322 · API 193 ·
 demo 632 · live-push 65 · flex 67 (measured baseline before the pass: 1,240 — smoke +37, API +2).
 
+**After the 2026-08-27 evening pass (items 20–21): 1,780 green** — smoke 504
+(+39) · API 257 (+14) · demo 835 (unchanged) · live-push 72 · flex 112 (+45).
+Every suite run fresh; no test touches the live Flex tenant.
+
 ---
 
 ## Security / correctness
@@ -99,6 +103,58 @@ demo 632 · live-push 65 · flex 67 (measured baseline before the pass: 1,240 �
     and `harness-api.mjs` (which pinned the UI mirror too) — replaced by real
     assertions of the agreeing rule, plus manager-cover assertions so the floor
     cannot be tightened into a wall unnoticed.
+
+## API rough edges (found filing Show #1, 2026-08-27 — next maintenance session)
+15. `POST /api/events` hardcodes job `description=''` (routes/core.js:451) — accept it in the payload.
+16. `venue_address`/POCs writable only via `PUT /shows/:id/call-sheet`, not the composite or show PUT — unify.
+17. `normalizePoc()` (routes/schedule.js:227) silently drops `email` — add the field.
+18. `applyScope()` force-stamps scope_verified_at/by — allow an unverified manual write (scope_source:'manual' is the only honest marker today).
+19. `pitch`/`cabinet_type` are TEXT — fine, but document; consider numeric pitch.
+
+## Flex create — the real one
+20. **BUILT 2026-08-27.** `POST /api/shows/:id/flex/create-element` (routes/files.js
+    §7) calls `flexCreateEventFolder` for real and stores the id **Flex returned**.
+    Guards in order: `requireRole('pm')` → 501 naming the unset `FLEX_*` vars →
+    404 → `canEditProject` 403 → 409 if already linked to a REAL id. `modeledUuid`
+    is gone from the create path (renamed `demoModeledUuid`, demo-only); the
+    client calls the route and takes the response id; the button is gated on
+    `config.features.flex`. Deep link `#element/<id>` is DERIVED per request and
+    served on all four gear routes, so "View in Flex" is a real anchor.
+    **Tom's two calls, both answered:** (a) the times ride in `notes`
+    (`Event: … · Doors … · Show … · Strike …`) — the Event Folder definition has
+    19 fields and not one takes a clock time; (b) contacts are **match → create →
+    omit**, with a "Create missing contacts in Flex" toggle defaulted ON, and the
+    per-contact outcome reported honestly in the response, the toast and the notes.
+    See INTEGRATIONS_SPEC §3.4.1. **The contact POST has never been executed** —
+    the post-deploy run on Show 1 is its first live use, and a failure there omits
+    the field rather than failing the folder.
+    *Still open:* `DELETE /api/shows/:id/flex/element` exists to clear a
+    fabricated link, but nothing sweeps the pre-existing ones; the pull-sheet R21
+    grammar + BUG 4 correction are still only banked in `scratchpad/flex-probe/`
+    and want a write-back into INTEGRATIONS_SPEC §3.3 and FLEX_CAPABILITIES.
+
+## THE FABRICATION LINE (2026-08-27 — found in production, same day)
+21. **FIXED.** Tom opened Show 1's Specs & Chain tab in PRODUCTION and the
+    prototype's mock generator filed a **canned `.e360`** — 10mm pitch, two MX40s,
+    a placeholder pixel map — as a real `files` row with a real `spec_renders`
+    bundle, under his real job number. Same disease as the Flex button.
+    **The rule, now enforced:** *in API mode nothing is ever created except from
+    real user input or a real integration response.*
+    Gated behind `demoOnly()` in `public/app.js`: `specGen` (Showrunner cannot
+    author a spec — the three desktop tools do, and bind through the popup),
+    `flexPull` (not wired; it used to invent a gear list id, two PDF rows and a
+    pull-sheet revision), `flexLink` (now asks for a REAL element id or a pasted
+    deep link instead of hashing one). Second locks sit inside `bindChainFile`
+    and `bindGearFiles`, the functions that actually write. `normGear` serves an
+    EMPTY kit in API mode — `buildKit()` invents a whole LED package from a
+    cabinet count. The Specs tab drops the Generate button entirely in API mode
+    and says "bind from the tool" instead.
+    **Mutation-tested:** removing the `specGen` guard turns five harness-api
+    assertions red, including the row count on a bare show.
+    *Not yet swept (deliberate, next session):* `commitAddFile` / `dropFile` still
+    stamp a fabricated `size`/`dim`/`meta:'modeled'` on a row a human asked for —
+    user-initiated, so it does not violate the rule, but the numbers are fiction
+    and there IS a real byte-upload route to point them at.
 
 ## Noted, deliberate — do NOT "fix"  *(untouched by the pass)*
 - Photo curation is rank-only (no ownership term) BY DESIGN — mutation-tested.

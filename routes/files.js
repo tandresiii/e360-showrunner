@@ -35,6 +35,13 @@ const {
 // D7/D8 + the type sniff. The checker reports QUESTIONS, never errors — see
 // lib/speccheck.js for why two correct specs can legitimately disagree.
 const { typeMismatch, sanitizeSpecJson, checkChain } = require('../lib/speccheck');
+// §7. The Flex client. Every call below it is a REAL call against a live BETA
+// API — see lib/flex.js for the six bugs it works around.
+const {
+  flexConfigured, notConfigured, flexElementUrl, flexCreateEventFolder,
+  flexListContacts, flexResolveContact, flexTimesNote, flexOmittedNote,
+  flexIsFabricatedElementId
+} = require('../lib/flex');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -561,18 +568,179 @@ router.get('/shows/:id/spec-check', asyncH(async (req, res) => {
 }));
 
 // ════════════════════════════════════════════════════════════════════════════
-// 7. FLEX GEAR STATE
+// 7. FLEX GEAR STATE — and, since 2026-08-27, the REAL Event Folder create
 // ════════════════════════════════════════════════════════════════════════════
-// The Flex API client itself is deliberately NOT built here — it needs the
-// staffing app's Flex credentials and endpoint details (a separate task). This
-// stores the STATE the UI reads: linked / pulled / element_id / gear_list_id /
-// doc_number.
+// This section stores the STATE the UI reads (linked / pulled / element_id /
+// gear_list_id / doc_number) AND owns the one route that actually writes into
+// Flex. The header used to say "the Flex API client is deliberately NOT built
+// here"; that was true until the button that claimed to create a folder was
+// found fabricating a UUID in the browser, persisting it, and toasting success.
+// `POST /shows/:id/flex/create-element` below is the honest version: it calls
+// lib/flex.js, and the id it stores is the id FLEX RETURNED or nothing at all.
+
+// ONE gear payload, used by all four gear routes. The deep link is DERIVED,
+// never stored — one env-var change relocates every link in the app — and it is
+// absent (rather than broken) when Flex is unconfigured or nothing real is
+// linked, so the UI can tell "no folder" from "no address for the folder".
+function gearPayload(row, show) {
+  const showId = show.id;
+  const state = dbToFlexState(row, showId);
+  const fabricated = flexIsFabricatedElementId(state.elementId);
+  let deepLink = '';
+  if (state.elementId && !fabricated && flexConfigured()) {
+    try { deepLink = flexElementUrl(state.elementId); } catch (_) { deepLink = ''; }
+  }
+  return { ...state, cabinets: show.cabinets || 0, deepLink, fabricated };
+}
+
 router.get('/shows/:id/gear', asyncH(async (req, res) => {
   const showId = idParam(req);
   const show = await loadShow(showId);
   if (!show) throw notFound('Show not found');
   const r = await pool.query('SELECT * FROM flex_state WHERE show_id=$1', [showId]);
-  res.json({ ...dbToFlexState(r.rows[0], showId), cabinets: show.cabinets || 0 });
+  res.json(gearPayload(r.rows[0], show));
+}));
+
+// POST /api/shows/:id/flex/create-element
+//   body: { create_contacts?: boolean }   (default TRUE — Tom, 2026-08-27)
+//
+// Guard order is deliberate: role, then configuration, then existence, then
+// ownership, then the 409. The configuration answer is an OPS answer and comes
+// before any database work; it names the variables that are missing.
+router.post('/shows/:id/flex/create-element', requireRole('pm'), asyncH(async (req, res) => {
+  const missing = ['FLEX_BASE_URL', 'FLEX_API_KEY'].filter((v) => !process.env[v]);
+  if (missing.length) throw notConfigured(missing.join(' and '));
+
+  const showId = idParam(req);
+  const show = await loadShow(showId);
+  if (!show) throw notFound('Show not found');
+  const project = await loadProject(show.project_id);
+  if (!canEditProject(req.session, project)) throw forbidden();
+
+  const cur = (await pool.query('SELECT * FROM flex_state WHERE show_id=$1', [showId])).rows[0] || {};
+  if (cur.linked && cur.element_id && !flexIsFabricatedElementId(cur.element_id)) {
+    const e = new Error(
+      `This show is already linked to Flex Event Folder ${cur.element_id}. ` +
+      `Unlink it first if you really want a second folder — a duplicate folder is ` +
+      `a duplicate pull sheet, and the warehouse will pick from whichever it finds.`);
+    e.status = 409;
+    throw e;
+  }
+
+  // ── the payload, from show + project (the 19-field map) ───────────────────
+  // A folder needs a start date. Load-in is the real one; the event date is the
+  // fallback, and it goes in as a SHIP-OUT source so it moves plannedStartDate
+  // WITHOUT inventing a load-in the show does not have.
+  const loadInDate = show.load_in_date || null;
+  const strikeDate = show.strike_date || null;
+  const eventDate = show.event_date || null;
+  if (!loadInDate && !eventDate) {
+    throw badRequest('This show has neither a load-in date nor an event date. ' +
+      'Flex requires a start date on an Event Folder — set one on the show first.');
+  }
+
+  // The show's name is the folder's name — it is the string every human on the
+  // job already uses. Only a nameless show falls back to the project.
+  const rawName = (show.name && String(show.name).trim()) ||
+    (project && project.name) || `Show ${showId}`;
+
+  const createContacts = has(req.body || {}, 'create_contacts')
+    ? !!pick(req.body || {}, 'create_contacts')
+    : true;
+
+  // One directory read, reused for both lookups — 24 rows, filters ignored.
+  let directory = null;
+  let directoryError = '';
+  try { directory = await flexListContacts(); }
+  catch (e) { directory = []; directoryError = e.message; }
+
+  const contacts = {
+    client: await flexResolveContact(project && project.client, {
+      directory, create: createContacts, label: 'client' }),
+    venue: await flexResolveContact(show.venue, {
+      directory, create: createContacts, label: 'venue' })
+  };
+  if (directoryError) {
+    for (const k of ['client', 'venue']) {
+      if (contacts[k].outcome === 'omitted' && !/directory/.test(contacts[k].reason)) {
+        contacts[k].reason += ` (the contact directory read failed first: ${directoryError})`;
+      }
+    }
+  }
+
+  const timesNote = flexTimesNote({
+    eventDate, doorsTime: show.doors_time, showTime: show.event_time, strikeTime: show.strike_time });
+  const omittedNote = flexOmittedNote(contacts);
+  const notes = [timesNote, omittedNote].filter(Boolean).join('\n');
+
+  const made = await flexCreateEventFolder({
+    event: rawName,
+    notes,
+    setup: loadInDate,
+    setupTime: show.load_in_time || null,
+    breakdown: strikeDate,
+    // fallbacks ONLY — with a load-in / strike present these stay undefined and
+    // the staffing derivation is byte-for-byte what it always was.
+    shipOutDate: loadInDate ? null : eventDate,
+    shipReturnDate: strikeDate ? null : eventDate,
+    clientId: contacts.client.id,
+    venueId: contacts.venue.id
+  });
+
+  if (!made.elementId) {
+    const e = new Error('Flex accepted the request but returned no elementId — nothing was linked.');
+    e.status = 502;
+    throw e;
+  }
+
+  const saved = await pool.query(
+    `INSERT INTO flex_state (show_id, linked, pulled, element_id, gear_list_id, gear_list_type, doc_number)
+     VALUES ($1,TRUE,$2,$3,$4,$5,$6)
+     ON CONFLICT (show_id) DO UPDATE SET linked=TRUE, element_id=EXCLUDED.element_id,
+       doc_number=EXCLUDED.doc_number, updated_at=NOW()
+     RETURNING *`,
+    [showId, !!cur.pulled, made.elementId, cur.gear_list_id || null,
+     cur.gear_list_type || 'pull-sheet', made.elementNumber || cur.doc_number || null]);
+
+  const outcomeLine = `client ${contacts.client.outcome} · venue ${contacts.venue.outcome}`;
+  await logActivity(pool, { projectId: show.project_id, showId, actor: req.actor,
+    action: 'flex.create',
+    detail: `Flex Event Folder created — ${made.payload.name} (${made.elementId}) · ${outcomeLine}` });
+
+  res.json({
+    ok: true,
+    elementId: made.elementId,
+    elementNumber: made.elementNumber,
+    deepLink: flexElementUrl(made.elementId),
+    name: made.payload.name,
+    notes,
+    contacts,
+    createContacts,
+    dates: {
+      plannedStartDate: made.payload.plannedStartDate,
+      plannedEndDate: made.payload.plannedEndDate,
+      loadInDate: made.payload.loadInDate || null,
+      loadOutDate: made.payload.loadOutDate || null
+    },
+    gear: gearPayload(saved.rows[0], show)
+  });
+}));
+
+// Unlink — the honest counterpart to the 409 above, and the only way to clear a
+// fabricated id left behind by the prototype. It does NOT delete anything in
+// Flex; it forgets the pointer.
+router.delete('/shows/:id/flex/element', requireRole('pm'), asyncH(async (req, res) => {
+  const showId = idParam(req);
+  const show = await loadShow(showId);
+  if (!show) throw notFound('Show not found');
+  if (!canEditProject(req.session, await loadProject(show.project_id))) throw forbidden();
+  const r = await pool.query(
+    `UPDATE flex_state SET linked=FALSE, element_id=NULL, updated_at=NOW()
+     WHERE show_id=$1 RETURNING *`, [showId]);
+  if (!r.rows.length) return res.json(gearPayload(null, show));
+  await logActivity(pool, { projectId: show.project_id, showId, actor: req.actor,
+    action: 'flex.unlink', detail: 'Flex Event Folder unlinked (the folder itself is untouched)' });
+  res.json(gearPayload(r.rows[0], show));
 }));
 
 router.put('/shows/:id/gear', requireRole('tech'), asyncH(async (req, res) => {
@@ -596,7 +764,7 @@ router.put('/shows/:id/gear', requireRole('tech'), asyncH(async (req, res) => {
      has(b, 'doc_number') ? pick(b, 'doc_number') : (cur.doc_number || null)]);
   await logActivity(pool, { projectId: show.project_id, showId, actor: req.actor,
     action: 'gear.update', detail: r.rows[0].pulled ? 'pull sheet built' : 'Flex state updated' });
-  res.json(dbToFlexState(r.rows[0], showId));
+  res.json(gearPayload(r.rows[0], show));
 }));
 
 // ════════════════════════════════════════════════════════════════════════════

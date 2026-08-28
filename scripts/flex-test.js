@@ -367,6 +367,218 @@ function route(url) {
        === 'https://e360sport.flexrentalsolutions.com/f5/ui/#element/abc-123',
      flex.flexElementUrl('abc-123'));
 
+  // ════════════════════════════════════════════════════════════════════════
+  // CONTACTS — the directory, the match, the (unprobed) create, the omit
+  // ────────────────────────────────────────────────────────────────────────
+  // Fixtures are the REAL 24 names read from the live tenant on 2026-08-27
+  // (probe: flex-probe/contact-page0.json), plus one deleted row that must
+  // never match. Note what is NOT in the list: "Big Ten Conference" and
+  // "Wrigley Field" — Show 1's client and venue. That absence is the whole
+  // reason the create-contacts option exists.
+  // ════════════════════════════════════════════════════════════════════════
+  const DIRECTORY_NAMES = [
+    'Camping World Stadium Orlando', 'Unified Events', 'e360Sport', 'Citrus Sports group  Co',
+    'Hard Rock  Stadium', 'Athletico Dallas', 'E360 Sport', 'Larry  Farkos', 'Flex Support',
+    'LOVB', 'Razorback Stadium', 'Citrus Sports Group', 'Northwest Stadium', 'Tom Andres',
+    'UFL', 'Andrew Dallas', 'Chris Stein', 'Ethan Klohr', 'Allegiant ', 'Kansas City Municipal',
+    'Orange Bowl Committee', 'Big Ten Network', 'SEC Network', 'Wrigley Rooftops'
+  ];
+  const DIRECTORY = DIRECTORY_NAMES.map((n, i) => ({
+    id: 'contact-' + String(i).padStart(2, '0'), name: n, preferredDisplayString: null,
+    barcode: null, deleted: false, shortName: null, domainId: 'contact',
+    className: 'CONTACT', shortNameOrName: n
+  }));
+  // A DELETED row bearing exactly the name we will search for. If the client
+  // ever matches this, a folder gets linked to a contact nobody can see.
+  DIRECTORY.push({ id: 'contact-deleted', name: 'Wrigley Field', deleted: true,
+                   domainId: 'contact', className: 'CONTACT' });
+
+  let contactPostMode = 'ok';        // 'ok' | 'fail' | 'noid'
+  let contactPosts = [];
+  function contactPage(url) {
+    const size = parseInt((url.match(/[?&]size=(\d+)/) || [])[1] || '20', 10);
+    const page = parseInt((url.match(/[?&]page=(\d+)/) || [])[1] || '0', 10);
+    const totalPages = Math.max(1, Math.ceil(DIRECTORY.length / size));
+    const from = Math.min(page * size, DIRECTORY.length);
+    const content = DIRECTORY.slice(from, from + size);
+    return { body: { content, totalElements: DIRECTORY.length, totalPages, size,
+                     number: page, last: page + 1 >= totalPages, first: page === 0,
+                     numberOfElements: content.length, empty: !content.length } };
+  }
+  function contactRoute(url, options) {
+    if (/\/api\/contact\b/.test(url) && options && options.method === 'POST') {
+      contactPosts.push(JSON.parse(options.body));
+      if (contactPostMode === 'fail') return { status: 403, body: { exceptionMessage: 'not permitted' } };
+      if (contactPostMode === 'noid') return { body: { name: 'whatever', organization: true } };
+      return { body: { id: 'contact-NEW', name: JSON.parse(options.body).name, organization: true } };
+    }
+    if (/\/api\/contact\?/.test(url) || /\/api\/contact$/.test(url)) return contactPage(url);
+    return route(url);
+  }
+
+  section('contacts — the directory read (C1/C2)');
+  handler = contactRoute;
+  calls.length = 0;
+  const dir = await flex.flexListContacts();
+  ok('the whole directory comes back, not one page',
+     dir.length === DIRECTORY_NAMES.length, dir.length);
+  ok('the page envelope is unwrapped to {id,name} rows',
+     dir.every((c) => typeof c.id === 'string' && typeof c.name === 'string'), dir[0]);
+  ok('a DELETED contact is dropped — a folder must not link to one nobody can see',
+     !dir.some((c) => c.id === 'contact-deleted'), dir.filter((c) => /deleted/.test(c.id)));
+  ok('one call suffices when size covers the directory (24 rows, size=200)',
+     calls.filter((c) => /\/api\/contact/.test(c.url)).length === 1,
+     calls.map((c) => c.url));
+  calls.length = 0;
+  const paged = await flex.flexListContacts({ pageSize: 10 });
+  ok('...and it really pages when the page is smaller than the directory',
+     paged.length === DIRECTORY_NAMES.length &&
+     calls.filter((c) => /\/api\/contact/.test(c.url)).length === 3, {
+       got: paged.length, calls: calls.length });
+  ok('every page carries BOTH page and size — `size` is the only one Flex honours',
+     calls.every((c) => /[?&]page=\d+/.test(c.url) && /[?&]size=\d+/.test(c.url)),
+     calls.map((c) => c.url));
+
+  section('contacts — the local match is EXACT, never fuzzy');
+  ok('an exact name matches',
+     (flex.flexMatchContact('Kansas City Municipal', dir) || {}).name === 'Kansas City Municipal');
+  ok('case does not matter',
+     (flex.flexMatchContact('kansas city MUNICIPAL', dir) || {}).name === 'Kansas City Municipal');
+  ok('the double space a human typed does not matter ("Hard Rock  Stadium")',
+     (flex.flexMatchContact('Hard Rock Stadium', dir) || {}).name === 'Hard Rock  Stadium');
+  ok('a trailing space does not matter ("Allegiant ")',
+     (flex.flexMatchContact('Allegiant', dir) || {}).name === 'Allegiant ');
+  ok('a PREFIX is not a match — "Citrus Sports Group" is not "Citrus Sports group  Co"',
+     (flex.flexMatchContact('Citrus Sports Group', dir) || {}).id === 'contact-11',
+     flex.flexMatchContact('Citrus Sports Group', dir));
+  ok('a substring is not a match ("Big Ten Conference" vs "Big Ten Network")',
+     flex.flexMatchContact('Big Ten Conference', dir) === null,
+     flex.flexMatchContact('Big Ten Conference', dir));
+  ok('"Wrigley Field" matches NOTHING — the live directory really has no venue for Show 1',
+     flex.flexMatchContact('Wrigley Field', dir) === null);
+  ok('an empty name never matches anything',
+     flex.flexMatchContact('', dir) === null && flex.flexMatchContact(null, dir) === null);
+
+  section('contacts — resolve: matched / created / omitted, and it SAYS WHICH');
+  const rMatched = await flex.flexResolveContact('LOVB', { directory: dir, create: true });
+  ok('a match reports `matched` and sends the directory id',
+     rMatched.outcome === 'matched' && rMatched.id === dir.find((c) => c.name === 'LOVB').id, rMatched);
+  ok('...and never POSTs a duplicate when a match exists',
+     contactPosts.length === 0, contactPosts);
+
+  const rOff = await flex.flexResolveContact('Wrigley Field', { directory: dir, create: false });
+  ok('no match with creation OFF is `omitted` with a null id',
+     rOff.outcome === 'omitted' && rOff.id === null, rOff);
+  ok('...and the reason names both facts a human needs',
+     /no exact match/i.test(rOff.reason) && /create missing contacts/i.test(rOff.reason), rOff.reason);
+  ok('...and the NAME survives, so the caller can still put it in the notes',
+     rOff.name === 'Wrigley Field', rOff);
+
+  contactPosts = [];
+  contactPostMode = 'ok';
+  const rMade = await flex.flexResolveContact('Wrigley Field', { directory: dir, create: true });
+  ok('no match with creation ON creates it and reports `created`',
+     rMade.outcome === 'created' && rMade.id === 'contact-NEW', rMade);
+  ok('the create payload mirrors a real organisation contact (C3): name + organization + company',
+     contactPosts.length === 1 && contactPosts[0].name === 'Wrigley Field' &&
+     contactPosts[0].organization === true && contactPosts[0].company === 'Wrigley Field',
+     contactPosts[0]);
+  ok('the created name is SANITIZED like every other Flex write',
+     (await flex.flexResolveContact('Big Ten — SEC', { directory: dir, create: true }))
+       && contactPosts[contactPosts.length - 1].name === 'Big Ten - SEC',
+     contactPosts[contactPosts.length - 1]);
+
+  contactPosts = [];
+  contactPostMode = 'fail';
+  const rFailed = await flex.flexResolveContact('Wrigley Field', { directory: dir, create: true });
+  ok('a FAILED create falls back to `omitted` — it never throws, never invents an id',
+     rFailed.outcome === 'omitted' && rFailed.id === null, rFailed);
+  ok('...and the reason carries what Flex actually said',
+     /creating it in Flex failed/i.test(rFailed.reason) && /403|not permitted/i.test(rFailed.reason),
+     rFailed.reason);
+
+  contactPostMode = 'noid';
+  const rNoId = await flex.flexResolveContact('Wrigley Field', { directory: dir, create: true });
+  ok('a 200 with NO id is a failure, not a success — refusing to guess is the point',
+     rNoId.outcome === 'omitted' && /returned no id/i.test(rNoId.reason), rNoId);
+  contactPostMode = 'ok';
+
+  contactPosts = [];
+  const rNoName = await flex.flexResolveContact('  ', { directory: dir, create: true, label: 'venue' });
+  ok('a show with no venue name omits, and POSTs nothing',
+     rNoName.outcome === 'omitted' && rNoName.id === null && contactPosts.length === 0, rNoName);
+  ok('...and says so in words a PM can act on',
+     /no venue name on this show/i.test(rNoName.reason), rNoName.reason);
+
+  handler = (url, options) => (/\/api\/contact/.test(url) && (!options || options.method !== 'POST')
+    ? { status: 500, body: { exceptionMessage: 'directory exploded' } }
+    : contactRoute(url, options));
+  const rDirDown = await flex.flexResolveContact('LOVB', { create: false });
+  ok('an unreadable directory omits with the reason — it does NOT fail the folder create',
+     rDirDown.outcome === 'omitted' && /directory could not be read/i.test(rDirDown.reason), rDirDown);
+  handler = contactRoute;
+
+  section('the notes line — the times the Event Folder form cannot hold');
+  ok('all four parts render in order',
+     flex.flexTimesNote({ eventDate: '2026-09-06', doorsTime: '17:30', showTime: '19:00', strikeTime: '23:00' })
+       === 'Event: 2026-09-06 · Doors 17:30 · Show 19:00 · Strike 23:00',
+     flex.flexTimesNote({ eventDate: '2026-09-06', doorsTime: '17:30', showTime: '19:00', strikeTime: '23:00' }));
+  ok('empty times are OMITTED, never rendered as a dash (Show 1 has none)',
+     flex.flexTimesNote({ eventDate: '2026-09-06', doorsTime: null, showTime: '', strikeTime: undefined })
+       === 'Event: 2026-09-06',
+     flex.flexTimesNote({ eventDate: '2026-09-06' }));
+  ok('a Postgres TIME value (HH:MM:SS) is trimmed to HH:MM',
+     flex.flexTimesNote({ eventDate: '2026-09-06', showTime: '19:00:00' })
+       === 'Event: 2026-09-06 · Show 19:00');
+  ok('a single-digit hour is padded', flex.flexTimesNote({ doorsTime: '7:05' }) === 'Doors 07:05');
+  ok('no date and no times is an EMPTY string, not the word undefined',
+     flex.flexTimesNote({}) === '' && flex.flexTimesNote() === '');
+  ok('a malformed date is dropped rather than passed through',
+     flex.flexTimesNote({ eventDate: 'next Tuesday', showTime: '19:00' }) === 'Show 19:00');
+
+  ok('an omitted contact gets its own notes line, so the fact lands SOMEWHERE',
+     flex.flexOmittedNote({ client: { outcome: 'matched', name: 'LOVB' },
+                            venue: { outcome: 'omitted', name: 'Wrigley Field' } })
+       === 'Venue: Wrigley Field (not linked in Flex)',
+     flex.flexOmittedNote({ venue: { outcome: 'omitted', name: 'Wrigley Field' } }));
+  ok('...and nothing is said when both landed',
+     flex.flexOmittedNote({ client: { outcome: 'created', name: 'A' }, venue: { outcome: 'matched', name: 'B' } }) === '');
+
+  section('the folder payload with contacts — sent only when RESOLVED');
+  calls.length = 0;
+  const withContacts = await flex.flexCreateEventFolder({
+    event: 'Big Ten vs. SEC Challenge — Wrigley Field',
+    notes: 'Event: 2026-09-06',
+    setup: '2026-09-05', breakdown: '2026-09-07',
+    clientId: 'contact-CLIENT', venueId: 'contact-VENUE'
+  });
+  const bodyC = JSON.parse(calls.find((c) => c.options.method === 'POST').options.body);
+  ok('clientId and venueId ride along when the caller resolved them',
+     bodyC.clientId === 'contact-CLIENT' && bodyC.venueId === 'contact-VENUE', bodyC);
+  ok('Show 1’s em-dash is a hyphen by the time it reaches Flex',
+     bodyC.name === 'Big Ten vs. SEC Challenge - Wrigley Field', bodyC.name);
+  ok('the notes line is carried verbatim', bodyC.notes === 'Event: 2026-09-06', bodyC.notes);
+  ok('the payload is returned to the caller for the audit trail',
+     withContacts.payload && withContacts.payload.name === bodyC.name, withContacts.payload);
+
+  calls.length = 0;
+  await flex.flexCreateEventFolder({ event: 'X', setup: '2026-09-05' });
+  const bodyN = JSON.parse(calls.find((c) => c.options.method === 'POST').options.body);
+  ok('an UNRESOLVED contact leaves the key ABSENT — not null, not empty string',
+     !('clientId' in bodyN) && !('venueId' in bodyN), Object.keys(bodyN));
+  const STILL_NEVER = ['secondaryClientId', 'billToId', 'secondaryVenueId', 'facilityId',
+                       'locationId', 'currencyId', 'statusId', 'salesPersonId', 'accountExecutiveId'];
+  ok('the other NINE never-send fields are still never sent',
+     STILL_NEVER.every((k) => !(k in bodyC) && !(k in bodyN)), Object.keys(bodyC));
+
+  section('recognising the prototype’s fabricated ids');
+  ok('a modeled uuid is recognised',
+     flex.flexIsFabricatedElementId('1a2b3c4d-b1cc-4e90-83ce-bbd69eb3e4fa') === true);
+  ok('a real Flex id is not',
+     flex.flexIsFabricatedElementId('4b0b74e9-6480-43b3-821f-247f3adf45d2') === false);
+  ok('null / empty are not ids at all',
+     flex.flexIsFabricatedElementId(null) === false && flex.flexIsFabricatedElementId('') === false);
+
   console.log(`\n${'\u2550'.repeat(66)}`);
   console.log(`  FLEX CLIENT: ${pass} passed, ${fail} failed  (no network, no key)`);
   if (fail) { console.log('  FAILURES:'); failures.forEach((f) => console.log('    \u00b7 ' + f)); }

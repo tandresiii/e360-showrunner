@@ -448,6 +448,7 @@ function tabPipeline(show) {
 /* --------------------------------------------------- specs & chain tab ---- */
 function chainStrip(show) {
   var chain = show.chain;
+  var live = typeof SR !== 'undefined' && SR.isApi();
   var nodes = [{ k: 'content', cx: '.e360', cn: 'Content spec', tool: 'Spec Sheet Gen' },
     { k: 'cabling', cx: '.nsf', cn: 'Data cabling', tool: 'NovaSpec' },
     { k: 'power', cx: '.pcfg', cn: 'Power', tool: 'PowerSpec' },
@@ -465,6 +466,14 @@ function chainStrip(show) {
     var btns;
     if (nd.k === 'pull') {
       btns = '<button class="btn sm ghost" ' + act('gotoTab', null, 'gear') + '>' + icon('box') + (n.gen ? 'Gear tab' : 'Pull in Gear') + '</button>';
+    } else if (live) {
+      /* API MODE: Showrunner does not author specs. The three desktop tools do,
+         and they push a real bundle into the ?bind-spec=1 popup. Offering a
+         "Generate" button here is what filed a fabricated .e360 against a real
+         job on 2026-08-27 — so the button is gone, not merely discouraged. */
+      btns = n.gen
+        ? '<button class="btn sm ghost" ' + act('openChainFile', show.id, nd.k) + '>' + icon('eye') + 'View</button>'
+        : '<span class="cs">bind from ' + esc(nd.tool) + '</span>';
     } else if (!n.gen) {
       btns = upgen ? '<button class="btn sm primary" ' + act('specGen', show.id, nd.k) + '>' + icon('bolt') + 'Generate</button>' : '<span class="cs">generate upstream first</span>';
     } else {
@@ -479,8 +488,13 @@ function chainStrip(show) {
 }
 function tabSpecs(show) {
   var stale = chainAnyStale(show.chain);
-  return '<div class="callout"><div class="ci">' + icon('layers') + '</div><div><b>Generate a spec, and it binds to this folder</b>' +
-    '<p>The three generators produce a <b>derivation chain</b>: content <code>.e360</code> derives cabling <code>.nsf</code>, which derives power <code>.pcfg</code>, which derives the Flex <b>pull sheet</b>. Each generated spec caches a render bundle to the DB (viewable + printable by anyone) with the source file on the NAS.</p></div></div>' +
+  var live = typeof SR !== 'undefined' && SR.isApi();
+  var head = live
+    ? '<div class="callout"><div class="ci">' + icon('layers') + '</div><div><b>Bind a spec from the tool that made it</b>' +
+      '<p>Showrunner stores specs; it does not author them. Open the drawing in <b>E360 Spec Sheet Gen</b>, <b>NovaSpec</b> or <b>PowerSpec</b> and bind from there — the tool pushes its real render bundle into this folder and the node below fills in. Nothing on this tab creates a file on its own.</p></div></div>'
+    : '<div class="callout"><div class="ci">' + icon('layers') + '</div><div><b>Generate a spec, and it binds to this folder</b>' +
+      '<p>The three generators produce a <b>derivation chain</b>: content <code>.e360</code> derives cabling <code>.nsf</code>, which derives power <code>.pcfg</code>, which derives the Flex <b>pull sheet</b>. Each generated spec caches a render bundle to the DB (viewable + printable by anyone) with the source file on the NAS. <b>Demo — the contents are generated locally.</b></p></div></div>';
+  return head +
     (stale ? '<div class="hint" style="margin:-6px 0 16px;color:var(--crit)">' + icon('alert') + '<b>Stale downstream specs</b> — an upstream spec was regenerated. Re-generate the flagged nodes so cabling / power / pull sheet match the current content revision.</div>' : '') +
     '<div class="panel" style="margin-bottom:16px"><h3>Derivation chain — content → cabling → power → pull sheet</h3>' + chainStrip(show) +
     '<div class="perm-note">' + inlineIcon('bolt') + ' Regenerating any upstream spec bumps its revision, which flags every downstream artifact <b>stale</b> until re-generated. Mirrors the staffing spec columns (<span class="mono">e360_spec_* / nsf_* / pcfg_*</span>) + rev-based stale-flagging.</div></div>' +
@@ -490,16 +504,42 @@ function tabSpecs(show) {
 /* ------------------------------------------------------------- gear tab --- */
 function tabGear(show) {
   var g = show.gear, chain = show.chain;
-  var linkState = g.linked
-    ? '<b>Linked · Flex Event Folder</b><span>element ' + esc(g.elementId || '') + ' · ' + esc(g.pulled ? ('gear list ' + g.docNumber + ' attached') : 'no gear list attached') + '</span>'
-    : '<b>Not linked to Flex</b><span>Create or link an Event Folder, then pull its Pull Sheet + Manifest</span>';
-  var actions = g.linked
-    ? '<button class="btn ghost" ' + toastAttrs('View in Flex', 'f5/ui/#element/' + (g.elementId || '').slice(0, 8) + '…') + '>' + icon('link') + 'View in Flex</button>' +
-      '<button class="btn primary" ' + act('flexPull', show.id) + '>' + icon('download') + (g.pulled ? 'Re-pull from Flex' : 'Pull from Flex') + '</button>'
-    : '<button class="btn ghost" ' + act('flexLink', show.id) + '>' + icon('link') + 'Link existing</button>' +
-      '<button class="btn primary" ' + act('flexCreate', show.id) + '>' + icon('folder') + 'Create Flex Folder</button>';
+  var live = typeof SR !== 'undefined' && SR.isApi();
+  /* A link created by the old modeled path is NOT a link. The server flags it;
+     say so here rather than offering a "View in Flex" that leads nowhere. */
+  var fabricated = !!g.fabricated;
+  var realLink = !!(g.linked && g.elementId && !fabricated);
+
+  var linkState = fabricated
+    ? '<b>Not really linked</b><span>element <span class="mono">' + esc(g.elementId || '') + '</span> was generated by the prototype and exists in no Flex tenant — create the real folder to replace it</span>'
+    : g.linked
+      ? '<b>Linked · Flex Event Folder</b><span>element <span class="mono">' + esc(g.elementId || '') + '</span> · ' + esc(g.pulled ? ('gear list ' + g.docNumber + ' attached') : 'no gear list attached') + '</span>'
+      : '<b>Not linked to Flex</b><span>Create or link an Event Folder, then pull its Pull Sheet + Manifest</span>';
+
+  /* THE ANCHOR. A real <a target="_blank"> to the id Flex returned, built from
+     the server-derived deep link — never from a string glued together here. */
+  var viewBtn = !realLink ? ''
+    : g.deepLink
+      ? '<a class="btn ghost" href="' + esc(g.deepLink) + '" target="_blank" rel="noopener noreferrer">' + icon('link') + 'View in Flex</a>'
+      : live
+        ? '<button class="btn ghost" ' + toastAttrs('No Flex address to open', 'This server has no FLEX_BASE_URL, so there is nowhere to send you.') + '>' + icon('link') + 'View in Flex</button>'
+        : '<button class="btn ghost" ' + toastAttrs('Demo — there is nothing to open', 'This element id was generated locally and exists in no Flex tenant.') + '>' + icon('link') + 'View in Flex</button>';
+
+  /* Tom's toggle: default ON, remembered for the session. */
+  var mkOn = typeof FLEX_CREATE_CONTACTS === 'undefined' ? true : FLEX_CREATE_CONTACTS;
+  var contactToggle = '<button class="btn sm ghost" ' + act('flexToggleContacts', show.id) + ' title="Client and venue are contacts in Flex. With this on, one that has no exact match is created and linked; with it off the field is left blank.">' +
+    icon(mkOn ? 'check' : 'x') + (mkOn ? 'Create missing contacts' : 'Skip missing contacts') + '</button>';
+
+  var actions = realLink
+    ? viewBtn + '<button class="btn primary" ' + act('flexPull', show.id) + '>' + icon('download') + (g.pulled ? 'Re-pull from Flex' : 'Pull from Flex') + '</button>'
+    : contactToggle +
+      '<button class="btn ghost" ' + act('flexLink', show.id) + '>' + icon('link') + 'Link existing</button>' +
+      '<button class="btn primary" ' + act('flexCreate', show.id) + '>' + icon('folder') + (fabricated ? 'Create the real folder' : 'Create Flex Folder') + '</button>';
+
   var flexbar = '<div class="flexbar"><div class="fi">' + icon('box') + '</div><div class="fx">' + linkState + '</div><div class="fa">' + actions + '</div></div>';
-  var note = '<div class="hint" style="margin:-4px 0 14px">' + icon('bolt') + '<b>Modeled</b> — live Flex wiring is deploy-time. Real path: <span class="mono">create-element</span> → <span class="mono">available-gear-lists</span> → <span class="mono">attach-gear-list</span> under the <span class="mono">/f5</span> prefix, auth <span class="mono">X-Auth-Token</span>, UTC-<span class="mono">Z</span> dates (probe-verified).</div>';
+  var note = live
+    ? '<div class="hint" style="margin:-4px 0 14px">' + icon('bolt') + '<b>Create is live.</b> It POSTs a real Event Folder to <span class="mono">/f5/api/element</span> (auth <span class="mono">X-Auth-Token</span>, UTC-<span class="mono">Z</span> dates) and stores the id Flex returns. Doors / show / strike times ride in the folder’s <b>notes</b> — its form has no field for a clock time. <b>Pull from Flex is not wired yet</b> and will say so rather than invent a gear list.</div>'
+    : '<div class="hint" style="margin:-4px 0 14px">' + icon('bolt') + '<b>Demo — nothing here reaches Flex.</b> Element ids, gear lists and flight cases on this screen are generated locally so the screens have something to show. Against a real server the same buttons call <span class="mono">create-element</span> for real.</div>';
   if (!g.pulled) {
     return flexbar + note + poGearStrip(show) + '<div class="gear-empty">' + icon('box') + '<div style="font-weight:600;font-size:14px">No gear list pulled yet</div><div style="font-size:12.5px;margin-top:7px;max-width:440px;margin-left:auto;margin-right:auto;line-height:1.5">Once the Flex Event Folder is linked, <b>Pull from Flex</b> walks the folder tree, identifies the Pull Sheet + Manifest by definition ID, and caches them here — viewable and printable by anyone with folder access.</div></div>';
   }

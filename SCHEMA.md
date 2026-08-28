@@ -244,6 +244,16 @@ a PowerSpec bind there tells the user it attached a `.nsf`.
 
 **`flex_state`** *(unique `show_id`)* — `id · show_id · linked · pulled · element_id · gear_list_id · gear_list_type · doc_number · updated_at`
 
+> `element_id` holds the id **Flex returned** from `POST /f5/api/element` and
+> nothing else. Rows written before 2026-08-27 may carry a *fabricated* id: the
+> pre-deploy prototype hashed one out of the show number in the browser and
+> stored it as though a folder existed. Every such id ends
+> `-b1cc-4e90-83ce-bbd69eb3e4fa`; `flexIsFabricatedElementId()` recognises them,
+> the four gear routes return `fabricated: true` next to an empty `deepLink`,
+> and `POST /flex/create-element` REPLACES one instead of answering 409. The
+> `deepLink` field is derived per request from `FLEX_BASE_URL` — never stored,
+> so relocating the tenant relocates every link in the app.
+
 **`proofs`** / **`proof_rounds`** *(idx: `show_id` / `proof_id`)* — the print proof chain.
 
 ### Money
@@ -499,6 +509,7 @@ Templates   GET /api/templates · GET /api/templates/:idOrType · GET /api/event
 Files       GET /api/files · GET /api/files/:id · POST /api/files
             PUT /api/files/:id · PUT /api/files/:id/content · DELETE /api/files/:id
 Chain/Gear  GET/PUT /api/shows/:id/chain[/:node] · GET/PUT /api/shows/:id/gear
+Flex        POST /api/shows/:id/flex/create-element · DELETE /api/shows/:id/flex/element
 Bookings    GET /api/bookings[/:id] · POST /api/bookings · PUT/DELETE /api/bookings/:id
 Proofs      GET /api/proofs · POST /api/proofs · POST /api/proofs/:id/rounds
             PUT/DELETE /api/proofs/:id
@@ -604,6 +615,8 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | `listActivity(sid)` | `GET /api/activity?show_id=` |
 | `getChain` / `updateChainNode` | `GET /api/shows/:id/chain` · `PUT /api/shows/:id/chain/:node` |
 | `getGear` / `updateGear` | `GET`/`PUT /api/shows/:id/gear` |
+| `flexCreateElement(sid, {createContacts})` | `POST /api/shows/:id/flex/create-element` — **API mode only, no demo branch** |
+| `flexUnlink(sid)` | `DELETE /api/shows/:id/flex/element` |
 | `listTemplates` / `getTemplate(type)` | `GET /api/templates` / `GET /api/templates/:type` |
 | `pushToScheduler(sid)` | `POST /api/shows/:id/push-to-scheduler` |
 | `listBudgetLines(jid)` | `GET /api/jobs/:id/budget` |

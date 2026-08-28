@@ -1442,8 +1442,15 @@ function buildKit(n) {
 var CHAIN_UP = { content: null, cabling: 'content', power: 'cabling', pull: 'power' };
 var CHAIN_LABEL = { content: '.e360 content', cabling: '.nsf cabling', power: '.pcfg power', pull: 'Flex pull sheet' };
 
-/* modeled Flex uuid for a show id */
-function modeledUuid(showId) {
+/* DEMO ONLY — a Flex-shaped uuid hashed out of the show id.
+   ────────────────────────────────────────────────────────────────────────────
+   Renamed from `modeledUuid` on 2026-08-27, after this function's output was
+   found sitting in the PRODUCTION database on rows marked `linked`, pointing at
+   Event Folders that do not exist. Nothing in the API path may call it: a real
+   element id comes back from `POST /f5/api/element` and from nowhere else.
+   The constant tail is deliberate — routes/files.js recognises it and lets a
+   real create REPLACE a fabricated link instead of 409-ing forever. */
+function demoModeledUuid(showId) {
   var h = 0, s = 'show-' + showId;
   for (var i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) >>> 0; }
   return ('00000000' + h.toString(16)).slice(-8) + '-b1cc-4e90-83ce-bbd69eb3e4fa';
