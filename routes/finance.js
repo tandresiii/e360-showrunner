@@ -28,7 +28,7 @@ const express = require('express');
 const { pool, withTx, loadProject, loadShow, loadJob, mintTempJobNumber } = require('../lib/db');
 const { requireAuth, requireRole, canEditProject, hasFinance, roleRank } = require('../lib/auth');
 const { asyncH, badRequest, forbidden, notFound, idParam, limitOf } = require('../lib/http');
-const { logActivity } = require('../lib/activity');
+const { logActivity, diffFields, changeSummary } = require('../lib/activity');
 const { notifyTargets } = require('../lib/mentions');
 const { pick, has, dbToJob, dbToBudgetLine, dbToExpense, dbToFile, dbToBooking,
         dbToShow, dbToPO, dbToActivity, stripMoney } = require('../lib/mappers');
@@ -38,6 +38,19 @@ const { BUDGET_CATS, DEAL_TYPES, FIN_KINDS, PO_COMMITTED, EXPENSE_STATUS,
 
 const router = express.Router();
 router.use(requireAuth);
+
+// F3. The material sets for the money family. `qb_job_number` is absent because
+// its change already has its own accented `job.number.confirm` row naming both
+// numbers (POLISH_LIST #5) — logging it twice would double-count the one event
+// accounting actually watches for.
+const MATERIAL_JOB_FIELDS = {
+  name: 'name', client: 'client', deal_type: 'deal type',
+  contract_value: 'contract value', description: 'description', status: 'status'
+};
+const MATERIAL_EXPENSE_FIELDS = {
+  vendor: 'vendor', amount: 'amount', budget_line_category: 'category',
+  status: 'status', job_id: 'job', txn_date: 'date', file_id: 'receipt'
+};
 
 // Can this caller see margin / profitability?
 // Tom's decision (2026-08-27, mid-build): **admin OR the finance capability** —
@@ -126,6 +139,19 @@ router.put('/jobs/:id', requireRole('pm'), asyncH(async (req, res) => {
   if (has(b, 'qb_job_number') && !hasFinance(req.session)) {
     throw forbidden('Only accounting (the finance capability) may set qb_job_number');
   }
+  // C2. `contract_value` is `billed` — margin is billed minus actual, and the
+  // whole stripMoney / MONEY_FIELDS / hasFinance apparatus exists to stop the
+  // wrong person READING it. It was writable by any pm who owned the folder,
+  // which meant the most heavily defended number in the codebase could be set
+  // by someone who could not then see it. One predicate, both directions.
+  if (has(b, 'contract_value') && !hasFinance(req.session)) {
+    throw forbidden('Only accounting (the finance capability) may set the contract value');
+  }
+  // 16. rental vs sale decides whether a received PO line becomes E360 capex or
+  // job COGS. That is an accounting classification, not a scheduling one.
+  if (has(b, 'deal_type') && !hasFinance(req.session)) {
+    throw forbidden('Only accounting (the finance capability) may change the deal type');
+  }
   // A job never goes back to having no number at all: clearing it re-mints a
   // placeholder rather than leaving the chip blank everywhere it renders.
   let qb = has(b, 'qb_job_number') ? (pick(b, 'qb_job_number') || '') : cur.qb_job_number;
@@ -147,8 +173,12 @@ router.put('/jobs/:id', requireRole('pm'), asyncH(async (req, res) => {
       action: 'job.number.confirm', accent: true,
       detail: `job number confirmed ${qb} (was ${cur.qb_job_number})` });
   } else {
+    const changes = diffFields(cur, r.rows[0], MATERIAL_JOB_FIELDS);
     await logActivity(pool, { projectId: cur.project_id, jobId: cur.id, actor: req.actor,
-      action: 'job.update', detail: r.rows[0].name });
+      action: 'job.update',
+      // A contract value landing is a commercial fact, not bookkeeping.
+      accent: changes.some((ch) => ch.field === 'contract_value'),
+      detail: changeSummary(changes, r.rows[0].name), changes });
   }
   const withTotal = await pool.query(`${JOB_SELECT} WHERE j.id=$1`, [cur.id]);
   res.json(stripMargin(dbToJob(withTotal.rows[0]), req.session));
@@ -201,7 +231,9 @@ router.post('/jobs/:id/budget', requireBudgetRights, asyncH(async (req, res) => 
   // 21. the change audit — a budget move is a decision, and it gets a row.
   await logActivity(pool, { projectId: job.project_id, jobId, actor: req.actor,
     action: 'budget.line.add', accent: true,
-    detail: `${category} · $${allotted.toLocaleString('en-US')}` });
+    detail: `${category} · $${allotted.toLocaleString('en-US')}`,
+    changes: [{ field: 'allotted', label: `${category} allotment`,
+                from: null, to: `$${allotted.toLocaleString('en-US')}` }] });
   res.json(dbToBudgetLine(r.rows[0]));
 }));
 
@@ -220,7 +252,10 @@ router.put('/budget-lines/:id', requireBudgetRights, asyncH(async (req, res) => 
   const job = await loadJob(cur.job_id);
   await logActivity(pool, { projectId: job ? job.project_id : null, jobId: cur.job_id,
     actor: req.actor, action: 'budget.line.update', accent: true,
-    detail: `${category} · $${Number(cur.allotted).toLocaleString('en-US')} → $${allotted.toLocaleString('en-US')}` });
+    detail: `${category} · $${Number(cur.allotted).toLocaleString('en-US')} → $${allotted.toLocaleString('en-US')}`,
+    changes: diffFields({ category: cur.category, allotted: Number(cur.allotted), notes: cur.notes },
+                        { category, allotted, notes: pick(b, 'notes', cur.notes) },
+                        { category: 'category', allotted: 'allotment', notes: 'notes' }) });
   res.json(dbToBudgetLine(r.rows[0]));
 }));
 
@@ -230,7 +265,9 @@ router.delete('/budget-lines/:id', requireBudgetRights, asyncH(async (req, res) 
   await pool.query('DELETE FROM budget_lines WHERE id=$1', [cur.id]);
   const job = await loadJob(cur.job_id);
   await logActivity(pool, { projectId: job ? job.project_id : null, jobId: cur.job_id,
-    actor: req.actor, action: 'budget.line.delete', detail: cur.category });
+    actor: req.actor, action: 'budget.line.delete', detail: cur.category,
+    changes: [{ field: 'allotted', label: `${cur.category} allotment`,
+                from: `$${Number(cur.allotted).toLocaleString('en-US')}`, to: null }] });
   res.json({ ok: true });
 }));
 
@@ -295,10 +332,14 @@ router.post('/expenses', requireRole('pm'), asyncH(async (req, res) => {
 router.put('/expenses/:id', requireRole('pm'), asyncH(async (req, res) => {
   const cur = (await pool.query('SELECT * FROM expenses WHERE id=$1', [idParam(req)])).rows[0];
   if (!cur) throw notFound();
-  if (cur.show_id) {
-    const show = await loadShow(cur.show_id);
-    const project = show ? await loadProject(show.project_id) : null;
-    if (!canEditProject(req.session, project)) throw forbidden('Not allowed to edit this expense');
+  // H2. The ownership half used to run ONLY when the expense had a show, so a
+  // folder-level or PO-generated cost — the ones with the biggest numbers on
+  // them — was editable by any pm in the company. The predicate is now stated
+  // once and answered for every shape the row can take: show → its project,
+  // project → itself, neither (a pure job cost) → the job's project.
+  const owningProject = await expenseProject(cur);
+  if (owningProject && !canEditProject(req.session, owningProject)) {
+    throw forbidden('Not allowed to edit this expense');
   }
   const b = req.body || {};
   const cat = has(b, 'category') || has(b, 'budget_line_category')
@@ -317,18 +358,68 @@ router.put('/expenses/:id', requireRole('pm'), asyncH(async (req, res) => {
      pick(b, 'by', cur.by), pick(b, 'memo', cur.memo),
      has(b, 'match_confidence') ? money(pick(b, 'match_confidence'), null) : cur.match_confidence,
      pick(b, 'match_reason', cur.match_reason), pick(b, 'evidence_ref', cur.evidence_ref), cur.id]);
+  // C4/F6. Creating a cost could notify and correcting one could not, and a
+  // correction left no trace at all — for a finance persona that is
+  // disqualifying: an amount that changed with no row saying so is
+  // indistinguishable from an amount that was always wrong.
+  const changes = diffFields(cur, r.rows[0], MATERIAL_EXPENSE_FIELDS);
+  await logActivity(pool, {
+    projectId: owningProject ? owningProject.id : null, showId: cur.show_id || null,
+    jobId: r.rows[0].job_id || null, actor: req.actor, action: 'expense.update',
+    accent: changes.some((ch) => ch.field === 'amount' || ch.field === 'status'),
+    detail: changeSummary(changes, r.rows[0].vendor), changes });
+  await withTx(async (c) => notifyTargets(c, {
+    body: b, anchorType: 'expense', anchorId: cur.id,
+    projectId: owningProject ? owningProject.id : null, showId: cur.show_id || null,
+    actor: req.actor,
+    summary: `corrected a cost — ${r.rows[0].vendor}${changes.length ? ' · ' + changeSummary(changes) : ''} —`
+  }));
   res.json(dbToExpense(r.rows[0]));
 }));
 
 router.delete('/expenses/:id', requireRole('manager'), asyncH(async (req, res) => {
   const id = idParam(req);
+  // H3-shaped: a delete that answers {ok:true} for an id that never existed
+  // lets a stale screen report success for a no-op. Money especially.
+  const cur = (await pool.query('SELECT * FROM expenses WHERE id=$1', [id])).rows[0];
+  if (!cur) throw notFound(`expense ${id} not found`);
+  const owningProject = await expenseProject(cur);
   await withTx(async (c) => {
     await c.query('UPDATE po_lines SET expense_id=NULL WHERE expense_id=$1', [id]);
     await c.query(`DELETE FROM notes WHERE anchor_type='expense' AND anchor_id=$1`, [id]);
     await c.query('DELETE FROM expenses WHERE id=$1', [id]);
+    await logActivity(c, {
+      projectId: owningProject ? owningProject.id : null, showId: cur.show_id || null,
+      jobId: cur.job_id || null, actor: req.actor, action: 'expense.delete', accent: true,
+      detail: `${cur.vendor || 'expense'} · $${Number(cur.amount || 0).toLocaleString('en-US')}`,
+      changes: [{ field: 'amount', label: cur.vendor || 'expense',
+                  from: `$${Number(cur.amount || 0).toLocaleString('en-US')}`, to: null }] });
+    await notifyTargets(c, {
+      body: req.body, anchorType: 'show',
+      anchorId: cur.show_id || null,
+      projectId: owningProject ? owningProject.id : null, showId: cur.show_id || null,
+      actor: req.actor, summary: `voided a cost — ${cur.vendor || 'expense'} —`
+    });
   });
   res.json({ ok: true });
 }));
+
+// The owning project of an expense, whatever shape the row is. One expression,
+// so the gate cannot answer differently depending on which column happens to be
+// populated (H2).
+async function expenseProject(row) {
+  if (!row) return null;
+  if (row.show_id) {
+    const show = await loadShow(row.show_id);
+    return show ? loadProject(show.project_id) : null;
+  }
+  if (row.project_id) return loadProject(row.project_id);
+  if (row.job_id) {
+    const job = await loadJob(row.job_id);
+    return job ? loadProject(job.project_id) : null;
+  }
+  return null;
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // THE MONEY VIEWS

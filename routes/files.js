@@ -20,7 +20,8 @@ const crypto = require('crypto');
 const { pool, withTx, loadProject, loadShow, projectForRow } = require('../lib/db');
 const { requireAuth, requireRole, canEditProject } = require('../lib/auth');
 const { asyncH, badRequest, forbidden, notFound, conflict, idParam, limitOf } = require('../lib/http');
-const { logActivity } = require('../lib/activity');
+const { logActivity, diffFields, changeSummary } = require('../lib/activity');
+const { announceShowChange } = require('../lib/audience');
 const { notifyTargets } = require('../lib/mentions');
 const { storage, buildNasPath, MAX_BYTES, contentTypeFor, fileName } = require('../lib/storage');
 const {
@@ -47,6 +48,15 @@ const {
 
 const router = express.Router();
 router.use(requireAuth);
+
+// F3. The material set for a booking. `notes` is absent on purpose — it is the
+// routine field, the one you fix a typo in. A vendor, a date, an amount or a
+// confirmation number changing is logistics changing, and the crew on that show
+// finds out.
+const MATERIAL_BOOKING_FIELDS = {
+  vendor: 'vendor', category: 'category', status: 'status', amount: 'amount',
+  booked_date: 'booked for', confirmation_number: 'confirmation', job_id: 'job'
+};
 
 // ── 6. the derivation chain, and what "stale" means ─────────────────────────
 //   content spec (.e360) --derives--> data cabling (.nsf) --derives-->
@@ -1031,12 +1041,31 @@ router.post('/bookings', requireRole('pm'), asyncH(async (req, res) => {
      intOrNull(pick(b, 'file_id')), pick(b, 'confirmation_number') || '', pick(b, 'notes') || '']);
   await logActivity(pool, { projectId: show.project_id, showId, actor: req.actor,
     action: 'booking.add', detail: `${r.rows[0].category} · ${r.rows[0].vendor}` });
+  await withTx(async (c) => notifyTargets(c, {
+    body: b, anchorType: 'show', anchorId: showId,
+    projectId: show.project_id, showId, actor: req.actor,
+    summary: `booked ${r.rows[0].category || 'a vendor'} — ${r.rows[0].vendor} —`
+  }));
   res.json(dbToBooking(r.rows[0]));
 }));
+
+// H1. This route carried a RANK check and no OWNERSHIP check, while its
+// immediate neighbour (POST, above) carried both — so any pm in the company
+// could edit any booking on anybody's project, and silently: there was no
+// activity row either. The gate is now stated the same way as every other
+// booking route, and the write leaves a trace with a diff on it.
 router.put('/bookings/:id', requireRole('pm'), asyncH(async (req, res) => {
   const cur = (await pool.query('SELECT * FROM bookings WHERE id=$1', [idParam(req)])).rows[0];
   if (!cur) throw notFound();
+  const show = await loadShow(cur.show_id);
+  const project = show ? await loadProject(show.project_id) : null;
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to edit this booking');
   const b = req.body || {};
+  // POST validates booked_date and PUT did not, so the one column the delivery
+  // and call-sheet views read could be set to anything by the correction path.
+  if (has(b, 'booked_date') && pick(b, 'booked_date') && !isISODate(pick(b, 'booked_date'))) {
+    throw badRequest('booked_date must be YYYY-MM-DD');
+  }
   const r = await pool.query(
     `UPDATE bookings SET job_id=$1, category=$2, vendor=$3, status=$4, amount=$5, booked_date=$6,
        file_id=$7, confirmation_number=$8, notes=$9 WHERE id=$10 RETURNING *`,
@@ -1046,10 +1075,47 @@ router.put('/bookings/:id', requireRole('pm'), asyncH(async (req, res) => {
      has(b, 'booked_date') ? pick(b, 'booked_date') : cur.booked_date,
      has(b, 'file_id') ? intOrNull(pick(b, 'file_id')) : cur.file_id,
      pick(b, 'confirmation_number', cur.confirmation_number), pick(b, 'notes', cur.notes), cur.id]);
+  const changes = diffFields(cur, r.rows[0], MATERIAL_BOOKING_FIELDS);
+  await logActivity(pool, {
+    projectId: show ? show.project_id : null, showId: cur.show_id || null,
+    jobId: r.rows[0].job_id || null, actor: req.actor, action: 'booking.update',
+    detail: changeSummary(changes, `${r.rows[0].category} · ${r.rows[0].vendor}`), changes });
+  if (changes.length && show) {
+    await withTx(async (c) => {
+      await notifyTargets(c, {
+        body: b, anchorType: 'show', anchorId: show.id,
+        projectId: show.project_id, showId: show.id, actor: req.actor,
+        summary: `updated the ${r.rows[0].category || 'booking'} with ${r.rows[0].vendor} —`
+      });
+      // Logistics changing is a show-level fact: the truck arriving at a
+      // different time is everyone's problem, not just the person who booked it.
+      await announceShowChange(c, {
+        showId: show.id, projectId: show.project_id, actor: req.actor,
+        subject: `Booking changed — ${r.rows[0].vendor} on ${show.name || 'show ' + show.id}`,
+        what: `the ${r.rows[0].category || 'booking'} with ${r.rows[0].vendor}`,
+        changes
+      });
+    });
+  }
   res.json(dbToBooking(r.rows[0]));
 }));
+
 router.delete('/bookings/:id', requireRole('manager'), asyncH(async (req, res) => {
-  await pool.query('DELETE FROM bookings WHERE id=$1', [idParam(req)]);
+  const id = idParam(req);
+  // H3. This answered {ok:true} for ANY id, including one that never existed,
+  // so a stale screen reported a successful delete of nothing.
+  const cur = (await pool.query('SELECT * FROM bookings WHERE id=$1', [id])).rows[0];
+  if (!cur) throw notFound(`booking ${id} not found`);
+  const show = await loadShow(cur.show_id);
+  const project = show ? await loadProject(show.project_id) : null;
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to delete this booking');
+  await pool.query('DELETE FROM bookings WHERE id=$1', [id]);
+  await logActivity(pool, {
+    projectId: show ? show.project_id : null, showId: cur.show_id || null,
+    actor: req.actor, action: 'booking.delete', accent: true,
+    detail: `${cur.category} · ${cur.vendor}`,
+    changes: [{ field: 'booking', label: cur.category || 'booking',
+                from: cur.vendor || 'booked', to: null }] });
   res.json({ ok: true });
 }));
 
@@ -1094,12 +1160,30 @@ router.post('/proofs', requireRole('pm'), asyncH(async (req, res) => {
          pick(rd, 'note') || '', i++]);
       rounds.push(dbToProofRound(r2.rows[0]));
     }
+    await logActivity(c, { projectId: show.project_id, showId, actor: req.actor,
+      action: 'proof.add', accent: true,
+      detail: `${proof.code || proof.name}${proof.client ? ' · ' + proof.client : ''}` });
     return dbToProof(proof, rounds);
   });
   res.json(out);
 }));
+// H1. Three proof routes carried rank and no ownership while POST /proofs, two
+// lines above them, carried both. `editableProof` is the entity's predicate,
+// written once, and every route in the family now uses it — the house rule
+// hasFinance/canApprovePO already prove for the hard questions, applied to the
+// routine ones.
+async function editableProof(req, proofId) {
+  const proof = (await pool.query('SELECT * FROM proofs WHERE id=$1', [proofId])).rows[0];
+  if (!proof) throw notFound(`proof ${proofId} not found`);
+  const show = await loadShow(proof.show_id);
+  const project = show ? await loadProject(show.project_id) : null;
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to edit this proof');
+  return { proof, show, project };
+}
+
 router.post('/proofs/:id/rounds', requireRole('pm'), asyncH(async (req, res) => {
   const proofId = idParam(req);
+  const { proof, show } = await editableProof(req, proofId);
   const b = req.body || {};
   const n = await pool.query('SELECT COUNT(*)::int AS n FROM proof_rounds WHERE proof_id=$1', [proofId]);
   const r = await pool.query(
@@ -1107,23 +1191,49 @@ router.post('/proofs/:id/rounds', requireRole('pm'), asyncH(async (req, res) => 
      VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
     [proofId, pick(b, 'round') || `R${n.rows[0].n + 1}`, pick(b, 'date') || '',
      pick(b, 'status') || 'sent', pick(b, 'note') || '', n.rows[0].n]);
+  await logActivity(pool, {
+    projectId: show ? show.project_id : null, showId: proof.show_id || null,
+    actor: req.actor, action: 'proof.round.add', accent: true,
+    detail: `${proof.code || proof.name} · ${r.rows[0].round} ${r.rows[0].status}` });
   res.json(dbToProofRound(r.rows[0]));
 }));
+
 router.put('/proofs/:id', requireRole('pm'), asyncH(async (req, res) => {
-  const cur = (await pool.query('SELECT * FROM proofs WHERE id=$1', [idParam(req)])).rows[0];
-  if (!cur) throw notFound();
+  const { proof: cur, show } = await editableProof(req, idParam(req));
   const b = req.body || {};
   const r = await pool.query(
     'UPDATE proofs SET code=$1, name=$2, status=$3, client=$4 WHERE id=$5 RETURNING *',
     [pick(b, 'code', cur.code), pick(b, 'name', cur.name), pick(b, 'status', cur.status),
      pick(b, 'client', cur.client), cur.id]);
+  const changes = diffFields(cur, r.rows[0],
+    { code: 'code', name: 'name', status: 'status', client: 'client' });
+  await logActivity(pool, {
+    projectId: show ? show.project_id : null, showId: cur.show_id || null,
+    actor: req.actor, action: 'proof.update',
+    accent: changes.some((ch) => ch.field === 'status'),
+    detail: changeSummary(changes, r.rows[0].name || r.rows[0].code), changes });
+  // A proof approving or bouncing is the print persona's whole workflow, and it
+  // is a show-level fact — the floor, the PM and the owner all act on it.
+  if (changes.some((ch) => ch.field === 'status') && show) {
+    await withTx(async (c) => announceShowChange(c, {
+      showId: show.id, projectId: show.project_id, actor: req.actor,
+      subject: `Proof ${r.rows[0].status} — ${r.rows[0].name || r.rows[0].code}`,
+      what: `the proof ${r.rows[0].name || r.rows[0].code}`,
+      changes
+    }));
+  }
   res.json(dbToProof(r.rows[0]));
 }));
+
 router.delete('/proofs/:id', requireRole('pm'), asyncH(async (req, res) => {
   const id = idParam(req);
+  const { proof, show } = await editableProof(req, id);
   await withTx(async (c) => {
     await c.query('DELETE FROM proof_rounds WHERE proof_id=$1', [id]);
     await c.query('DELETE FROM proofs WHERE id=$1', [id]);
+    await logActivity(c, {
+      projectId: show ? show.project_id : null, showId: proof.show_id || null,
+      actor: req.actor, action: 'proof.delete', detail: proof.name || proof.code });
   });
   res.json({ ok: true });
 }));

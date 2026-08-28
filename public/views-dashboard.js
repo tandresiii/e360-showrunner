@@ -180,11 +180,26 @@ function viewSeason(project) {
     '<div class="ef-sub"><span>' + icon('users') + ' <b>' + esc(project.client) + '</b></span>' +
     '<span>' + icon('pin') + ' <b>Multi-city · ' + shows.length + ' shows</b></span>' +
     '<span>Lead <b>' + esc(userName(project.owner)) + '</b></span>' +
-    '<span>Upcoming <b>' + upcoming.length + ' of ' + shows.length + '</b></span></div>' +
+    '<span>Upcoming <b>' + upcoming.length + ' of ' + shows.length + '</b></span>' +
+    /* A3. PUT /api/projects/:id was unreachable, so a client renaming their
+       programme was unrecordable. Same shape as the show header's pencil, so
+       the two stay isomorphic. */
+    (canEditFolder(project)
+      ? '<span><button class="lnk-btn" ' + act('editFolder', project.id) + '>' + inlineIcon('pencil') +
+        'Edit folder</button></span>' : '') +
+    '</div>' +
     '</div>' +
     '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
-    '<button class="btn ghost" ' + toastAttrs('Season template', 'Apply the LED template to every show in this folder') + '>' + icon('layers') + 'Apply to all shows</button>' +
-    '<button class="btn primary" ' + toastAttrs('Push season', project.name + ' → e360 staffing app (per-show dry run)') + '>' + icon('send') + 'Push season</button>' +
+    /* Both of these were toastAttrs fakes. A season-wide template apply and a
+       season-wide push are per-show fan-outs that are NOT built; saying so is
+       the honest version, and the per-show controls that ARE built are one
+       click away inside each show. */
+    '<button class="btn ghost" ' + toastAttrs('Not built yet',
+      'Applying a template across a season is a per-show fan-out — open a show and seed it there') + '>' +
+      icon('layers') + 'Apply to all shows</button>' +
+    '<button class="btn ghost" ' + toastAttrs('Not built yet',
+      'Pushing a whole season is a per-show fan-out — open a show and use Push to Scheduler, which is real') + '>' +
+      icon('send') + 'Push season</button>' +
     '</div></div>' +
     '<div class="ef-meta">' + metas + '</div></div>';
 

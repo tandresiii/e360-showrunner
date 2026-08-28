@@ -315,13 +315,33 @@ router.post('/documents', requireScope('agent:file'), idempotent('documents'),
       if (status === 'filed') {
         // amount + vendor + a job -> the doc reaches accounting's feed as a
         // COST, not just a PDF. No amount -> no expense.
+        //
+        // ── E3. THE STATUS IS 'filed', NOT 'proposed' ─────────────────────────
+        // This line used to write 'proposed' on the FILED path, with no proposal
+        // row to go with it. The result was a cost in a state nothing could move
+        // it out of: in no review queue (there was no proposal), excluded from
+        // GET /finance/exceptions (which skips 'proposed'), counted as
+        // proposedTotal rather than actual in the job P&L, and invisible to the
+        // agent's own money context. Every receipt the agent filed *with
+        // confidence* landed somewhere confidence could not reach.
+        //
+        // AGENT_API.md §confidence bands is unambiguous about which of the two
+        // readings is correct: high (≥85) means "file directly — lands in the
+        // record, logged, visible immediately". `status:'filed'` is what that
+        // sentence means, and the 422 that refuses `filed` below 85 is what
+        // keeps the band honest. A low-confidence document still takes the
+        // `else` branch below and becomes a real proposal with a real queue.
+        //
+        // It is safe on the chase list precisely because it arrives WITH its
+        // document: GET /finance/exceptions asks for `file_id IS NULL`, and
+        // this row always has one.
         if (amount != null && show) {
           const cat = BUDGET_CATS.includes(pick(b, 'category')) ? pick(b, 'category') : 'misc';
           const e = await c.query(
             `INSERT INTO expenses (show_id, project_id, job_id, budget_line_category, category,
                vendor, amount, txn_date, status, file_id, by, memo, evidence_ref,
                match_confidence, match_reason, provenance, source_ref)
-             VALUES ($1,$2,$3,$4,$4,$5,$6,$7,'proposed',$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+             VALUES ($1,$2,$3,$4,$4,$5,$6,$7,'filed',$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
             [show.id, project.id, jobId, cat, pick(b, 'vendor') || '', amount,
              docDate || todayISO(), file.id, req.agent.actor, pick(b, 'memo') || '',
              String(file.id), provenance.confidence, provenance.source_label || '',

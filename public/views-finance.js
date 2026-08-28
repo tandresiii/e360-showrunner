@@ -194,6 +194,15 @@ function viewFinance(fin) {
 /* ============================================================================
    JOB DRILL-IN — one deal, its whole money story
    ========================================================================== */
+/* The client mirror of the server's requireBudgetRights(): manager+, OR the
+   finance capability. Deliberately WIDER than canSeeFinance() — a manager who
+   may not read margin may still set an allotment, because a budget is
+   accountability and a margin is profit (TEAM_FEEDBACK). */
+function canEditBudget(user) {
+  var u = user || CURRENT_USER;
+  return !!u && (u.role === 'admin' || u.role === 'manager' || !!u.finance);
+}
+
 function viewJobFinance(jf) {
   var gate = canSeeFinance(), j = jf.job, p = jf.project;
   /* remaining is the honest number: allotted − actual − committed-on-POs */
@@ -222,7 +231,17 @@ function viewJobFinance(jf) {
       '<td class="money">' + esc(l.actual ? fmtMoney(l.actual) : '—') + '</td>' +
       '<td class="money" style="color:' + (l.committed ? 'var(--warn)' : 'var(--muted)') + '">' + esc(l.committed ? fmtMoney(l.committed) : '—') + '</td>' +
       '<td class="money" style="color:' + (rem < 0 ? 'var(--crit)' : 'var(--text-2)') + '">' + esc(rem < 0 ? fmtMoneySigned(rem) : fmtMoney(rem)) + '</td>' +
-      '<td>' + burnBar(l.actual, l.allotted, l.committed) + '</td></tr>';
+      '<td>' + burnBar(l.actual, l.allotted, l.committed) +
+      /* C1. POST /api/jobs/:id/budget and PUT/DELETE /api/budget-lines/:id all
+         existed, wrote audit rows and fed budget_total — and the client had
+         listBudgetLines and nothing else. Budget-vs-actual, the confirmed
+         accounting requirement, had no entry surface, so every burn bar in the
+         app read against an allotted of zero. */
+      (canEditBudget()
+        ? ' <button class="iconbtn" title="Edit this allotment" ' +
+          act('editBudget', l.id, String(jf.job.id)) + '>' + icon('pencil') + '</button>'
+        : '') +
+      '</td></tr>';
   }).join('');
   var unbRows = jf.unbudgeted.map(function (l) {
     return '<tr><td><b style="font-weight:600;color:var(--warn)">' + esc(l.label) + '</b><span style="display:block;color:var(--muted);font-size:11px">no allotment set</span></td>' +
@@ -230,7 +249,12 @@ function viewJobFinance(jf) {
       '<td class="money" style="color:var(--crit)">' + esc(l.actual ? fmtMoney(l.actual) : '—') + '</td>' +
       '<td class="money" style="color:' + (l.committed ? 'var(--warn)' : 'var(--muted)') + '">' + esc(l.committed ? fmtMoney(l.committed) : '—') + '</td>' +
       '<td class="money" style="color:var(--muted)">—</td>' +
-      '<td><span class="mini dep">unbudgeted</span></td></tr>';
+      '<td><span class="mini dep">unbudgeted</span>' +
+      (canEditBudget()
+        ? ' <button class="iconbtn" title="Set an allotment for this category" ' +
+          act('addBudget', jf.job.id) + '>' + icon('plus') + '</button>'
+        : '') +
+      '</td></tr>';
   }).join('');
   var totCommitted = jf.committed || 0;
   var totRow = '<tr><td style="font-weight:700;border-top:2px solid var(--border-strong)">Total</td>' +
@@ -240,10 +264,17 @@ function viewJobFinance(jf) {
     '<td class="money" style="font-weight:600;border-top:2px solid var(--border-strong);color:' + (remaining < 0 ? 'var(--crit)' : 'var(--text)') + '">' + esc(jf.budget_total ? (remaining < 0 ? fmtMoneySigned(remaining) : fmtMoney(remaining)) : '—') + '</td>' +
     '<td style="border-top:2px solid var(--border-strong)">' + burnBar(jf.actual, jf.budget_total, totCommitted) + '</td></tr>';
   var budgetCard = '<div class="card"><div class="card-h"><h3>Budget vs committed vs actual · by category</h3>' +
-    (jf.burnPct != null && jf.burnPct > 100 ? '<span class="pill crit"><span class="dot"></span>Over budget</span>' : '<span class="pill idle">live — updates as costs land</span>') + '</div>' +
+    (jf.burnPct != null && jf.burnPct > 100 ? '<span class="pill crit"><span class="dot"></span>Over budget</span>' : '<span class="pill idle">live — updates as costs land</span>') +
+    (canEditBudget()
+      ? '<span style="flex:1"></span><button class="btn sm ghost" ' + act('addBudget', jf.job.id) + '>' +
+        icon('plus') + 'Add budget line</button>'
+      : '') + '</div>' +
     (jf.lines.length || jf.unbudgeted.length
       ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Category</th><th class="money">Allotted</th><th class="money">Actual</th><th class="money">Committed</th><th class="money">Remaining</th><th>Burn</th></tr></thead><tbody>' + catRows + unbRows + totRow + '</tbody></table></div>'
-      : '<div class="empty">No budget lines yet — allotments are set per category once the deal firms up.</div>') +
+      : '<div class="empty" style="padding:22px;line-height:1.6">No budget lines yet.<br>' +
+        '<span style="color:var(--muted);font-size:12px">Allotments are what every burn bar on this job reads ' +
+        'against — without them the P&amp;L computes against zero and nothing can be over budget.' +
+        (canEditBudget() ? ' Add one above.' : ' Accounting sets them.') + '</span></div>') +
     (totCommitted ? '<div class="perm-note" style="padding:12px 16px;margin-top:0">' + inlineIcon('cart') + ' <b>Committed</b> = ordered-but-not-received PO lines billing this job (hatched on the burn bar). It converts to actual as hardware is received.</div>' : '') +
     (jf.capexCommitted ? '<div class="perm-note" style="padding:0 16px 12px;margin-top:0">' + inlineIcon('box') + ' Plus ' + esc(fmtMoney(jf.capexCommitted)) + ' on order routed to <b>E360 inventory</b> — capex under this deal, not a job cost.</div>' : '') + '</div>';
 
@@ -312,6 +343,16 @@ function viewJobFinance(jf) {
     (canSeeFinance()
       ? '<button class="btn' + (isTempJob(j) ? ' primary' : ' ghost') + '" ' + act('openJobNumber', j.id) + '>' +
         icon('check') + (isTempJob(j) ? 'Confirm job number' : 'Edit job number') + '</button>'
+      : '') +
+    /* C2. `jobs.contract_value` is `billed`, and margin is billed minus actual —
+       so the single most-defended number in the codebase (stripMoney,
+       MONEY_FIELDS, hasFinance on six surfaces) gated a field with no
+       data-entry path anywhere. Prominent while it is unset, quiet once it is
+       there — the same shape as the job-number button beside it. */
+    (canSeeFinance()
+      ? '<button class="btn' + (j.contract_value == null ? ' primary' : ' ghost') + '" ' +
+        act('editContract', j.id) + '>' + icon('dollar') +
+        (j.contract_value == null ? 'Set contract value' : 'Contract value') + '</button>'
       : '') +
     '<button class="btn ghost" ' + act('goFinance') + '>' + icon('scale') + 'Back to Finance</button>' +
     (p ? '<button class="btn ghost" ' + act('openFolder', p.id) + '>' + icon('folder') + 'Open folder</button>' : '') +

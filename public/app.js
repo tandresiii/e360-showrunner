@@ -157,6 +157,15 @@ async function renderView(view, arg) {
     crumb([{ t: 'Settings', act: act('gotoTab', null, 'settings') }, { t: 'My notifications' }]);
     navOn('settings');
 
+  } else if (view === 'changes') {
+    /* F4 — the cross-project changelog. `mine` is scoped to the shows I am ON
+       (owner · folder owner · task owner · crew), which is the same membership
+       lib/audience.js uses to decide who gets TOLD — so "what reaches me" and
+       "what I can read" can never disagree. */
+    CUR.view = 'changes';
+    s.innerHTML = viewChanges(await viewChangesData());
+    crumb([{ t: 'What changed' }]);
+
   } else if (view === 'calendar') {
     s.innerHTML = viewCalendar(await api.listShows());
     crumb([{ t: 'Calendar' }]);
@@ -1069,10 +1078,8 @@ async function printFile() {
 }
 
 /* ---- misc modeled actions (toast-only — scope discipline) ------------------ */
-async function pushSched(showId) {
-  var r = await api.pushToScheduler(showId);
-  toast('Pushed to Scheduler', r.show + ' → e360 staffing app (dry run)');
-}
+/* pushSched() moved into THE SEAM PASS block below — the dry run is now the
+   confirm step for a REAL push, and features.schedulerPush is consumed. */
 /* ============================================================================
    F1 · NEW EVENT — the last mock button in the app, made real
    ----------------------------------------------------------------------------
@@ -1205,13 +1212,7 @@ async function commitNewEvent() {
   await updateMineCount();
   return render('show', r.show.id);
 }
-async function proofAction(proofId, approve) {
-  var show = await api.getShow(CUR.showId);
-  var p = show.proofs.filter(function (x) { return x.id === Number(proofId); })[0];
-  if (!p) return;
-  if (approve) toast('Approved', p.name + ' marked approved');
-  else toast('Changes requested', 'New round opened for ' + p.code);
-}
+/* proofAction() moved into THE SEAM PASS block below — it is a real write now. */
 
 /* ============================================================================
    FINANCE ACTIONS — confirm/reject proposals · add expense · attach doc ·
@@ -1236,11 +1237,32 @@ async function openShowFin(showId) {
   await openShow(showId);
   setFolderTab('financials');
 }
+/* E2. THE DEFECT THAT MADE PEOPLE CONFIRM TWICE.
+   This did `JOBS_BY_ID[fileJobId(f)]` on an `f` that was null — api.confirmDoc
+   returned null for the negative pseudo-id a synthesized bell row carries — and
+   `fileJobId(null)` threw on `f.show_id`. THE SERVER HAD ALREADY COMMITTED. The
+   browser then said "Something went wrong", so the human believed it had failed
+   and confirmed again.
+
+   The rule this now follows: once a mutation has returned, NOTHING in the
+   success path may throw. A missing projection is a quieter toast, never an
+   error, because the work is done either way. */
 async function confirmDocAct(fileId) {
-  var f = await api.confirmDoc(fileId);
-  var job = JOBS_BY_ID[fileJobId(f)];
-  toast('Confirmed & filed', (f.vendor || f.name) + ' · ' + fmtMoney(f.amount) + (job ? ' → job ' + job.qb_job_number : ''));
+  var f;
+  try { f = await api.confirmDoc(fileId); }
+  catch (e) { toast('Not confirmed', String(e && e.message || e)); return; }
   refreshBellPanel();                     /* the bell lists pending proposals */
+  if (!f) {
+    /* committed, but we have nothing to render it from */
+    toast('Confirmed & filed', 'The proposal is filed — reopen the folder to see it in place');
+    return refreshFinanceUI();
+  }
+  var job = null;
+  try { job = JOBS_BY_ID[fileJobId(f)] || null; } catch (_) { job = null; }
+  toast('Confirmed & filed',
+    (f.vendor || f.name || 'the document') +
+    (f.amount != null ? ' · ' + fmtMoney(f.amount) : '') +
+    (job ? ' → job ' + job.qb_job_number : ''));
   return refreshFinanceUI();
 }
 async function rejectDocAct(fileId) {
@@ -2770,6 +2792,786 @@ async function commitChangePassword() {
 /* ============================================================================
    ONE DELEGATED LISTENER — every data-act in the app lands here
    ========================================================================== */
+
+/* ============================================================================
+   THE SEAM PASS — the forms over routes that already existed
+   ----------------------------------------------------------------------------
+   DESIGN_GAPS P1: "~192 routes; ~115 methods in public/api.js; and the WRITE
+   half of eight entities is built, role-gated, cascade-wired, smoke-tested and
+   UNREACHABLE FROM THE PRODUCT." Everything in this section is the missing
+   half — a dialog, a button, and the handler between them.
+
+   House conventions, followed without deviation (the New Event flow above is
+   the reference):
+     · one module-level PENDING_* per dialog, set FIRST in the opener,
+       guarded FIRST in the commit, nulled after closeM()
+     · fields are finLabelWrap() + class="cell-in" + an id, read back with
+       document.getElementById — never bound, never two-way
+     · notifyRow() on the flows where the actor should be able to reach people
+       BEYOND the ones the change now reaches by itself
+     · stageNotifies() -> try/catch the api call -> closeM() -> sendNotifies()
+       -> toast -> refreshShowTab / refreshFinanceUI / render
+     · esc() on every interpolated value
+   ========================================================================== */
+
+var PENDING_CREW = null, PENDING_SHOWEDIT = null, PENDING_FOLDEDIT = null,
+    PENDING_SHEET = null, PENDING_TASK = null, PENDING_BUDGET = null,
+    PENDING_BOOK = null, PENDING_POETA = null, PENDING_PROOF = null,
+    PENDING_CONTRACT = null, PENDING_PUSH = null;
+
+/* the three shared readers every commit below uses, and nothing else */
+function _v(id) { var el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; }
+function _n(id) { var s = _v(id); return s === '' ? null : Number(s); }
+function _c(id) { var el = document.getElementById(id); return !!(el && el.checked); }
+/* the modal's standard footer: an optional destructive action on the left,
+   ghost Cancel + primary commit on the right */
+function _foot(commitAct, label, iconName, extra) {
+  return '<div style="display:flex;justify-content:' + (extra ? 'space-between' : 'flex-end') +
+    ';gap:9px;margin-top:12px;align-items:center">' + (extra || '') +
+    '<span style="display:flex;gap:9px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + commitAct + '>' + icon(iconName || 'check') + esc(label) + '</button>' +
+    '</span></div>';
+}
+
+/* ── B1 · CREW ───────────────────────────────────────────────────────────────
+   The gap the whole document points at: `crew_assignments` had exactly ONE
+   write site in the repository and no way to reach it, so the call sheet,
+   travel, tech reports, closeout integrity and the entire field persona were
+   inert. Two paths, because the business has two: someone with a login, or a
+   local hire who is a name and a phone number. */
+async function openCrew(showId, crewId, forceLocal) {
+  var show = await api.getShow(showId);
+  var existing = null;
+  if (crewId) {
+    var all = await api.listCrew(showId);
+    existing = all.filter(function (c) { return c.id === Number(crewId); })[0] || null;
+  }
+  var local = forceLocal === undefined
+    ? !!(existing && !existing.username)
+    : !!forceLocal;
+  PENDING_CREW = { showId: Number(showId), id: existing ? existing.id : null, local: local };
+
+  var roster = activeUsers().filter(function (u) { return u.role !== 'viewer'; });
+  var opts = '<option value="">— pick from the roster —</option>' + roster.map(function (u) {
+    return '<option value="' + esc(u.username) + '"' +
+      (existing && existing.username === u.username ? ' selected' : '') + '>' +
+      esc(u.name + ' · ' + roleName(u.role)) + '</option>';
+  }).join('');
+
+  openModal((existing ? 'Edit crew line' : 'Add crew') + ' · ' + showLabel(show),
+    '<div class="hint" style="margin:0 0 12px">' + icon('users') + '<span>Putting someone on the crew is what ' +
+    'fills their call sheet, their travel and the show report they owe after strike. It also ' +
+    '<b>subscribes them</b>: from now on they hear about changes to this show without anyone having to ' +
+    'remember to tell them.</span></div>' +
+
+    '<div style="display:flex;gap:9px;margin-bottom:12px">' +
+    '<button class="btn sm ' + (local ? 'ghost' : 'primary') + '" ' +
+      act('crewMode', Number(showId), 'roster') + '>' + icon('users') + 'Someone with a login</button>' +
+    '<button class="btn sm ' + (local ? 'primary' : 'ghost') + '" ' +
+      act('crewMode', Number(showId), 'local') + '>' + icon('phone') + 'Local hire</button>' +
+    '</div>' +
+
+    (local
+      ? '<div class="fin-inputs" style="grid-template-columns:1.4fr 1fr">' +
+        finLabelWrap('Name', '<input id="crName" class="cell-in" placeholder="who is showing up" value="' +
+          esc(existing ? existing.name || '' : '') + '">') +
+        finLabelWrap('Phone', '<input id="crPhone" class="cell-in" placeholder="608-555-0199" value="' +
+          esc(existing ? existing.phone || '' : '') + '">') + '</div>' +
+        '<div class="hint" style="margin-top:2px">' + inlineIcon('alert') + '<span>A local hire has no login, so ' +
+        'they owe <b>no show report</b> and receive no notifications — the printed call sheet is how they find ' +
+        'out. That is deliberate: closeout counts them out rather than waiting forever on a report nobody can ' +
+        'file.</span></div>'
+      : '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+        finLabelWrap('Person', '<select id="crUser" class="cell-in">' + opts + '</select>') + '</div>') +
+
+    '<div class="fin-inputs" style="grid-template-columns:1.4fr 1fr">' +
+    finLabelWrap('Role on site', '<input id="crRole" class="cell-in" placeholder="LED tech · lead · rigger" value="' +
+      esc(existing ? existing.role_on_site || '' : '') + '">') +
+    finLabelWrap('Call time', '<input id="crCall" class="cell-in" type="time" value="' +
+      esc(existing ? existing.call_time || '' : '') + '">') + '</div>' +
+    notifyRow() +
+    _foot(act('crewCommit'), existing ? 'Save crew line' : 'Add to crew', existing ? 'check' : 'plus',
+      existing ? '<button class="btn ghost" ' + act('crewRemove', existing.id) + '>' + icon('trash') +
+        'Take off the show</button>' : ''));
+}
+/* The two-path toggle re-opens the SAME builder in the other mode rather than
+   keeping two half-forms alive and fighting over the same field ids. */
+function crewModeAct(showId, k) {
+  var id = PENDING_CREW ? PENDING_CREW.id : null;
+  return openCrew(showId, id, k === 'local');
+}
+async function crewCommit() {
+  if (!PENDING_CREW) return;
+  var p = PENDING_CREW;
+  var body = { role_on_site: _v('crRole'), call_time: _v('crCall') || null };
+  if (p.local) {
+    body.name = _v('crName');
+    body.phone = _v('crPhone');
+    if (!body.name) { toast('Who is it?', 'A local hire needs a name'); return; }
+    body.username = null;
+  } else {
+    body.username = _v('crUser');
+    if (!body.username) { toast('Pick a person', 'Or switch to Local hire for someone without a login'); return; }
+  }
+  stageNotifies();
+  var saved;
+  try {
+    saved = p.id ? await api.updateCrew(p.id, body) : await api.addCrew(p.showId, body);
+  } catch (e) { toast(p.id ? 'Not saved' : 'Not added', String(e && e.message || e)); return; }
+  var showId = p.showId, wasEdit = !!p.id;
+  PENDING_CREW = null;
+  closeM();
+  var who = saved.username ? userName(saved.username) : saved.name;
+  var suffix = await sendNotifies('show', showId,
+    (wasEdit ? 'updated ' : 'added ') + who + ' on the crew —');
+  toast(wasEdit ? 'Crew updated' : 'Added to the crew',
+    who + (saved.role_on_site ? ' · ' + saved.role_on_site : '') +
+    (saved.call_time ? ' · call ' + fmtHM(saved.call_time) : '') +
+    (saved.username ? ' — told, and now subscribed to this show' : ' — local hire, no login') + suffix);
+  return refreshShowTab(showId, 'schedule');
+}
+async function crewRemoveAct(crewId) {
+  var showId = PENDING_CREW ? PENDING_CREW.showId : CUR.showId;
+  try { await api.removeCrew(crewId); }
+  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  PENDING_CREW = null;
+  closeM();
+  toast('Taken off the show', 'They are told, and they stop hearing about this show');
+  return refreshShowTab(showId, 'schedule');
+}
+
+/* ── B2 · THE CALL-SHEET HEADER ──────────────────────────────────────────────
+   Four clock times, an address, parking, radio, dress code and two POCs — all
+   rendered on the Schedule tab, the printed call sheet AND the push payload,
+   and written by nothing. Brenden printed a call sheet with four blank times. */
+async function openCallSheet(showId) {
+  var show = await api.getShow(showId);
+  PENDING_SHEET = { showId: Number(showId) };
+  var pf = function (p, f) { return p && p[f] ? p[f] : ''; };
+  openModal('Call sheet header · ' + showLabel(show),
+    '<div class="hint" style="margin:0 0 12px">' + icon('print') + '<span>The fields the printed call sheet and ' +
+    'the scheduler push both read. The crew reads them at 6am — so a change here reaches all of them.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr 1fr">' +
+    finLabelWrap('Load-in', '<input id="csLoadIn" class="cell-in" type="time" value="' + esc(show.load_in_time || '') + '">') +
+    finLabelWrap('Doors', '<input id="csDoors" class="cell-in" type="time" value="' + esc(show.doors_time || '') + '">') +
+    finLabelWrap('Show', '<input id="csEvent" class="cell-in" type="time" value="' + esc(show.event_time || '') + '">') +
+    finLabelWrap('Strike', '<input id="csStrike" class="cell-in" type="time" value="' + esc(show.strike_time || '') + '">') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Venue address', '<input id="csAddr" class="cell-in" placeholder="1111 Vel R. Phillips Ave, Milwaukee WI" value="' +
+      esc(show.venue_address || '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.6fr 1fr 1fr">' +
+    finLabelWrap('Parking / load-in notes', '<input id="csPark" class="cell-in" placeholder="dock C, off 6th" value="' +
+      esc(show.parking_notes || '') + '">') +
+    finLabelWrap('Radio', '<input id="csRadio" class="cell-in" placeholder="ch 4" value="' + esc(show.radio_channel || '') + '">') +
+    finLabelWrap('Dress', '<input id="csDress" class="cell-in" placeholder="black, closed toe" value="' + esc(show.dress_code || '') + '">') +
+    '</div>' +
+    '<div class="ne-scope"><div class="ne-sh">' + inlineIcon('phone') + 'Points of contact <i>the 6am problem-solvers</i></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr">' +
+    finLabelWrap('Venue POC', '<input id="csVpName" class="cell-in" placeholder="name" value="' + esc(pf(show.venue_poc, 'name')) + '">') +
+    finLabelWrap('Title', '<input id="csVpTitle" class="cell-in" placeholder="ops manager" value="' + esc(pf(show.venue_poc, 'title')) + '">') +
+    finLabelWrap('Phone', '<input id="csVpPhone" class="cell-in" placeholder="414-555-0114" value="' + esc(pf(show.venue_poc, 'phone')) + '">') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr">' +
+    finLabelWrap('Client POC', '<input id="csCpName" class="cell-in" placeholder="name" value="' + esc(pf(show.client_poc, 'name')) + '">') +
+    finLabelWrap('Title', '<input id="csCpTitle" class="cell-in" placeholder="marketing lead" value="' + esc(pf(show.client_poc, 'title')) + '">') +
+    finLabelWrap('Phone', '<input id="csCpPhone" class="cell-in" placeholder="312-555-0170" value="' + esc(pf(show.client_poc, 'phone')) + '">') +
+    '</div></div>' +
+    _foot(act('csCommit'), 'Save call sheet'));
+}
+async function csCommit() {
+  if (!PENDING_SHEET) return;
+  var showId = PENDING_SHEET.showId;
+  var mkPoc = function (n, t, p) {
+    var name = _v(n);
+    return name ? { name: name, title: _v(t), phone: _v(p) } : null;
+  };
+  var patch = {
+    load_in_time: _v('csLoadIn') || null, doors_time: _v('csDoors') || null,
+    event_time: _v('csEvent') || null, strike_time: _v('csStrike') || null,
+    venue_address: _v('csAddr') || null, parking_notes: _v('csPark') || null,
+    radio_channel: _v('csRadio') || null, dress_code: _v('csDress') || null,
+    venue_poc: mkPoc('csVpName', 'csVpTitle', 'csVpPhone'),
+    client_poc: mkPoc('csCpName', 'csCpTitle', 'csCpPhone')
+  };
+  try { await api.updateCallSheet(showId, patch); }
+  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  PENDING_SHEET = null;
+  closeM();
+  toast('Call sheet saved', 'Everyone on this show has been told the times changed');
+  return refreshShowTab(showId, 'schedule');
+}
+
+/* ── A2 · EDIT THE SHOW ──────────────────────────────────────────────────────
+   PUT /api/shows/:id accepts sixteen fields and recomputes the whole
+   back-schedule on a date change. It had no api method and no data-act, so a
+   venue change or a date move was impossible through the product. */
+async function openEditShow(showId) {
+  var show = await api.getShow(showId);
+  PENDING_SHOWEDIT = { showId: Number(showId) };
+  var canPickOwner = CURRENT_USER.role === 'admin' || CURRENT_USER.role === 'manager';
+  var ownerOpts = (canPickOwner ? activeUsers() : [CURRENT_USER])
+    .filter(function (u) { return u.role !== 'viewer'; })
+    .map(function (u) {
+      return '<option value="' + esc(u.username) + '"' + (u.username === show.owner ? ' selected' : '') + '>' +
+        esc(u.name + ' · ' + roleName(u.role)) + '</option>';
+    }).join('');
+  var pocOpts = '<option value="">— nobody yet —</option>' + activeUsers().map(function (u) {
+    return '<option value="' + esc(u.username) + '"' + (u.username === show.on_site_poc ? ' selected' : '') + '>' +
+      esc(u.name) + '</option>';
+  }).join('');
+  openModal('Edit ' + showLabel(show),
+    '<div class="hint" style="margin:0 0 12px">' + icon('alert') + '<span>Moving the <b>event date</b> re-cuts ' +
+    'every T-minus deadline on this show, and <b>tells everyone on it</b> — the owner, the folder owner, every ' +
+    'task owner and the whole crew. That is the point of it, not a side effect.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.6fr 1fr">' +
+    finLabelWrap('Event name', '<input id="esName" class="cell-in" value="' + esc(show.name || '') + '">') +
+    finLabelWrap('Owner', '<select id="esOwner" class="cell-in">' + ownerOpts + '</select>') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.6fr 1fr">' +
+    finLabelWrap('Venue', '<input id="esVenue" class="cell-in" value="' + esc(show.venue || '') + '">') +
+    finLabelWrap('City', '<input id="esCity" class="cell-in" value="' + esc(show.city || '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr">' +
+    finLabelWrap('Load-in', '<input id="esLoadIn" class="cell-in" type="date" value="' + esc(show.load_in_date || '') + '">') +
+    finLabelWrap('Event date', '<input id="esEvent" class="cell-in" type="date" value="' + esc(show.event_date || '') + '">') +
+    finLabelWrap('Strike', '<input id="esStrike" class="cell-in" type="date" value="' + esc(show.strike_date || '') + '">') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+    finLabelWrap('On-site lead', '<select id="esPoc" class="cell-in">' + pocOpts + '</select>') +
+    finLabelWrap('Cabinets', '<input id="esCabs" class="cell-in" type="number" min="0" value="' +
+      esc(show.cabinets == null ? '' : show.cabinets) + '">') + '</div>' +
+    notifyRow() +
+    _foot(act('esCommit'), 'Save changes'));
+}
+async function esCommit() {
+  if (!PENDING_SHOWEDIT) return;
+  var showId = PENDING_SHOWEDIT.showId;
+  var name = _v('esName');
+  if (!name) { toast('An event needs a name', 'Type what we call it, or cancel'); return; }
+  stageNotifies();
+  var saved;
+  try {
+    saved = await api.updateShow(showId, {
+      name: name, venue: _v('esVenue'), city: _v('esCity'),
+      load_in_date: _v('esLoadIn'), event_date: _v('esEvent'), strike_date: _v('esStrike'),
+      owner: _v('esOwner'), on_site_poc: _v('esPoc'), cabinets: _n('esCabs') || 0
+    });
+  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  PENDING_SHOWEDIT = null;
+  closeM();
+  var suffix = await sendNotifies('show', showId, 'updated ' + name + ' —');
+  toast('Saved', showLabel(saved) + ' — everyone on this show has been told what changed' + suffix);
+  return render('show', showId);
+}
+
+/* ── A3 · EDIT THE FOLDER ─────────────────────────────────────────────────── */
+async function openEditFolder(projectId) {
+  var p = await api.getProject(projectId);
+  PENDING_FOLDEDIT = { projectId: Number(projectId) };
+  var canPickOwner = CURRENT_USER.role === 'admin' || CURRENT_USER.role === 'manager';
+  var ownerOpts = (canPickOwner ? activeUsers() : [CURRENT_USER])
+    .filter(function (u) { return u.role !== 'viewer'; })
+    .map(function (u) {
+      return '<option value="' + esc(u.username) + '"' + (u.username === p.owner ? ' selected' : '') + '>' +
+        esc(u.name + ' · ' + roleName(u.role)) + '</option>';
+    }).join('');
+  openModal('Edit folder',
+    '<div class="hint" style="margin:0 0 12px">' + icon('folder') + '<span>The folder is the season or the ' +
+    'programme. Renaming it, or handing it to someone else, reaches everyone on every show inside it.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.6fr 1fr">' +
+    finLabelWrap('Folder name', '<input id="efName" class="cell-in" value="' + esc(p.name || '') + '">') +
+    finLabelWrap('Client', '<input id="efClient" class="cell-in" value="' + esc(p.client || '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1.4fr">' +
+    finLabelWrap('Owner', '<select id="efOwner" class="cell-in">' + ownerOpts + '</select>') +
+    finLabelWrap('Description', '<input id="efDesc" class="cell-in" value="' + esc(p.description || '') + '">') +
+    '</div>' +
+    notifyRow() +
+    _foot(act('efCommit'), 'Save folder'));
+}
+async function efCommit() {
+  if (!PENDING_FOLDEDIT) return;
+  var pid = PENDING_FOLDEDIT.projectId;
+  var name = _v('efName');
+  if (!name) { toast('A folder needs a name', 'Type one, or cancel'); return; }
+  stageNotifies();
+  try {
+    await api.updateProject(pid, { name: name, client: _v('efClient'),
+      owner: _v('efOwner'), description: _v('efDesc') });
+  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  PENDING_FOLDEDIT = null;
+  closeM();
+  var suffix = await sendNotifies('project', pid, 'updated the folder ' + name + ' —');
+  toast('Folder saved', name + suffix);
+  return render('folder', pid);
+}
+
+/* ── B3/B4/B5/D3 · TASKS ─────────────────────────────────────────────────────
+   Every step in the system came from a template. A PM could not add "chase the
+   venue about the rigging plot", could not re-date one, and — the part the RAG
+   model hangs on — could not mark one BLOCKED. Neither could the tech standing
+   in front of the problem. */
+async function openTask(showId, stepId) {
+  var show = await api.getShow(showId);
+  var step = stepId ? await api.getStep(stepId) : null;
+  PENDING_TASK = { showId: Number(showId), id: step ? step.id : null };
+  var lanes = show.lanes || typeDef(show.type).lanes || [];
+  var laneOpts = lanes.map(function (l) {
+    var key = l.key || l;
+    var label = l.label || key;
+    return '<option value="' + esc(key) + '"' + (step && step.lane === key ? ' selected' : '') + '>' +
+      esc(label) + '</option>';
+  }).join('');
+  var ownerOpts = '<option value="">— unassigned —</option>' + activeUsers().map(function (u) {
+    return '<option value="' + esc(u.username) + '"' + (step && step.owner === u.username ? ' selected' : '') + '>' +
+      esc(u.name + ' · ' + roleName(u.role)) + '</option>';
+  }).join('');
+  var statusOpts = ['todo', 'in_progress', 'blocked', 'done', 'na'].map(function (k) {
+    return '<option value="' + esc(k) + '"' + (step && normStatus(step.status) === k ? ' selected' : '') + '>' +
+      esc(STATUS[k] ? STATUS[k].label : k) + '</option>';
+  }).join('');
+  openModal((step ? 'Edit task' : 'Add task') + ' · ' + showLabel(show),
+    (step ? '' : '<div class="hint" style="margin:0 0 12px">' + icon('plus') + '<span>A task outside the template ' +
+      '— the thing that came up on a call. Assigning it tells the owner straight away.</span></div>') +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Task', '<input id="tkTitle" class="cell-in" placeholder="chase the venue about the rigging plot" value="' +
+      esc(step ? step.title || '' : '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr">' +
+    finLabelWrap('Lane', '<select id="tkLane" class="cell-in">' + laneOpts + '</select>') +
+    finLabelWrap('Owner', '<select id="tkOwner" class="cell-in">' + ownerOpts + '</select>') +
+    finLabelWrap('Due', '<input id="tkDue" class="cell-in" type="date" value="' +
+      esc(step ? step.due_date || '' : '') + '">') + '</div>' +
+    (step
+      ? '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+        finLabelWrap('Status', '<select id="tkStatus" class="cell-in">' + statusOpts + '</select>',
+          'Marking it <b>blocked</b> tells the show owner and the folder owner. That is what the flag is for.') +
+        finLabelWrap('At risk',
+          '<label style="text-transform:none;font-weight:400;font-size:12px;display:flex;gap:7px;align-items:center;padding-top:6px">' +
+          '<input type="checkbox" id="tkRisk"' + (step.risk ? ' checked' : '') + '> flag it amber</label>') +
+        '</div>'
+      : '') +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Notes', '<input id="tkNotes" class="cell-in" placeholder="why, or what is in the way" value="' +
+      esc(step ? step.notes || '' : '') + '">') + '</div>' +
+    notifyRow() +
+    _foot(act('tkCommit'), step ? 'Save task' : 'Add task', step ? 'check' : 'plus',
+      step ? '<button class="btn ghost" ' + act('tkDelete', step.id) + '>' + icon('trash') + 'Delete</button>' : ''));
+}
+async function tkCommit() {
+  if (!PENDING_TASK) return;
+  var p = PENDING_TASK;
+  var title = _v('tkTitle');
+  if (!title) { toast('A task needs a title', 'Say what has to happen'); return; }
+  var body = { title: title, lane: _v('tkLane'), owner: _v('tkOwner'),
+               due_date: _v('tkDue'), notes: _v('tkNotes') };
+  stageNotifies();
+  var saved;
+  try {
+    if (p.id) {
+      body.status = _v('tkStatus');
+      body.risk = _c('tkRisk');
+      saved = await api.updateStep(p.id, body);
+    } else {
+      body.show_id = p.showId;
+      saved = await api.createStep(body);
+    }
+  } catch (e) { toast(p.id ? 'Not saved' : 'Not created', String(e && e.message || e)); return; }
+  var showId = p.showId, wasNew = !p.id;
+  PENDING_TASK = null;
+  closeM();
+  var suffix = await sendNotifies('show', showId,
+    (wasNew ? 'added the task “' : 'updated the task “') + title + '” —');
+  toast(wasNew ? 'Task added' : 'Task saved',
+    title + (saved.owner ? ' → ' + userName(saved.owner) : ' · unassigned') +
+    (normStatus(saved.status) === 'blocked' ? ' · blocked — the show owner has been told' : '') + suffix);
+  await updateMineCount();
+  return refreshShowTab(showId, 'pipeline');
+}
+async function tkDeleteAct(stepId) {
+  var showId = PENDING_TASK ? PENDING_TASK.showId : CUR.showId;
+  try { await api.deleteStep(stepId); }
+  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  PENDING_TASK = null;
+  closeM();
+  toast('Task deleted', 'Its owner has been told it came off their list');
+  await updateMineCount();
+  return refreshShowTab(showId, 'pipeline');
+}
+/* D3 — the status control the tech never had. `blocked` and `risk` are the two
+   signals the whole RAG model consumes, and the UI exposed neither. */
+async function stepStatusAct(stepId, status) {
+  var st = await api.getStep(stepId);
+  if (!st) return;
+  try { await api.setStepStatus(stepId, status); }
+  catch (e) { toast('Not updated', String(e && e.message || e)); return; }
+  await refreshShowTab(st.show_id, 'pipeline');
+  toast(status === 'blocked' ? 'Marked blocked' : 'Status updated',
+    st.title + (status === 'blocked'
+      ? ' — the show owner and the folder owner have been told'
+      : ' → ' + (STATUS[status] ? STATUS[status].label : status)));
+  updateMineCount();
+}
+
+/* ── C1/C2/C3 · THE MONEY INPUTS ─────────────────────────────────────────────
+   Budget-vs-actual is the CONFIRMED accounting requirement, and every burn bar
+   in the app read against an allotted of zero — the Financials empty state said
+   "Candice sets per-category allotments on the job" and Candice could not.
+   Margin gated a contract value nothing wrote. */
+async function openBudget(jobId, lineId) {
+  var job = await api.getJob(jobId);
+  var lines = await api.listBudgetLines(jobId);
+  var line = lineId ? lines.filter(function (l) { return l.id === Number(lineId); })[0] : null;
+  PENDING_BUDGET = { jobId: Number(jobId), id: line ? line.id : null };
+  var taken = {};
+  lines.forEach(function (l) { if (!line || l.id !== line.id) taken[l.category] = 1; });
+  var catOpts = BUDGET_CAT_ORDER.filter(function (k) { return !taken[k] || (line && line.category === k); })
+    .map(function (k) {
+      return '<option value="' + esc(k) + '"' + (line && line.category === k ? ' selected' : '') + '>' +
+        esc(BUDGET_CATS[k]) + '</option>';
+    }).join('');
+  openModal((line ? 'Edit allotment' : 'Add budget line') + ' · job ' + esc(job.qb_job_number),
+    '<div class="hint" style="margin:0 0 12px">' + icon('scale') + '<span>The allotment every burn bar on this job ' +
+    'reads against. Committed PO lines sit between it and actual spend.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+    finLabelWrap('Category', '<select id="blCat" class="cell-in">' + catOpts + '</select>') +
+    finLabelWrap('Allotted', '<input id="blAmt" class="cell-in" type="number" min="0" step="0.01" value="' +
+      esc(line ? line.allotted : '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Notes', '<input id="blNotes" class="cell-in" placeholder="what this covers" value="' +
+      esc(line ? line.notes || '' : '') + '">') + '</div>' +
+    _foot(act('blCommit'), line ? 'Save allotment' : 'Add line', line ? 'check' : 'plus',
+      line ? '<button class="btn ghost" ' + act('blDelete', line.id) + '>' + icon('trash') + 'Remove line</button>' : ''));
+}
+async function blCommit() {
+  if (!PENDING_BUDGET) return;
+  var p = PENDING_BUDGET;
+  var cat = _v('blCat');
+  var amt = _n('blAmt');
+  if (!cat) { toast('Pick a category', 'Every allotment belongs to one'); return; }
+  if (amt == null || !(amt >= 0)) { toast('Enter an amount', 'An allotment is a number'); return; }
+  try {
+    if (p.id) await api.updateBudgetLine(p.id, { category: cat, allotted: amt, notes: _v('blNotes') });
+    else await api.addBudgetLine(p.jobId, { category: cat, allotted: amt, notes: _v('blNotes') });
+  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  var jobId = p.jobId, wasEdit = !!p.id;
+  PENDING_BUDGET = null;
+  closeM();
+  toast(wasEdit ? 'Allotment saved' : 'Budget line added', BUDGET_CATS[cat] + ' · ' + fmtMoney(amt));
+  if (CUR.view === 'job') return render('job', jobId);
+  return refreshFinanceUI();
+}
+async function blDeleteAct(lineId) {
+  var jobId = PENDING_BUDGET ? PENDING_BUDGET.jobId : CUR.jobId;
+  try { await api.deleteBudgetLine(lineId); }
+  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  PENDING_BUDGET = null;
+  closeM();
+  toast('Line removed', 'Costs in that category now read as unbudgeted');
+  if (CUR.view === 'job') return render('job', jobId);
+  return refreshFinanceUI();
+}
+async function openContract(jobId) {
+  if (!canSeeFinance()) {
+    toast('Accounting’s', 'The contract value sits with the admins and Candice');
+    return;
+  }
+  var job = await api.getJob(jobId);
+  PENDING_CONTRACT = { jobId: Number(jobId) };
+  var dealOpts = ['rental', 'sale'].map(function (k) {
+    return '<option value="' + esc(k) + '"' + (job.deal_type === k ? ' selected' : '') + '>' +
+      esc(k === 'sale' ? 'Sale — hardware is cost-of-goods on this job'
+                       : 'Rental — E360 retains the gear') + '</option>';
+  }).join('');
+  openModal('Contract value · job ' + esc(job.qb_job_number),
+    '<div class="hint" style="margin:0 0 12px">' + icon('lock') + '<span>This is <b>billed</b>. Margin is billed ' +
+    'minus actual, so this one number decides every profitability figure on the job — and it is admins and ' +
+    'accounting only, to write as well as to read.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1.4fr">' +
+    finLabelWrap('Contract value', '<input id="cvAmt" class="cell-in" type="number" min="0" step="0.01" value="' +
+      esc(job.contract_value == null ? '' : job.contract_value) + '">') +
+    finLabelWrap('Deal type', '<select id="cvDeal" class="cell-in">' + dealOpts + '</select>',
+      'Decides whether received PO lines become E360 capex or job COGS.') + '</div>' +
+    _foot(act('cvCommit'), 'Save'));
+}
+async function cvCommit() {
+  if (!PENDING_CONTRACT) return;
+  var jobId = PENDING_CONTRACT.jobId;
+  var amt = _n('cvAmt');
+  if (amt == null || !(amt >= 0)) { toast('Enter a value', 'A blank contract value is not zero — cancel instead'); return; }
+  try { await api.updateJob(jobId, { contract_value: amt, deal_type: _v('cvDeal') }); }
+  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  PENDING_CONTRACT = null;
+  closeM();
+  toast('Contract value saved', fmtMoney(amt) + ' — margin now computes on this job');
+  if (CUR.view === 'job') return render('job', jobId);
+  return refreshFinanceUI();
+}
+
+/* ── B6 · BOOKINGS ─────────────────────────────────────────────────────────── */
+async function openBooking(showId, bookingId) {
+  var show = await api.getShow(showId);
+  var bk = bookingId
+    ? (show.bookings || []).filter(function (b) { return b.id === Number(bookingId); })[0] : null;
+  PENDING_BOOK = { showId: Number(showId), id: bk ? bk.id : null };
+  var jobs = ((show.project && show.project.jobs) || ALL_JOBS || [])
+    .filter(function (j) { return j.project_id === show.project_id; });
+  var jobOpts = '<option value="">this show’s job</option>' + jobs.map(function (j) {
+    return '<option value="' + Number(j.id) + '"' + (bk && bk.job_id === j.id ? ' selected' : '') + '>' +
+      esc(j.qb_job_number + ' · ' + j.client) + '</option>';
+  }).join('');
+  var statusOpts = ['todo', 'in_progress', 'done', 'blocked'].map(function (k) {
+    return '<option value="' + esc(k) + '"' + (bk && normStatus(bk.status) === k ? ' selected' : '') + '>' +
+      esc(STATUS[k] ? STATUS[k].label : k) + '</option>';
+  }).join('');
+  openModal((bk ? 'Edit booking' : 'Book a vendor') + ' · ' + showLabel(show),
+    '<div class="hint" style="margin:0 0 12px">' + icon('truck') + '<span>Trucking, forklift, feeder, install and ' +
+    'strike labour, hotels. On push these become staffing <b>/api/bookings</b>; one with an amount and no ' +
+    'paperwork lands on accounting’s chase list.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1.4fr">' +
+    finLabelWrap('Booking', '<input id="bkCat" class="cell-in" placeholder="Trucking · Forklift · Hotel" value="' +
+      esc(bk ? bk.category || '' : '') + '">') +
+    finLabelWrap('Vendor', '<input id="bkVendor" class="cell-in" placeholder="who we booked" value="' +
+      esc(bk ? bk.vendor || '' : '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr">' +
+    finLabelWrap('Status', '<select id="bkStatus" class="cell-in">' + statusOpts + '</select>') +
+    finLabelWrap('Amount', '<input id="bkAmt" class="cell-in" type="number" min="0" step="0.01" value="' +
+      esc(bk && bk.amount != null ? bk.amount : '') + '">') +
+    finLabelWrap('Booked for', '<input id="bkDate" class="cell-in" type="date" value="' +
+      esc(bk ? bk.booked_date || '' : '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1.4fr">' +
+    finLabelWrap('Bills to', '<select id="bkJob" class="cell-in">' + jobOpts + '</select>') +
+    finLabelWrap('Confirmation #', '<input id="bkConf" class="cell-in" value="' +
+      esc(bk ? bk.confirmation_number || '' : '') + '">') + '</div>' +
+    notifyRow() +
+    _foot(act('bkCommit'), bk ? 'Save booking' : 'Book it', bk ? 'check' : 'plus',
+      bk ? '<button class="btn ghost" ' + act('bkDelete', bk.id) + '>' + icon('trash') + 'Delete</button>' : ''));
+}
+async function bkCommit() {
+  if (!PENDING_BOOK) return;
+  var p = PENDING_BOOK;
+  var cat = _v('bkCat');
+  if (!cat) { toast('What kind of booking?', 'Trucking, forklift, hotel…'); return; }
+  var body = { category: cat, vendor: _v('bkVendor'), status: _v('bkStatus'),
+               amount: _n('bkAmt'), booked_date: _v('bkDate') || null,
+               job_id: _n('bkJob'), confirmation_number: _v('bkConf') };
+  stageNotifies();
+  try {
+    if (p.id) await api.updateBooking(p.id, body);
+    else await api.createBooking(p.showId, body);
+  } catch (e) { toast(p.id ? 'Not saved' : 'Not booked', String(e && e.message || e)); return; }
+  var showId = p.showId, wasNew = !p.id;
+  PENDING_BOOK = null;
+  closeM();
+  var suffix = await sendNotifies('show', showId,
+    (wasNew ? 'booked ' : 'updated the booking ') + cat + ' —');
+  toast(wasNew ? 'Booked' : 'Booking saved', cat + (body.vendor ? ' · ' + body.vendor : '') + suffix);
+  return refreshShowTab(showId, 'bookings');
+}
+async function bkDeleteAct(id) {
+  var showId = PENDING_BOOK ? PENDING_BOOK.showId : CUR.showId;
+  try { await api.deleteBooking(id); }
+  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  PENDING_BOOK = null;
+  closeM();
+  toast('Booking deleted', '');
+  return refreshShowTab(showId, 'bookings');
+}
+
+/* ── B8 · THE PO's EXPECTED DATE — the delivery alarm's only input ─────────── */
+async function openPOEta(poId) {
+  var po = await api.getPO(poId);
+  PENDING_POETA = { poId: Number(poId) };
+  openModal('Delivery · ' + esc(po.po_number),
+    '<div class="hint" style="margin:0 0 12px">' + icon('truck') + '<span>The expected date is watched against ' +
+    'every load-in this PO has lines for. Landing after one is <b>critical</b>; within five days of one is a ' +
+    '<b>warning</b>. With no ETA at all the alarm cannot fire.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1.4fr">' +
+    finLabelWrap('Expected', '<input id="poEta" class="cell-in" type="date" value="' +
+      esc(po.expected_date || '') + '">') +
+    finLabelWrap('Tracking', '<input id="poTrk" class="cell-in" placeholder="carrier + number" value="' +
+      esc(po.tracking || '') + '">') + '</div>' +
+    notifyRow() +
+    _foot(act('poEtaCommit'), 'Save delivery'));
+}
+async function poEtaCommit() {
+  if (!PENDING_POETA) return;
+  var poId = PENDING_POETA.poId;
+  stageNotifies();
+  var po;
+  try { po = await api.updatePO(poId, { expected_date: _v('poEta') || null, tracking: _v('poTrk') || null }); }
+  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  PENDING_POETA = null;
+  closeM();
+  var suffix = await sendNotifies('po', poId, 'set the delivery date on ' + po.po_number + ' —');
+  toast('Delivery saved',
+    (po.expected_date ? 'expected ' + fmtDate(po.expected_date) : 'no ETA') + suffix);
+  return refreshFinanceUI();
+}
+
+/* ── A7/A8 · THE LIVE PUSH ───────────────────────────────────────────────────
+   The most-proven integration in the app could only ever rehearse: pushSched()
+   called the route with no {live}, and the toast said "(dry run)". The dry run
+   is now the CONFIRM STEP — you read the payload and its problems, then you
+   send. And features.schedulerPush is finally consumed rather than served and
+   ignored, so a box with no SCHEDULER_BASE_URL says so instead of rehearsing. */
+async function pushSched(showId) {
+  var feats = {};
+  try { feats = await api.features(); } catch (e) { feats = {}; }
+  if (!feats.schedulerPush) {
+    toast('Scheduler not configured',
+      'This server has no SCHEDULER_BASE_URL — there is nothing to push to');
+    return;
+  }
+  var show = await api.getShow(showId);
+  var dry;
+  try { dry = await api.pushToScheduler(showId, { live: false }); }
+  catch (e) { toast('Could not build the push', String(e && e.message || e)); return; }
+  PENDING_PUSH = { showId: Number(showId), linked: !!show.scheduler_event_id };
+  /* The dry run answers { dryRun, ready, problems[], rosterNote, targets, payloads }
+     — `payloads` PLURAL, and it is the only place the crew list and the child
+     counts live. Reading a key the server does not send is exactly the
+     one-line client/server mismatch DESIGN_GAPS P12 is about, so this names
+     them explicitly rather than guessing across two spellings. */
+  var pl = dry.payloads || {};
+  var probs = dry.problems || [];
+  var crewNames = pl.crewNames || [];
+  var row = function (k, v) {
+    return '<div class="meta-row"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + '</span></div>';
+  };
+  var clean = dry.ready !== undefined ? !!dry.ready : !probs.length;
+  openModal('Push ' + showLabel(show) + ' to the staffing app',
+    '<div class="hint" style="margin:0 0 12px">' + icon('send') + '<span>This is the <b>dry run</b>. Nothing has ' +
+    'left the building. Read what would be created over there, then send it for real.</span></div>' +
+    row('Event', showLabel(show)) +
+    row('Dates', (show.load_in_date || '—') + ' → ' + (show.strike_date || show.event_date || '—')) +
+    row('Crew', crewNames.length ? crewNames.join(', ') : '— nobody on the crew yet —') +
+    row('Bookings', String((pl.bookings || []).length)) +
+    row('Travel legs', String((pl.travel || []).length)) +
+    row('Venue contacts', String((pl.venueContacts || []).length)) +
+    (dry.rosterNote ? '<div class="hint" style="margin-top:10px">' + inlineIcon('users') + '<span>' +
+      esc(dry.rosterNote) + '</span></div>' : '') +
+    (show.scheduler_event_id
+      ? '<div class="callout" style="margin:12px 0 0"><div class="ci">' + icon('link') + '</div><div>' +
+        '<b>Already linked</b><p>This show is staffing event <b>' + esc(show.scheduler_event_id) + '</b>. Sending ' +
+        'again <b>updates</b> it — rows a human added over there survive.</p></div></div>'
+      : '') +
+    (clean
+      ? '<div class="hint" style="margin-top:12px">' + inlineIcon('checkC') + '<span>Pre-flight passed — every ' +
+        'crew name resolves against the staffing roster.</span></div>'
+      : '<div class="callout" style="margin:12px 0 0"><div class="ci">' + icon('alert') + '</div><div>' +
+        '<b>' + probs.length + ' problem' + (probs.length === 1 ? '' : 's') + ' — the push will refuse</b><p>' +
+        probs.map(function (x) {
+          return esc(typeof x === 'string' ? x : (x.message || x.detail || JSON.stringify(x)));
+        }).join('<br>') + '</p></div></div>') +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Close</button>' +
+    (clean ? '<button class="btn primary" ' + act('pushLive', showId) + '>' + icon('send') +
+      (show.scheduler_event_id ? 'Send the update' : 'Send it for real') + '</button>' : '') +
+    '</div>');
+}
+async function pushLiveAct(showId) {
+  var linked = !!(PENDING_PUSH && PENDING_PUSH.linked);
+  var r;
+  try { r = await api.pushToScheduler(showId, { live: true, force: linked }); }
+  catch (e) { toast('Push refused', String(e && e.message || e)); return; }
+  PENDING_PUSH = null;
+  closeM();
+  var c = r.counts || {};
+  toast('Pushed to the staffing app',
+    'event ' + (r.schedulerEventId || '—') + ' · ' + (c.bookings || 0) + ' bookings · ' +
+    (c.travel || 0) + ' travel legs' + (r.created ? ' — created' : ' — updated'));
+  return refreshShowTab(showId);
+}
+
+/* ── B7 · PROOFS ─────────────────────────────────────────────────────────────
+   The tab rendered a HARDCODED six-stage flow with invented attributions for
+   every show regardless of what was in `proofs`, and Approve only fired a
+   toast. These are the real writes. */
+async function openProof(showId, proofId) {
+  var show = await api.getShow(showId);
+  var p = proofId
+    ? (show.proofs || []).filter(function (x) { return x.id === Number(proofId); })[0] : null;
+  PENDING_PROOF = { showId: Number(showId), id: p ? p.id : null };
+  var statusOpts = ['sent', 'markup', 'approved', 'rejected'].map(function (k) {
+    return '<option value="' + esc(k) + '"' + (p && p.status === k ? ' selected' : '') + '>' +
+      esc(PS[k] ? PS[k][1] : k) + '</option>';
+  }).join('');
+  openModal((p ? 'Edit proof' : 'New proof') + ' · ' + showLabel(show),
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1.4fr">' +
+    finLabelWrap('Code', '<input id="prCode" class="cell-in" placeholder="P-101" value="' +
+      esc(p ? p.code || '' : '') + '">') +
+    finLabelWrap('Name', '<input id="prName" class="cell-in" placeholder="Courtside banner — 24ft" value="' +
+      esc(p ? p.name || '' : '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+    finLabelWrap('Client', '<input id="prClient" class="cell-in" value="' + esc(p ? p.client || '' : '') + '">') +
+    finLabelWrap('Status', '<select id="prStatus" class="cell-in">' + statusOpts + '</select>') + '</div>' +
+    _foot(act('prCommit'), p ? 'Save proof' : 'Create proof', p ? 'check' : 'plus',
+      p ? '<button class="btn ghost" ' + act('prDelete', p.id) + '>' + icon('trash') + 'Delete</button>' : ''));
+}
+async function prCommit() {
+  if (!PENDING_PROOF) return;
+  var p = PENDING_PROOF;
+  var name = _v('prName');
+  if (!name) { toast('A proof needs a name', 'What is being proofed?'); return; }
+  var body = { code: _v('prCode'), name: name, client: _v('prClient'), status: _v('prStatus') };
+  try {
+    if (p.id) await api.updateProof(p.id, body);
+    else await api.createProof(p.showId, body);
+  } catch (e) { toast(p.id ? 'Not saved' : 'Not created', String(e && e.message || e)); return; }
+  var showId = p.showId, wasNew = !p.id;
+  PENDING_PROOF = null;
+  closeM();
+  toast(wasNew ? 'Proof created' : 'Proof saved', name);
+  return refreshShowTab(showId, 'proofs');
+}
+async function prDeleteAct(id) {
+  var showId = PENDING_PROOF ? PENDING_PROOF.showId : CUR.showId;
+  try { await api.deleteProof(id); }
+  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  PENDING_PROOF = null;
+  closeM();
+  toast('Proof deleted', '');
+  return refreshShowTab(showId, 'proofs');
+}
+/* Approve / request-changes are real writes now. Approving sets the status;
+   requesting changes opens the next round, which is what a round IS. */
+async function proofAction(proofId, approve) {
+  var showId = CUR.showId;
+  var show = await api.getShow(showId);
+  var p = (show.proofs || []).filter(function (x) { return x.id === Number(proofId); })[0];
+  if (!p) return;
+  try {
+    if (approve) {
+      await api.updateProof(proofId, { status: 'approved' });
+    } else {
+      await api.addProofRound(proofId, {
+        round: 'R' + ((p.rounds || []).length + 1), date: TODAY_ISO,
+        status: 'markup', note: 'changes requested' });
+      await api.updateProof(proofId, { status: 'markup' });
+    }
+  } catch (e) { toast(approve ? 'Not approved' : 'Not reopened', String(e && e.message || e)); return; }
+  toast(approve ? 'Approved' : 'Changes requested',
+    (p.name || p.code) + (approve ? ' — the show has been told' : ' — a new round is open'));
+  return refreshShowTab(showId, 'proofs');
+}
+
+/* ── F4 · THE CHANGELOG ──────────────────────────────────────────────────────
+   The activity table had 68 verbs, 128 writers and one buried per-show tab. The
+   cross-project read is the one company-wide question a person can now ask that
+   is not about money. */
+/* CHANGES_UI itself is declared beside viewChanges() in views-folder.js, with
+   the other per-view state objects. These three are the ACTIONS half. */
+async function viewChangesData() {
+  var opts = { changed: true, limit: 200 };
+  if (CHANGES_UI.scope === 'mine') opts.mine = true;
+  if (CHANGES_UI.action) opts.action = CHANGES_UI.action;
+  return api.listChanges(opts);
+}
+function changesScopeAct(k) { CHANGES_UI.scope = k; return render('changes'); }
+function changesFilterAct(k) {
+  CHANGES_UI.action = CHANGES_UI.action === k ? '' : k;
+  return render('changes');
+}
+
 var ACTIONS = {
   goProjects:    function () { return render('projects'); },
   goFiles:       function () { return render('files'); },
@@ -2865,6 +3667,53 @@ var ACTIONS = {
   toggleNav:     function () { toggleNavDrawer(); },
   closeNav:      function () { setNavOpen(false); },
   pushSched:     function (t, id) { return pushSched(id); },
+  pushLive:      function (t, id) { return pushLiveAct(id); },
+
+  /* ── THE SEAM PASS · every route that had no door ──────────────────────── */
+  /* B1 crew */
+  crewAdd:       function (t, id) { return openCrew(id, null); },
+  crewEdit:      function (t, id, k) { return openCrew(Number(k), id); },
+  crewMode:      function (t, id, k) { return crewModeAct(id, k); },
+  crewCommit:    function () { return crewCommit(); },
+  crewRemove:    function (t, id) { return crewRemoveAct(id); },
+  /* B2 call-sheet header */
+  editCallSheet: function (t, id) { return openCallSheet(id); },
+  csCommit:      function () { return csCommit(); },
+  /* A2/A3 the record stops being frozen at birth */
+  editShow:      function (t, id) { return openEditShow(id); },
+  esCommit:      function () { return esCommit(); },
+  editFolder:    function (t, id) { return openEditFolder(id); },
+  efCommit:      function () { return efCommit(); },
+  /* B3/B4/B5/D3 tasks */
+  addTask:       function (t, id) { return openTask(id, null); },
+  editTask:      function (t, id, k) { return openTask(Number(k), id); },
+  tkCommit:      function () { return tkCommit(); },
+  tkDelete:      function (t, id) { return tkDeleteAct(id); },
+  stepStatus:    function (t, id, k) { return stepStatusAct(id, k); },
+  /* C1/C2/C3 the money inputs */
+  addBudget:     function (t, id) { return openBudget(id, null); },
+  editBudget:    function (t, id, k) { return openBudget(Number(k), id); },
+  blCommit:      function () { return blCommit(); },
+  blDelete:      function (t, id) { return blDeleteAct(id); },
+  editContract:  function (t, id) { return openContract(id); },
+  cvCommit:      function () { return cvCommit(); },
+  /* B6 bookings */
+  addBooking:    function (t, id) { return openBooking(id, null); },
+  editBooking:   function (t, id, k) { return openBooking(Number(k), id); },
+  bkCommit:      function () { return bkCommit(); },
+  bkDelete:      function (t, id) { return bkDeleteAct(id); },
+  /* B8 the delivery-risk alarm's inputs */
+  editPOEta:     function (t, id) { return openPOEta(id); },
+  poEtaCommit:   function () { return poEtaCommit(); },
+  /* B7 proofs */
+  addProof:      function (t, id) { return openProof(id, null); },
+  editProof:     function (t, id, k) { return openProof(Number(k), id); },
+  prCommit:      function () { return prCommit(); },
+  prDelete:      function (t, id) { return prDeleteAct(id); },
+  /* F4 the changelog */
+  goChanges:     function () { return render('changes'); },
+  changesScope:  function (t, id, k) { return changesScopeAct(k); },
+  changesFilter: function (t, id, k) { return changesFilterAct(k); },
   proofApprove:  function (t, id) { return proofAction(id, true); },
   proofRevise:   function (t, id) { return proofAction(id, false); },
   setDiv:        async function (t, id, k) { DIV_FILTER = (DIV_FILTER === k && k !== 'all') ? 'all' : k; await render('projects'); },

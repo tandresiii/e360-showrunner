@@ -149,8 +149,22 @@ async function fileReport(req, res, rep, show) {
 
   const out = await withTx(async (c) => {
     let docId = nextFile;
-    // The written form becomes a real document in the folder. One file per
+    // The written form ALSO becomes a real document in the folder. One file per
     // report, revised in place — a tech who fixes a typo does not leave two.
+    //
+    // ── THE MIRROR IS BEST-EFFORT, AND THE REPORT IS NOT ─────────────────────
+    // `tech_reports.body` is the record. The .txt in the event folder is a
+    // convenience so the report reads like every other document. When there is
+    // no byte store configured, storage.put() answers 501 — and letting that
+    // roll the transaction back would mean a tech CANNOT FILE AT ALL, their
+    // obligation stays owed forever, and the show's closeout can never
+    // complete. An unwired NAS must not be able to hold a show open.
+    //
+    // So the mirror is attempted and its failure is recorded, never raised. The
+    // file row is written ONLY if the bytes really landed: a `files` row whose
+    // nas_path points at nothing is the "the metadata row outlived its bytes"
+    // 404 that lib/storage exists to make impossible.
+    let mirrorNote = '';
     if (body != null && body) {
       const project = await loadProject(show.project_id, c);
       const { buildNasPath } = require('./files');
@@ -158,20 +172,31 @@ async function fileReport(req, res, rep, show) {
       const nasPath = buildNasPath(project || { id: show.project_id, slug: '', name: 'project' },
         show, { kind: 'report', name, ext: 'txt' });
       const bytes = Buffer.from(body, 'utf8');
-      await storage.put(nasPath, bytes);
-      const existing = rep.file_id ? await loadRow('files', rep.file_id, c) : null;
-      if (existing && existing.kind === 'report') {
-        await c.query(
-          `UPDATE files SET size=$2, nas_path=$3, created_at=created_at WHERE id=$1`,
-          [existing.id, bytes.length, nasPath]);
-        docId = existing.id;
-      } else {
-        const ins = await c.query(
-          `INSERT INTO files (project_id, show_id, name, ext, kind, artifact, ver, meta,
-             nas_path, size, uploaded_by, status)
-           VALUES (NULL,$1,$2,'txt','report','document','v1',$3,$4,$5,$6,'filed') RETURNING id`,
-          [show.id, name, 'tech show report', nasPath, bytes.length, req.session.username]);
-        docId = ins.rows[0].id;
+      let stored = true;
+      try {
+        await storage.put(nasPath, bytes);
+      } catch (e) {
+        stored = false;
+        mirrorNote = e && e.status === 501
+          ? ' · no copy in the folder (storage is not configured on this server)'
+          : ' · no copy in the folder (the store could not be written)';
+        console.warn(`[tech-report ${rep.id}] folder copy skipped: ${e.message}`);
+      }
+      if (stored) {
+        const existing = rep.file_id ? await loadRow('files', rep.file_id, c) : null;
+        if (existing && existing.kind === 'report') {
+          await c.query(
+            `UPDATE files SET size=$2, nas_path=$3, created_at=created_at WHERE id=$1`,
+            [existing.id, bytes.length, nasPath]);
+          docId = existing.id;
+        } else {
+          const ins = await c.query(
+            `INSERT INTO files (project_id, show_id, name, ext, kind, artifact, ver, meta,
+               nas_path, size, uploaded_by, status)
+             VALUES (NULL,$1,$2,'txt','report','document','v1',$3,$4,$5,$6,'filed') RETURNING id`,
+            [show.id, name, 'tech show report', nasPath, bytes.length, req.session.username]);
+          docId = ins.rows[0].id;
+        }
       }
     }
     const r = await c.query(
@@ -182,7 +207,7 @@ async function fileReport(req, res, rep, show) {
       projectId: show.project_id, showId: show.id, actor: req.actor,
       action: 'report.filed',
       detail: `${req.session.username} filed their show report` +
-              (docId ? ' · document in the folder' : ''),
+              (docId ? ' · document in the folder' : mirrorNote),
       accent: true });
     // Filing may be the last thing a closeout was waiting on.
     const closeout = await lifecycle.syncCloseout(c, show.id, { actor: req.actor });

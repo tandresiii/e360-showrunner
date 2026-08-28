@@ -628,7 +628,12 @@ function drawViewer(show) {
       metaRow('Status', f.status === 'proposed' ? 'Proposed — awaiting review' : 'Filed') +
       metaRow('Filed by', f.provenance ? actorLabel(null, f.provenance) + ' · ' + Math.round(f.provenance.confidence) + '%' : userName(f.uploaded_by))
     : '';
-  var reviewActs = isFin && f.status === 'proposed'
+  /* E5. This used to be `isFin && f.status === 'proposed'`, so a proposed
+     transcript, spec, contract, recording or report had confirm/reject nowhere
+     except the one bell row — which was itself broken and capped at 8. The
+     financial-ness of a document decides what METADATA it shows, never whether
+     a human may act on it. */
+  var reviewActs = f.status === 'proposed'
     ? '<button class="btn primary" ' + act('confirmDoc', f.id) + '>' + icon('check') + 'Confirm — file it</button>' +
       '<button class="btn ghost" ' + act('rejectDoc', f.id) + '>' + icon('x') + 'Reject proposal</button>'
     : '';
@@ -640,7 +645,7 @@ function drawViewer(show) {
     (isFin ? '' : metaRow('Uploaded by', userName(f.uploaded_by))) + metaRow('Uploaded', fmtDateFull(f.created_at)) +
     (!isFin && show.job ? metaRow('Job', show.job.qb_job_number) : '') +
     '<div class="acts">' + reviewActs + '<button class="btn primary" ' + act('printFile') + '>' + icon('print') + 'Print this file</button>' +
-    '<button class="btn" ' + toastAttrs('Download', f.name + '.' + f.ext + ' from the NAS') + '>' + icon('download') + 'Download</button>' +
+    '<button class="btn" ' + act('downloadFile', f.id) + '>' + icon('download') + 'Download</button>' +
     '<button class="btn ghost" ' + toastAttrs('Bound', 'Spec re-bound to ' + title) + '>' + icon('link') + 'Re-bind to folder</button></div>' +
     '<div class="note-meta-lock">' + icon('lock') + '<span>Bound to ' + esc(title) + ' — ' + esc(show.venue) + '. Anyone with folder access can view and print; the approved version stays locked.</span></div>' +
     /* the file's anchored thread (notes pass) — agents read it when filing */
@@ -683,7 +688,7 @@ function drawPhotoMeta(show, f, title) {
     acts.push('<button class="btn ' + (f.recap_pick ? '' : 'primary') + '" ' + act('photoPick', f.id) + '>' + icon('star') +
       (f.recap_pick ? 'Recap pick — remove' : 'Star for the recap') + '</button>');
   }
-  acts.push('<button class="btn" ' + toastAttrs('Download', f.name + '.' + f.ext + ' from the NAS') + '>' + icon('download') + 'Download original</button>');
+  acts.push('<button class="btn" ' + act('downloadFile', f.id) + '>' + icon('download') + 'Download original</button>');
   var provNote = f.provenance
     ? 'Organized by ' + actorLabel(null, f.provenance) + ' from ' + (f.provenance.source_label || 'a camera-roll sync') +
       ' — proposals ride the same review flow as documents.'

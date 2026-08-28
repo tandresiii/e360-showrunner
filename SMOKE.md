@@ -1,3 +1,46 @@
+# Running the suites
+
+## `npm run walk` — the persona walk *(the acceptance test)*
+
+`scripts/persona-walk.mjs` is the newest suite and the one to run first, because
+it is the only one that can fail for the reason everything in `DESIGN_GAPS.md`
+failed. It brings up **its own throwaway Postgres** (devDependency
+`embedded-postgres`), so it needs no `DATABASE_URL`:
+
+```bash
+npm run walk
+```
+
+**157 assertions.** It boots the real server against an **empty** database in
+**production shape** (no `SEED_ROSTER`, no `STORAGE_ROOT`, no
+`SCHEDULER_BASE_URL`), creates six people, and walks a real month: Tom opens an
+event and fixes a date he got wrong → Brenden puts four people on the crew (one
+a local hire) → creates, assigns, re-dates and blocks tasks → books a vendor →
+raises a PO and gives it an ETA that lands after load-in → Candice enters
+allotments and the contract value → Tom confirms → the dry-run push → strike →
+the reports → a second date change → the changelog → closeout.
+
+Two rules make it different from `smoke.js`, which is an API test:
+
+1. **It runs against an empty database.** No fixtures. Checklist item 8: *"if
+   the screen is empty and there is no button that fills it, the feature is not
+   finished."*
+2. **Every step first asserts that the affordance a PERSON would use exists** —
+   a method on `public/api.js`, a handler in `public/app.js`'s `ACTIONS`, and a
+   `data-act` that renders it. **The walk fails if any step has no reachable
+   affordance.** That is `reach()`, and it is the mechanical form of
+   `DESIGN_GAPS` P1: *"the write half of eight entities is built, gated,
+   cascade-wired, smoke-tested and unreachable from the product."*
+
+All seven of its new gates and mechanisms are **mutation-tested**: the check
+removed, the walk watched going red, the check restored. Removing the ownership
+check on `PUT /bookings/:id`, the finance gate on `contract_value`, the audience
+announcement on a show change, the structured diff on `show.update`, the blocked
+notification, the tech-report fan-out, or the storage-root requirement each
+turns the walk red at the assertion that names it.
+
+---
+
 # Running the smoke test
 
 `scripts/smoke.js` boots the real server in-process on an ephemeral port and

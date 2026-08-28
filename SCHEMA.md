@@ -88,7 +88,8 @@ with **Jobs** (the commercial dimension) alongside the shows in the folder.
 | recap stat keys | `cabinets` · `panels` · `crew` · `days` · `attendance` · `date` **· F4, widened deliberately: `scope` · `linear_feet` · `cabinet_count` · `cabinet_type` · `pitch` · `print_pieces` · `print_sqft`** — physical facts about what the client bought, none of which is derivable into a cost, a rate or a margin |
 | **F4** scope `kind` / `source` | `led` · `print` · `both` / `manual` · `spec` |
 | **F2** tech report `status` | `owed` -> `filed` -> `reviewed`. **Filing completes the obligation**; `reviewed` is optional pm bookkeeping and closeout counts *filed*, never *reviewed* |
-| **F3** notification `kind` | `assignment` · `mention` · `notify` · `report_nag` · `digest` |
+| **F3** notification `kind` | `assignment` · `mention` · `notify` · `report_nag` · `change` · `digest` |
+| **F5** subscription kind | `change` — "you are on this show, so a material change to it reaches you." Defaults to **digest**, deliberately: it is the highest-volume kind and the one most able to train people to ignore their mail (`lib/audience.js`). |
 | **F3** notification `mode` | `immediate` · `digest` · `off` — the per-(user, kind) preference. **`off` silences the EMAIL, never the bell** |
 | **F3** notification `status` | `queued` · `sent` · `skipped` · `failed`. `skipped` is a deliberate outcome with a reason (`read in-app` · `preference off` · `no email address on file`), not a failure |
 | **F3** mail driver | `log` (default) · `graph` |
@@ -1137,7 +1138,30 @@ surfaces the one real operator edit (field width 225 vs 222).
 | `SPEC_BIND_BODY_LIMIT` | `25mb` | scoped to `POST /api/shows/:id/spec-bind` only |
 | `MAX_UPLOAD_BYTES` | `104857600` | the raw byte-upload cap (100 MB). Enforced by both drivers *before* a byte leaves the process |
 | `STORAGE_DRIVER` | `local` | `local` · `webdav` · `smb`. **`webdav` is real** (Synology, see below); `smb` is still an honest 501 that points at `webdav` |
-| `STORAGE_ROOT` | `./.storage` | where the **local** driver writes bytes |
+| `STORAGE_ROOT` | *(unset)* | where the **local** driver writes bytes. **REQUIRED for the local driver to work at all** — see the note below. |
+
+> **`STORAGE_ROOT` is operator intent, and an unset one now means "not
+> configured" (2026-08-28).** The local driver used to default to
+> `<app>/.storage` and report `configured: true` unconditionally. In a container
+> that is a silent data-loss trap of the same family as fabricated numbers:
+> `/api/health` says "storage ready", an upload returns 200, the bytes land on
+> the container's ephemeral layer, and the next redeploy destroys them while the
+> metadata row survives pointing at nothing — so the user is told the opposite
+> of the truth twice, once on upload and once on the later 404.
+>
+> With `STORAGE_ROOT` unset, the local driver is **not configured**:
+> `features.fileUpload` is `false`, the Add-file dialog says so up front and
+> offers *Register (no bytes)*, and every byte operation answers the honest
+> `501 not-configured` naming the variable. Setting it is the statement "I know
+> where these bytes go and that path survives a restart."
+>
+> `/api/health` also carries **`storageEphemeralRisk`** — true only when an
+> operator has deliberately pointed the local driver at a path inside a
+> container. It is reported, never enforced: an operator who mounts a volume
+> there wants to watch it go false as proof the mount took.
+>
+> Dev and CI are unaffected — `scripts/smoke.js`, `scripts/storage-test.js` and
+> the scratchpad harnesses all set it explicitly.
 | `SHOWRUNNER_NAS_ROOT` | `\\E360-NAS\Showrunner` | the logical root every `nas_path` is expressed against. A **label**, not a route — operators read it out of the UI and paste it into Explorer; nothing dials it |
 
 ### Storage — the NAS byte layer (`lib/storage.js`)

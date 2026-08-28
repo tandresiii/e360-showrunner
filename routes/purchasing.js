@@ -58,7 +58,15 @@ const {
 const {
   requireAuth, requireRole, canEditProject, canApprovePO, hasFinance
 } = require('../lib/auth');
-const { logActivity } = require('../lib/activity');
+const { logActivity, diffFields, changeSummary } = require('../lib/activity');
+
+// F3. What a PO edit says out loud. `memo` is routine; an ETA slipping past a
+// load-in is not.
+const MATERIAL_PO_FIELDS = {
+  vendor: 'vendor', expected_date: 'expected', tracking: 'tracking',
+  job_id: 'job', po_number: 'PO number',
+  quote_file_id: 'quote', invoice_file_id: 'invoice'
+};
 const { notifyTargets } = require('../lib/mentions');
 
 // server.js mounts this router at /api and does NOT pre-apply auth, so every
@@ -874,9 +882,17 @@ router.put('/pos/:id', requireAuth, requireRole('pm'), asyncH(async (req, res) =
     const r = await c.query(
       `UPDATE purchase_orders SET ${sets.join(', ')} WHERE id = $1 RETURNING *`, params);
     const updated = (await hydrate(c, r.rows, { activity: false }))[0];
+    // B8. `expected_date` and `tracking` are the ONLY inputs to the delivery-risk
+    // engine — poRisks, the Gear-tab strip, the season flag, the Purchasing
+    // cockpit's crit/warn counters. Until this pass nothing in the product wrote
+    // them, so the alarm could never fire on real data; now that it can, the
+    // change that arms it is worth a diff rather than "updated PO-26-051".
+    const changes = diffFields(po, updated, MATERIAL_PO_FIELDS);
     await logActivity(c, {
       projectId: updated.project_id, poId: updated.id, jobId: updated.job_id,
-      actor: req.actor, action: 'po.update', detail: `updated ${updated.po_number}`
+      actor: req.actor, action: 'po.update',
+      accent: changes.some((ch) => ch.field === 'expected_date'),
+      detail: changeSummary(changes, `updated ${updated.po_number}`), changes
     });
     await notifyFrom(c, req, { po: updated, summary: `${updated.po_number} was updated` });
     return loadPO(updated.id, c);

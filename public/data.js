@@ -2938,13 +2938,20 @@ var RECAP_APPROVE_ROLES = { admin: 1, manager: 1 };
    fallback on purpose: the server is the gate, this is only what the UI
    offers, and a caller that cannot name a folder cannot evaluate ownership. */
 function canEditFolderOf(show, user) {
+  if (!show) return canEditFolder(null, user);
+  return canEditFolder(show.project || PROJECTS_BY_ID[show.project_id], user);
+}
+/* The SAME predicate, given the folder directly — which is what the folder
+   header has in hand and the show header does not. canEditFolderOf() now
+   delegates to it, the way canApprovePOs() delegates to canSeeFinance(): one
+   decision, one expression, two entry points. */
+function canEditFolder(project, user) {
   var u = user || CURRENT_USER;
   if (!u) return false;
   if (u.role === 'admin' || u.role === 'manager') return true;
   if (u.role !== 'pm') return false;
-  if (!show) return true;
-  var p = show.project || PROJECTS_BY_ID[show.project_id];
-  return !!p && p.owner === u.username;
+  if (!project) return true;                    /* rank alone — see above */
+  return project.owner === u.username;
 }
 /* pm+ AND the SHOW-owner predicate — matches assertCanDraft() server-side,
    which composes roleRank >= pm with canApproveRecap (manager+ OR show.owner).

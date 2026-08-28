@@ -1477,12 +1477,22 @@ var api = (function () {
     },
 
     /* ---- push to scheduler --------------------------------------------- */
-    pushToScheduler: function (showId) {
+    /* A7. The single most-proven integration in the app — 72 assertions against
+       a real staffing instance, pre-flight validation, resumable fan-out,
+       idempotent re-push — could not be fired for real from the product,
+       because this method never sent `live`. `opts: { live, force }`. The
+       DEFAULT is still the dry run: the payload and its problems are what a
+       person should read before anything leaves the building. */
+    pushToScheduler: function (showId, opts) {
+      opts = opts || {};
       if (!API()) {
         var s = SHOWS_BY_ID[Number(showId)];
-        return s ? ok({ dryRun: true, show: s.name }) : fail('show ' + showId + ' not found');
+        if (!s) return fail('show ' + showId + ' not found');
+        if (opts.live) return fail('a live push needs the Showrunner server and a configured scheduler');
+        return ok({ dryRun: true, show: s.name });
       }
-      return SR.post('/api/shows/' + Number(showId) + '/push-to-scheduler', {});
+      return SR.post('/api/shows/' + Number(showId) + '/push-to-scheduler',
+        { live: !!opts.live, force: !!opts.force }, { timeout: 60000 });
     },
 
     /* ================= FINANCE ==========================================
@@ -1679,7 +1689,7 @@ var api = (function () {
     /* human review of an agent proposal — "file, don't fire" made a UI.
        DEVIATION 1: the caller holds a FILE id; the server resolves a PROPOSAL
        through GET /api/files/:id/proposal. */
-    confirmDoc: function (fileId) {
+    confirmDoc: function (fileId, overrides) {
       if (!API()) {
         var f = FILES_BY_ID[Number(fileId)];
         if (!f) return fail('file ' + fileId + ' not found');
@@ -1690,12 +1700,29 @@ var api = (function () {
         s.activity.unshift(mkAct(ME, 'confirmed a proposed ' + f.kind, (f.vendor || f.name), 0, _nowHM(), true));
         return ok(f);
       }
+      /* E4. `overrides` is the whole re-targeting mechanism — how a human says
+         "this belongs to THAT show" (routes/proposals.js:113, consumed at
+         :176-190, :233, :266-268, :330-336). This posted `{}`, so a LOW-
+         confidence unattached proposal — exactly the case the confidence bands
+         exist to produce — confirmed with no show and created no expense, and a
+         tasks-batch confirm threw `400 set showId in overrides` that the human
+         had no way to satisfy from the UI. */
       return proposalIdFor(fileId)
-        .then(function (pid) { return SR.post('/api/proposals/' + pid + '/confirm', {}, { notifyOk: true }); })
+        .then(function (pid) {
+          return SR.post('/api/proposals/' + pid + '/confirm',
+            { overrides: overrides || {} }, { notifyOk: true });
+        })
         .then(function (r) {
           if (r && r.expense) A.expense(r.expense);
           if (r && r.file) return A.file(r.file);
-          return SR.get('/api/files/' + Number(fileId)).then(A.file, function () { return null; });
+          /* E2. A SYNTHESIZED bell row carries a negative pseudo-id, and
+             GET /api/files/-88 is a 404. The server has already committed by
+             this point, so a throw here tells the human it failed when it
+             succeeded — and they confirm again. Fall back to the response, and
+             never to an exception. */
+          var realId = Number(fileId);
+          if (!(realId > 0)) return (r && r.file) || null;
+          return SR.get('/api/files/' + realId).then(A.file, function () { return null; });
         });
     },
     rejectDoc: function (fileId) {
@@ -2119,7 +2146,7 @@ var api = (function () {
           who: body.who || 'all', location: body.location || '',
           kind: SCHED_KINDS[body.kind] ? body.kind : 'work'
         });
-        s.activity.unshift(mkAct(ME, 'added to the schedule', title + ' · ' + body.start_time, 0, _nowHM()));
+        s.activity.unshift(mkAct(ME, 'schedule.add', title + ' · ' + body.start_time, 0, _nowHM()));
         return ok(it);
       }
       return SR.post('/api/shows/' + Number(showId) + '/schedule', {
@@ -2143,7 +2170,7 @@ var api = (function () {
           if (patch[k] !== undefined) it[k] = patch[k];
         });
         var s = SHOWS_BY_ID[it.show_id];
-        if (s) s.activity.unshift(mkAct(ME, 'updated the schedule', it.title + ' · ' + it.start_time, 0, _nowHM()));
+        if (s) s.activity.unshift(mkAct(ME, 'schedule.update', it.title + ' · ' + it.start_time, 0, _nowHM()));
         return ok(it);
       }
       return SR.put('/api/schedule/' + Number(id), patch, { notifyOk: true }).then(function (r) { return A.sched(r && r.item ? r.item : r); });
@@ -2157,7 +2184,7 @@ var api = (function () {
         var s = SHOWS_BY_ID[it.show_id];
         if (s) {
           s.schedule_items = s.schedule_items.filter(function (x) { return x.id !== it.id; });
-          s.activity.unshift(mkAct(ME, 'removed from the schedule', it.title, 0, _nowHM()));
+          s.activity.unshift(mkAct(ME, 'schedule.remove', it.title, 0, _nowHM()));
         }
         delete SCHEDULE_BY_ID[it.id];
         return ok({ ok: true, show_id: it.show_id });
@@ -2960,8 +2987,421 @@ var api = (function () {
     specBind: function (showId, payload) {
       if (!API()) return fail('Binding a spec needs the live Showrunner server');
       return SR.post('/api/shows/' + Number(showId) + '/spec-bind', payload, { timeout: 120000, noNotify: true });
+    },
+
+    /* ==================================================================== */
+    /* THE SEAM PASS (2026-08-28) — closing the gap DESIGN_GAPS P1 names:    */
+    /* ~192 routes, ~115 methods, and the WRITE half of eight entities built,*/
+    /* gated, cascade-wired, smoke-tested and unreachable from the product.  */
+    /* Everything below is a route that already existed and had no way in.   */
+    /*                                                                       */
+    /*   B1   crew          POST/PUT/DELETE  -> addCrew/updateCrew/removeCrew*/
+    /*   B2   call sheet    PUT              -> updateCallSheet              */
+    /*   A2/3 show · folder PUT              -> updateShow/updateProject     */
+    /*   B3/4/5 steps       POST/DELETE      -> createStep/deleteStep        */
+    /*   C1   budget lines  POST/PUT/DELETE  -> add/update/deleteBudgetLine  */
+    /*   C2/3 job           PUT              -> updateJob                    */
+    /*   C4   expenses      PUT/DELETE       -> update/deleteExpense         */
+    /*   B6   bookings      POST/PUT/DELETE  -> create/update/deleteBooking  */
+    /*   B8/9 POs           PUT              -> updatePO                     */
+    /*   B7   proofs        POST/PUT/rounds  -> createProof/…                */
+    /*   A7/8 push          live + features  -> pushToScheduler(id,{live})   */
+    /*   F4   activity      since/action/mine-> listChanges                  */
+    /*   E4/8 proposals     GET/confirm      -> listProposals/confirmProposal*/
+    /* ==================================================================== */
+
+    /* ---- B1. CREW — the one entity with a single write site and no door -- */
+    listCrew: function (showId) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        return s ? ok((s.crew_assignments || []).slice()) : fail('show ' + showId + ' not found');
+      }
+      return SR.get('/api/shows/' + Number(showId) + '/crew')
+        .then(function (rows) { return (rows || []).map(A.crew); });
+    },
+    /* body: { username } for one of ours, or { name, phone } for a local hire,
+       plus role_on_site + call_time. The server enforces the same either/or. */
+    addCrew: function (showId, body) {
+      body = body || {};
+      var un = String(body.username || '').trim();
+      var nm = String(body.name || '').trim();
+      if (!un && !nm) {
+        return fail('a crew line needs either someone from the roster or a name for a local hire');
+      }
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        if (un && !ROSTER[un]) return fail('unknown username "' + un + '" — a local hire is added with name + phone instead');
+        var c = mkCrew(s, un || { name: nm, phone: body.phone || '' },
+          body.role_on_site || '', body.call_time || null, body.travel || null);
+        s.activity.unshift(mkAct(ME, 'crew.add',
+          (un ? userName(un) : nm) + (body.role_on_site ? ' · ' + body.role_on_site : '') +
+          (body.call_time ? ' · call ' + body.call_time : ''), 0, _nowHM(), true));
+        return ok(c);
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/crew', body, { notifyOk: true }).then(A.crew);
+    },
+    updateCrew: function (id, patch) {
+      if (!API()) {
+        var c = CREW_BY_ID[Number(id)];
+        if (!c) return fail('crew assignment ' + id + ' not found');
+        Object.keys(patch || {}).forEach(function (k) { c[k] = patch[k]; });
+        var s = SHOWS_BY_ID[c.show_id];
+        if (s) s.activity.unshift(mkAct(ME, 'crew.update',
+          (c.username ? userName(c.username) : c.name) +
+          (c.call_time ? ' · call ' + c.call_time : ''), 0, _nowHM()));
+        return ok(c);
+      }
+      return SR.put('/api/crew/' + Number(id), patch || {}, { notifyOk: true }).then(A.crew);
+    },
+    removeCrew: function (id) {
+      if (!API()) {
+        var c = CREW_BY_ID[Number(id)];
+        if (!c) return fail('crew assignment ' + id + ' not found');
+        var s = SHOWS_BY_ID[c.show_id];
+        if (s && s.crew_assignments) {
+          s.crew_assignments = s.crew_assignments.filter(function (x) { return x.id !== c.id; });
+        }
+        delete CREW_BY_ID[c.id];
+        if (s) s.activity.unshift(mkAct(ME, 'crew.remove',
+          c.username ? userName(c.username) : c.name, 0, _nowHM(), true));
+        return ok({ ok: true, show_id: c.show_id });
+      }
+      return SR.del('/api/crew/' + Number(id), null, { notifyOk: true });
+    },
+
+    /* ---- B2. the call-sheet header — rendered everywhere, editable nowhere */
+    updateCallSheet: function (showId, patch) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        var touched = [];
+        Object.keys(patch || {}).forEach(function (k) { s[k] = patch[k]; touched.push(k); });
+        if (touched.length) s.activity.unshift(mkAct(ME, 'callsheet.update', touched.join(', '), 0, _nowHM()));
+        return ok(s);
+      }
+      return SR.put('/api/shows/' + Number(showId) + '/call-sheet', patch || {}, { notifyOk: true })
+        .then(A.show);
+    },
+
+    /* ---- A2/A3. the record stops being frozen at birth ------------------- */
+    updateShow: function (id, patch) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(id)];
+        if (!s) return fail('show ' + id + ' not found');
+        var was = s.event_date;
+        Object.keys(patch || {}).forEach(function (k) { s[k] = patch[k]; });
+        /* the demo twin of the server's back-schedule recompute, so a date
+           move looks the same in both modes */
+        if (patch && patch.event_date && patch.event_date !== was) {
+          (s.steps || []).forEach(function (st) {
+            if (st.due_offset_days == null) return;
+            st.due_date = _shiftISO(patch.event_date, st.due_offset_days);
+          });
+        }
+        s.activity.unshift(mkAct(ME, 'show.update', showLabel(s), 0, _nowHM(), true));
+        return ok(s);
+      }
+      return SR.put('/api/shows/' + Number(id), patch || {}, { notifyOk: true }).then(A.show);
+    },
+    updateProject: function (id, patch) {
+      if (!API()) {
+        var p = PROJECTS_BY_ID[Number(id)];
+        if (!p) return fail('folder ' + id + ' not found');
+        Object.keys(patch || {}).forEach(function (k) { p[k] = patch[k]; });
+        if (p.activity) p.activity.unshift(mkAct(ME, 'project.update', p.name, 0, _nowHM()));
+        return ok(p);
+      }
+      return SR.put('/api/projects/' + Number(id), patch || {}, { notifyOk: true }).then(A.project);
+    },
+
+    /* ---- B3/B5. a PM can finally add "chase the venue about the rigging" - */
+    createStep: function (body) {
+      body = body || {};
+      if (!String(body.title || '').trim()) return fail('a task needs a title');
+      if (!body.show_id && !body.project_id) return fail('a task needs a show or a folder');
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(body.show_id)];
+        if (!s) return fail('show ' + body.show_id + ' not found');
+        var st = { id: ++_stepSeq, show_id: s.id, project_id: null,
+                   lane: body.lane || 'client', title: String(body.title).trim(),
+                   status: body.status || 'todo', owner: body.owner || '',
+                   owner_role: body.owner_role || null,
+                   due_date: body.due_date || '', due_offset_days: null,
+                   evidence_type: 'none', evidence_ref: '', depends_on: null,
+                   auto_source: 'none', sort_order: 0, notes: body.notes || '',
+                   risk: !!body.risk };
+        STEPS_BY_ID[st.id] = st;
+        (s.steps = s.steps || []).push(st);
+        s.activity.unshift(mkAct(ME, 'step.create', '[' + st.lane + '] ' + st.title, 0, _nowHM()));
+        if (st.owner && ROSTER[st.owner] && st.owner !== ME) {
+          mkNotif(st.owner, 'assignment', 'Assigned to you — ' + st.title, {
+            body: ME + ' created “' + st.title + '” on ' + showLabel(s) +
+              ' and assigned it to you' + (st.due_date ? ', due ' + st.due_date + '.' : '.'),
+            actor: ME, show_id: s.id, project_id: s.project_id, link: '/#show/' + s.id });
+        }
+        return ok(st);
+      }
+      return SR.post('/api/steps', body, { notifyOk: true }).then(A.step);
+    },
+    deleteStep: function (id) {
+      if (!API()) {
+        var st = STEPS_BY_ID[Number(id)];
+        if (!st) return fail('task ' + id + ' not found');
+        var s = SHOWS_BY_ID[st.show_id];
+        if (s && s.steps) s.steps = s.steps.filter(function (x) { return x.id !== st.id; });
+        delete STEPS_BY_ID[st.id];
+        if (s) s.activity.unshift(mkAct(ME, 'step.delete', st.title, 0, _nowHM()));
+        return ok({ ok: true });
+      }
+      return SR.del('/api/steps/' + Number(id), null, { notifyOk: true });
+    },
+
+    /* ---- C1. budget lines — the allotment every burn bar reads against --- */
+    addBudgetLine: function (jobId, body) {
+      body = body || {};
+      if (!BUDGET_CATS[body.category]) return fail('pick a budget category');
+      if (!API()) return fail('budget lines need the Showrunner server');
+      return SR.post('/api/jobs/' + Number(jobId) + '/budget', body).then(function (l) {
+        return _absorbBudget(Number(jobId), l);
+      });
+    },
+    updateBudgetLine: function (id, patch) {
+      if (!API()) return fail('budget lines need the Showrunner server');
+      return SR.put('/api/budget-lines/' + Number(id), patch || {}).then(function (l) {
+        return _absorbBudget(l && l.job_id, l);
+      });
+    },
+    deleteBudgetLine: function (id) {
+      if (!API()) return fail('budget lines need the Showrunner server');
+      return SR.del('/api/budget-lines/' + Number(id));
+    },
+
+    /* ---- C2/C3. contract value + deal type. Accounting's, both ways: the
+       server refuses a non-finance caller, and this refuses before the trip. */
+    updateJob: function (jobId, patch) {
+      patch = patch || {};
+      var wantsMoney = patch.contract_value !== undefined || patch.deal_type !== undefined;
+      if (wantsMoney && !canSeeFinance()) {
+        return fail('the contract value and deal type are accounting’s — the admins and Candice');
+      }
+      if (!API()) {
+        var j = JOBS_BY_ID[Number(jobId)];
+        if (!j) return fail('job ' + jobId + ' not found');
+        Object.keys(patch).forEach(function (k) { j[k] = patch[k]; });
+        var p = PROJECTS_BY_ID[j.project_id];
+        if (p && p.activity) p.activity.unshift(mkAct(ME, 'job.update', j.qb_job_number, 0, _nowHM(), wantsMoney));
+        return ok(j);
+      }
+      return SR.put('/api/jobs/' + Number(jobId), patch).then(A.job);
+    },
+
+    /* ---- C4. an expense can be corrected or voided ---------------------- */
+    updateExpense: function (id, patch) {
+      if (!API()) {
+        var e = EXPENSES_BY_ID[Number(id)];
+        if (!e) return fail('expense ' + id + ' not found');
+        Object.keys(patch || {}).forEach(function (k) { e[k] = patch[k]; });
+        if (patch && patch.category) e.budget_line_category = patch.category;
+        return ok(e);
+      }
+      var b = {}; Object.keys(patch || {}).forEach(function (k) { b[k] = patch[k]; });
+      if (b.category && !b.budget_line_category) b.budget_line_category = b.category;
+      return SR.put('/api/expenses/' + Number(id), b, { notifyOk: true })
+        .then(function (r) { return A.expense(r && r.expense ? r.expense : r); });
+    },
+    deleteExpense: function (id) {
+      if (!API()) {
+        var e = EXPENSES_BY_ID[Number(id)];
+        if (!e) return fail('expense ' + id + ' not found');
+        delete EXPENSES_BY_ID[e.id];
+        for (var i = ALL_EXPENSES.length - 1; i >= 0; i--) {
+          if (ALL_EXPENSES[i].id === e.id) ALL_EXPENSES.splice(i, 1);
+        }
+        return ok({ ok: true });
+      }
+      return SR.del('/api/expenses/' + Number(id), null, { notifyOk: true });
+    },
+
+    /* ---- B6. bookings — the logistics lane's whole substance ------------- */
+    createBooking: function (showId, body) {
+      body = body || {};
+      if (!String(body.category || '').trim()) return fail('a booking needs a category');
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        var bk = { id: ++_bookingSeq, show_id: s.id,
+                   job_id: body.job_id ? Number(body.job_id) : null,
+                   category: body.category, vendor: body.vendor || '',
+                   status: body.status || 'todo',
+                   amount: body.amount == null ? null : Number(body.amount),
+                   booked_date: body.booked_date || null, file_id: null,
+                   confirmation_number: body.confirmation_number || '',
+                   notes: body.notes || '' };
+        BOOKINGS_BY_ID[bk.id] = bk;
+        (s.bookings = s.bookings || []).push(bk);
+        s.activity.unshift(mkAct(ME, 'booking.add', bk.category + ' · ' + bk.vendor, 0, _nowHM()));
+        return ok(bk);
+      }
+      var b2 = {}; Object.keys(body).forEach(function (k) { b2[k] = body[k]; });
+      b2.show_id = Number(showId);
+      return SR.post('/api/bookings', b2, { notifyOk: true }).then(A.booking);
+    },
+    updateBooking: function (id, patch) {
+      if (!API()) {
+        var bk = BOOKINGS_BY_ID[Number(id)];
+        if (!bk) return fail('booking ' + id + ' not found');
+        Object.keys(patch || {}).forEach(function (k) { bk[k] = patch[k]; });
+        return ok(bk);
+      }
+      return SR.put('/api/bookings/' + Number(id), patch || {}, { notifyOk: true }).then(A.booking);
+    },
+    deleteBooking: function (id) {
+      if (!API()) {
+        var bk = BOOKINGS_BY_ID[Number(id)];
+        if (!bk) return fail('booking ' + id + ' not found');
+        var s = SHOWS_BY_ID[bk.show_id];
+        if (s && s.bookings) s.bookings = s.bookings.filter(function (x) { return x.id !== bk.id; });
+        delete BOOKINGS_BY_ID[bk.id];
+        return ok({ ok: true });
+      }
+      return SR.del('/api/bookings/' + Number(id));
+    },
+
+    /* ---- B8/B9. the delivery-risk alarm's only inputs -------------------- */
+    updatePO: function (id, patch) {
+      if (!API()) {
+        var po = POS_BY_ID[Number(id)];
+        if (!po) return fail('PO ' + id + ' not found');
+        Object.keys(patch || {}).forEach(function (k) { po[k] = patch[k]; });
+        po.activity = po.activity || [];
+        po.activity.unshift(mkAct(ME, 'po.update', 'updated ' + po.po_number, 0, _nowHM(),
+          patch && patch.expected_date !== undefined));
+        return ok(po);
+      }
+      return SR.put('/api/pos/' + Number(id), patch || {}, { notifyOk: true })
+        .then(function (r) { return A.po(r && r.po ? r.po : r); });
+    },
+
+    /* ---- B7. proofs — real rows, so the tab can stop being a screenshot -- */
+    createProof: function (showId, body) {
+      body = body || {};
+      if (!String(body.name || '').trim()) return fail('a proof needs a name');
+      if (!API()) return fail('proofs need the Showrunner server');
+      var b = {}; Object.keys(body).forEach(function (k) { b[k] = body[k]; });
+      b.show_id = Number(showId);
+      return SR.post('/api/proofs', b);
+    },
+    updateProof: function (id, patch) {
+      if (!API()) return fail('proofs need the Showrunner server');
+      return SR.put('/api/proofs/' + Number(id), patch || {});
+    },
+    addProofRound: function (proofId, body) {
+      if (!API()) return fail('proofs need the Showrunner server');
+      return SR.post('/api/proofs/' + Number(proofId) + '/rounds', body || {});
+    },
+    deleteProof: function (id) {
+      if (!API()) return fail('proofs need the Showrunner server');
+      return SR.del('/api/proofs/' + Number(id));
+    },
+
+    /* ---- F4. the changelog read shape ----------------------------------- */
+    /* opts: { showId, projectId, jobId, poId, actor, since, action, changed,
+              mine, limit }. `changed:true` is the changelog filter — only rows
+       carrying a before→after, which is what makes the feed answerable. */
+    listChanges: function (opts) {
+      opts = opts || {};
+      if (!API()) {
+        /* the demo store keeps activity per show and has no cross-show index */
+        var rows = [];
+        if (opts.showId) {
+          var s = SHOWS_BY_ID[Number(opts.showId)];
+          rows = s ? s.activity.slice() : [];
+        } else {
+          ALL_SHOWS.forEach(function (sh) { rows = rows.concat(sh.activity || []); });
+          rows.sort(function (a, b) { return a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0; });
+        }
+        if (opts.action) {
+          rows = rows.filter(function (a) {
+            return String(opts.action).slice(-1) === '.'
+              ? String(a.action || '').indexOf(opts.action) === 0
+              : a.action === opts.action;
+          });
+        }
+        if (opts.changed) rows = rows.filter(function (a) { return !!(a.changes && a.changes.length); });
+        return ok(rows.slice(0, Number(opts.limit) || 100));
+      }
+      return SR.get('/api/activity' + SR.qs({
+        show_id: opts.showId == null ? null : Number(opts.showId),
+        project_id: opts.projectId == null ? null : Number(opts.projectId),
+        job_id: opts.jobId == null ? null : Number(opts.jobId),
+        po_id: opts.poId == null ? null : Number(opts.poId),
+        actor: opts.actor || null,
+        since: opts.since || null,
+        action: opts.action || null,
+        changed: opts.changed ? '1' : null,
+        mine: opts.mine ? '1' : null,
+        limit: Number(opts.limit) || 100
+      }));
+    },
+
+    /* ---- E8. the proposals backlog, beyond the bell's cap of 8 ----------- */
+    listProposals: function (opts) {
+      opts = opts || {};
+      if (!API()) return ok(proposalsForUser(ME));
+      return SR.get('/api/proposals' + SR.qs({
+        status: opts.status || null, kind: opts.kind || null,
+        limit: Number(opts.limit) || 100
+      }));
+    },
+    /* E4. `overrides` is the whole re-targeting mechanism — how a human says
+       "this belongs to THAT show". The client posted {} and so a low-confidence
+       unattached proposal, exactly the case the confidence bands exist to
+       produce, confirmed with no show and created no expense. */
+    confirmProposal: function (proposalId, overrides) {
+      if (!API()) return fail('confirming a proposal needs the Showrunner server');
+      return SR.post('/api/proposals/' + Number(proposalId) + '/confirm',
+        { overrides: overrides || {} });
+    },
+    rejectProposal: function (proposalId, reason) {
+      if (!API()) return fail('rejecting a proposal needs the Showrunner server');
+      return SR.post('/api/proposals/' + Number(proposalId) + '/reject',
+        { reason: String(reason || '') });
+    },
+
+    /* ---- A8. the served feature flags, consumed at last ------------------ */
+    /* GET /api/config reports features.schedulerPush and the README says the UI
+       greys the button; the UI never read it. Demo has no server, so it answers
+       the honest thing: nothing is configured. */
+    features: function () {
+      if (!API()) return ok({ schedulerPush: false, flex: false, specBind: false,
+                              mail: false, fileUpload: false, storageDriver: 'none' });
+      var cfg = SR.serverConfig();
+      return ok((cfg && cfg.features) || {});
     }
   };
+
+  /* Budget lines come back one at a time from the CRUD routes, and the store
+     indexes them per job. Re-absorbing the whole job's list keeps BUDGET_BY_JOB
+     canonical without a second round trip for the common case. */
+  function _absorbBudget(jobId, line) {
+    if (!line || jobId == null) return line;
+    var list = (BUDGET_BY_JOB[Number(jobId)] || []).filter(function (l) { return l.id !== line.id; });
+    list.push(line);
+    A.budget(Number(jobId), list);
+    return BUDGET_BY_ID[line.id] || line;
+  }
+
+  /* ISO date + N days, as a string. The demo twin of lib/enums.js addDays(),
+     which is what the server uses to recompute a back-schedule when the event
+     date moves. UTC on purpose: a due date is a calendar day, not an instant,
+     and doing this in local time slips it by one either side of midnight. */
+  function _shiftISO(iso, days) {
+    var d = new Date(String(iso) + 'T00:00:00Z');
+    if (isNaN(d.getTime())) return iso;
+    d.setUTCDate(d.getUTCDate() + (Number(days) || 0));
+    return d.toISOString().slice(0, 10);
+  }
 
   function _nowHM() {
     var d = new Date(), h = String(d.getHours()), m = String(d.getMinutes());

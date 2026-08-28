@@ -4,3 +4,7 @@ dist/
 .storage/
 *.log
 RAILWAY_ENV.txt
+# Wiring-day scratch notes. This one carries a live FLEX_API_KEY in plain text —
+# same category as .env and RAILWAY_ENV.txt above, and it was untracked but NOT
+# ignored, so the next `git add -A` would have committed the key.
+stuff_for_auth.txt

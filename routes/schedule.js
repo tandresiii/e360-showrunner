@@ -63,7 +63,8 @@ const {
 } = require('../lib/mappers');
 const { asyncH, badRequest, forbidden, notFound, idParam } = require('../lib/http');
 const { requireAuth, requireRole, canEditProject } = require('../lib/auth');
-const { logActivity } = require('../lib/activity');
+const { logActivity, diffFields, changeSummary } = require('../lib/activity');
+const { announceShowChange } = require('../lib/audience');
 const { notifyTargets } = require('../lib/mentions');
 // punch 42. The staffing read-back needed no staffing-side change — both
 // endpoints already exist and are unauthenticated (INTEGRATIONS_SPEC.md §4.4).
@@ -91,6 +92,34 @@ router.use(requireAuth);
 // silently move the other. scripts/smoke.js pins both directions on a
 // deliberately owner-split show.
 const pmPlus = requireRole('pm');
+
+// ── F3/F8. THE MATERIAL SETS FOR THIS FAMILY ────────────────────────────────
+// Same device as routes/core.js: a named list of fields per entity, so
+// "material vs routine" is data a reader can check rather than an if-statement
+// buried in a handler. Everything NOT listed here is routine and stays silent —
+// deliberately, and that is the whole of Tony's suppression rule preserved.
+//
+// F12 is also settled in this file: every action key here is now dotted
+// (`crew.add`, `schedule.update`, `callsheet.update`) rather than the English
+// sentences it used to log. Nothing could key on a sentence, which is exactly
+// why `GET /api/activity?action=` and `?changed=1` could not exist before.
+const MATERIAL_CREW_FIELDS = {
+  username: 'person', name: 'name', phone: 'phone',
+  role_on_site: 'role on site', call_time: 'call time', travel: 'travel'
+};
+const MATERIAL_CALLSHEET_FIELDS = {
+  load_in_time: 'load-in time', doors_time: 'doors', event_time: 'show time',
+  strike_time: 'strike time', venue_address: 'venue address',
+  parking_notes: 'parking', radio_channel: 'radio', dress_code: 'dress code',
+  venue_poc: 'venue POC', client_poc: 'client POC'
+};
+// `detail` is deliberately absent: a typo fix in the description line is the
+// canonical ROUTINE edit, and the reason F8 exists is that the old create-vs-
+// edit split treated it identically to moving load-in three hours earlier.
+const MATERIAL_SCHED_FIELDS = {
+  day: 'day', start_time: 'start', end_time: 'end',
+  title: 'item', who: 'who', location: 'location', kind: 'kind'
+};
 
 // ════════════════════════════════════════════════════════════════════════════
 // HELPERS
@@ -449,7 +478,7 @@ router.post('/shows/:id/schedule', pmPlus, asyncH(async (req, res) => {
     const row = r.rows[0];
     await logActivity(c, {
       projectId: show.project_id, showId,
-      actor: req.actor, action: 'added to the schedule',
+      actor: req.actor, action: 'schedule.add',
       detail: `${title} · ${startTime}`
     });
     await deliverNotify(c, {
@@ -494,16 +523,32 @@ router.put('/schedule/:id', pmPlus, asyncH(async (req, res) => {
     const r = await c.query(
       `UPDATE schedule_items SET ${sets.join(', ')} WHERE id=$${params.length} RETURNING *`, params);
     const row = r.rows[0];
+    // F8. The app used to split notification on CREATE vs EDIT and call every
+    // edit "routine". Moving load-in from 08:00 to 05:00 the evening before is
+    // an edit. The axis is MATERIAL vs ROUTINE: a day, a time or a `who` is
+    // material; fixing a typo in the detail line is not.
+    const changes = diffFields(existing, row, MATERIAL_SCHED_FIELDS);
     await logActivity(c, {
       projectId: show.project_id, showId: show.id,
-      actor: req.actor, action: 'updated the schedule',
-      detail: `${row.title} · ${row.start_time}`
+      actor: req.actor, action: 'schedule.update',
+      detail: changes.length
+        ? `${row.title} · ${changeSummary(changes)}`
+        : `${row.title} · ${row.start_time}`,
+      changes
     });
     await deliverNotify(c, {
       body, show, actor: req.actor,
       summary: `Schedule — updated "${row.title}" at ${row.start_time} on ${row.day} ` +
                `(${show.name || 'show ' + show.id}).`
     });
+    if (changes.length) {
+      await announceShowChange(c, {
+        showId: show.id, projectId: show.project_id, actor: req.actor,
+        subject: `Schedule changed — "${row.title}" on ${show.name || 'show ' + show.id}`,
+        what: `"${row.title}" on ${show.name || 'show ' + show.id}`,
+        changes
+      });
+    }
     return dbToScheduleItem(row);
   });
 
@@ -522,7 +567,7 @@ router.delete('/schedule/:id', pmPlus, asyncH(async (req, res) => {
     await c.query('DELETE FROM schedule_items WHERE id=$1', [id]);
     await logActivity(c, {
       projectId: show.project_id, showId: show.id,
-      actor: req.actor, action: 'removed from the schedule',
+      actor: req.actor, action: 'schedule.remove',
       detail: existing.title
     });
     return deliverNotify(c, {
@@ -585,7 +630,7 @@ router.post('/shows/:id/crew', pmPlus, asyncH(async (req, res) => {
     const row = r.rows[0];
     await logActivity(c, {
       projectId: show.project_id, showId,
-      actor: req.actor, action: 'added crew',
+      actor: req.actor, action: 'crew.add', accent: true,
       detail: `${crewLabel(row)}${roleOnSite ? ' · ' + roleOnSite : ''}${callTime ? ' · call ' + callTime : ''}`
     });
     await deliverNotify(c, {
@@ -593,6 +638,25 @@ router.post('/shows/:id/crew', pmPlus, asyncH(async (req, res) => {
       summary: `Crew — ${crewLabel(row)} added to ${show.name || 'show ' + showId}` +
                `${roleOnSite ? ' as ' + roleOnSite : ''}${callTime ? ', call ' + callTime : ''}.`
     });
+    // F5. Being put on a show is the moment you acquire a standing interest in
+    // it — so it is also the moment you are told, without the PM having to
+    // remember. A local hire (no username) gets nothing here and that is
+    // correct: they have no inbox. The call sheet is their channel.
+    if (username) {
+      await announceShowChange(c, {
+        showId, projectId: show.project_id, actor: req.actor, to: [username],
+        subject: `You are on ${show.name || 'show ' + showId}` +
+                 `${roleOnSite ? ' — ' + roleOnSite : ''}`,
+        what: `the crew for ${show.name || 'show ' + showId}`,
+        changes: [
+          { field: 'crew', label: 'you', from: null, to: roleOnSite || 'on the crew' },
+          ...(callTime ? [{ field: 'call_time', label: 'call time', from: null, to: callTime }] : [])
+        ],
+        extra: `Load-in ${show.load_in_date || 'TBC'} · event ${show.event_date || 'TBC'}` +
+               `${show.venue ? ' · ' + show.venue : ''}. ` +
+               'You will now hear about changes to this show automatically.'
+      });
+    }
     return hydrateCrew(row, roster);
   });
 
@@ -646,16 +710,37 @@ router.put('/crew/:id', pmPlus, asyncH(async (req, res) => {
     const r = await c.query(
       `UPDATE crew_assignments SET ${sets.join(', ')} WHERE id=$${params.length} RETURNING *`, params);
     const row = r.rows[0];
+    const changes = diffFields(existing, row, MATERIAL_CREW_FIELDS);
     await logActivity(c, {
       projectId: show.project_id, showId: show.id,
-      actor: req.actor, action: 'updated crew',
-      detail: `${crewLabel(row)}${row.role_on_site ? ' · ' + row.role_on_site : ''}`
+      actor: req.actor, action: 'crew.update',
+      detail: changes.length
+        ? `${crewLabel(row)} · ${changeSummary(changes)}`
+        : `${crewLabel(row)}${row.role_on_site ? ' · ' + row.role_on_site : ''}`,
+      changes
     });
     await deliverNotify(c, {
       body, show, actor: req.actor,
       summary: `Crew — ${crewLabel(row)} updated on ${show.name || 'show ' + show.id}` +
                `${row.call_time ? ' (call ' + row.call_time + ')' : ''}.`
     });
+    // F8, on the right axis. A call time moving from 08:00 to 05:00 is an EDIT,
+    // and it is the single most consequential thing that happens to a tech the
+    // night before a show. Material, therefore announced — to the person it
+    // happens to, and to whoever is now off the show.
+    if (changes.length) {
+      const to = [];
+      if (row.username) to.push(row.username);
+      if (existing.username && existing.username !== row.username) to.push(existing.username);
+      if (to.length) {
+        await announceShowChange(c, {
+          showId: show.id, projectId: show.project_id, actor: req.actor, to,
+          subject: `Your call changed — ${show.name || 'show ' + show.id}`,
+          what: `your crew line on ${show.name || 'show ' + show.id}`,
+          changes
+        });
+      }
+    }
     return hydrateCrew(row, roster);
   });
 
@@ -674,9 +759,21 @@ router.delete('/crew/:id', pmPlus, asyncH(async (req, res) => {
     await c.query('DELETE FROM crew_assignments WHERE id=$1', [id]);
     await logActivity(c, {
       projectId: show.project_id, showId: show.id,
-      actor: req.actor, action: 'removed crew',
+      actor: req.actor, action: 'crew.remove', accent: true,
       detail: crewLabel(existing)
     });
+    // Being taken OFF a show is at least as material as being put on it, and
+    // it is the version nobody ever gets told about.
+    if (existing.username) {
+      await announceShowChange(c, {
+        showId: show.id, projectId: show.project_id, actor: req.actor,
+        to: [existing.username],
+        subject: `You are off ${show.name || 'show ' + show.id}`,
+        what: `the crew for ${show.name || 'show ' + show.id}`,
+        changes: [{ field: 'crew', label: 'you',
+                    from: existing.role_on_site || 'on the crew', to: null }]
+      });
+    }
     return deliverNotify(c, {
       body, show, actor: req.actor,
       summary: `Crew — ${crewLabel(existing)} removed from ${show.name || 'show ' + show.id}.`
@@ -727,15 +824,29 @@ router.put('/shows/:id/call-sheet', pmPlus, asyncH(async (req, res) => {
     const r = await c.query(
       `UPDATE shows SET ${sets.join(', ')} WHERE id=$${params.length} RETURNING *`, params);
     const row = r.rows[0];
+    const changes = diffFields(show, row, MATERIAL_CALLSHEET_FIELDS);
     await logActivity(c, {
       projectId: show.project_id, showId,
-      actor: req.actor, action: 'updated the call sheet',
-      detail: touched.join(', ')
+      actor: req.actor, action: 'callsheet.update',
+      detail: changes.length ? changeSummary(changes) : touched.join(', '),
+      changes
     });
     await deliverNotify(c, {
       body, show, actor: req.actor,
       summary: `Call sheet — header updated on ${show.name || 'show ' + showId} (${touched.join(', ')}).`
     });
+    // The four clock times are the call sheet. Everyone rostered on the show
+    // reads them at 6am; a change to them that reaches nobody is the exact
+    // failure Tom described.
+    if (changes.length) {
+      await announceShowChange(c, {
+        showId, projectId: show.project_id, actor: req.actor,
+        subject: `Call sheet changed — ${show.name || 'show ' + showId}`,
+        what: `the call sheet for ${show.name || 'show ' + showId}`,
+        changes,
+        extra: 'Re-print or re-open your call sheet before you travel.'
+      });
+    }
     return row;
   });
 

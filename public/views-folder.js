@@ -18,10 +18,19 @@ function viewShow(show, opts) {
   }).join('');
 
   /* proofs tab for print/both when proof data exists; bookings tab otherwise */
-  var hasProof = typeDef(show.type).lanes.some(function (l) { return l.key === 'proof'; }) && show.proofs && show.proofs.length;
-  var thirdTab = hasProof
-    ? '<button data-t="proofs">Proofs &amp; Approval <span class="n">' + show.proofs.length + '</span></button>'
-    : (show.bookings && show.bookings.length ? '<button data-t="bookings">Bookings <span class="n">' + show.bookings.length + '</span></button>' : '');
+  /* P3, corrected. Both of these tabs used to appear only once the entity they
+     manage already existed — and neither entity could be created anywhere else,
+     so on a real database the tab that makes the first proof and the tab that
+     makes the first booking were both unreachable. A tab that the show's TYPE
+     calls for is shown whether or not it has rows yet; its empty state does the
+     explaining. */
+  var hasProofLane = typeDef(show.type).lanes.some(function (l) { return l.key === 'proof'; });
+  var nProofs = (show.proofs || []).length;
+  var nBookings = (show.bookings || []).length;
+  var thirdTab = (hasProofLane
+      ? '<button data-t="proofs">Proofs &amp; Approval' + (nProofs ? ' <span class="n">' + nProofs + '</span>' : '') + '</button>'
+      : '') +
+    '<button data-t="bookings">Bookings' + (nBookings ? ' <span class="n">' + nBookings + '</span>' : '') + '</button>';
   var hasDeliv = typeDef(show.type).lanes.some(function (l) { return l.key === 'deliverables'; });
   var hasGear = typeDef(show.type).lanes.some(function (l) { return l.key === 'gear'; });
   var specTab = hasDeliv ? '<button data-t="specs">Specs &amp; Chain' + (chainAnyStale(chain) ? ' <span class="n" style="color:var(--crit)">stale</span>' : '') + '</button>' : '';
@@ -97,7 +106,16 @@ function viewShow(show, opts) {
     '<div class="ef-sub"><span>' + icon('users') + ' <b>' + esc(show.job ? show.job.client : p.client) + '</b></span>' +
     '<span>' + icon('pin') + ' <b>' + esc(show.venue) + '</b></span>' +
     '<span>Lead <b>' + esc(userName(show.owner)) + '</b></span>' +
-    '<span>On-site <b>' + esc(userName(show.on_site_poc)) + '</b></span></div>' +
+    '<span>On-site <b>' + esc(userName(show.on_site_poc)) + '</b></span>' +
+    /* A2. PUT /api/shows/:id accepted sixteen fields and recomputed the whole
+       back-schedule on a date change, and had no api method and no data-act —
+       so a venue change or a date move was impossible through the product on
+       the app's most-used object. An edit pencil belongs everywhere Tom sees
+       data he created. */
+    (canEditFolderOf(show)
+      ? '<span><button class="lnk-btn" ' + act('editShow', show.id) + '>' + inlineIcon('pencil') +
+        'Edit event</button></span>' : '') +
+    '</div>' +
     '</div>' +
     '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
     (single ? '' : '<button class="btn ghost" ' + act('openFolder', p.id) + '>' + icon('folder') + 'Back to season</button>') +
@@ -301,7 +319,47 @@ function schedCrewCard(c, show) {
   }
   var ph = crewPhone(c);
   if (ph) rows += '<div class="cc-row"><a class="cc-tel" href="' + esc(telHref(ph)) + '">' + inlineIcon('phone') + esc(ph) + '</a></div>';
-  return '<div class="crewcard' + (isMe ? ' me' : '') + '">' + head + rows + '</div>';
+  /* B1. The edit affordance goes where the data is, the same way schedItemHTML
+     carries one. `k` carries the show id because the crew route is keyed on the
+     ASSIGNMENT id and the dialog needs both. */
+  var pen = canEditSchedule(show)
+    ? '<button class="iconbtn sched-edit" title="Edit this crew line" ' +
+      act('crewEdit', c.id, String(show.id)) + '>' + icon('pencil') + '</button>'
+    : '';
+  return '<div class="crewcard' + (isMe ? ' me' : '') + '">' + head + pen + rows + '</div>';
+}
+
+/* B1 · THE CREW PANEL — the single most load-bearing affordance in this pass.
+   `crew_assignments` had exactly ONE write site in the repository and no way to
+   reach it, so in production the call sheet's crew cards, the travel panel, the
+   tech-report obligation, closeout's "every report filed" condition and the
+   push's staff list were all permanently empty — and every one of them had
+   passing tests. This panel renders whether or not there is crew, because the
+   thing missing was never the table; it was the button.
+
+   `only` narrows the cards (the "my day" filter) without narrowing the counts. */
+function crewPanelFor(show, editable, only) {
+  var crew = crewForShow(show.id);
+  var shown = only || crew;
+  var withLogin = crew.filter(function (c) { return !!c.username; }).length;
+  var locals = crew.length - withLogin;
+  return '<div class="panel" style="margin-top:16px"><h3>Crew on site' +
+    (crew.length ? ' · ' + shown.length + (only ? ' of ' + crew.length : '') : '') +
+    '<span style="flex:1"></span>' +
+    (editable ? '<button class="btn sm ghost" ' + act('crewAdd', show.id) + '>' + icon('plus') +
+      'Add crew</button>' : '') + '</h3>' +
+    (crew.length
+      ? '<div class="sched-crew">' + shown.map(function (c) { return schedCrewCard(c, show); }).join('') + '</div>' +
+        '<div class="perm-note">' + inlineIcon('send') + ' ' + withLogin + ' with a login' +
+        (locals ? ' · ' + locals + ' local hire' + (locals === 1 ? '' : 's') : '') +
+        '. Only the ones with a login owe a show report after strike, and only they hear about changes ' +
+        'to this show — a local hire has the printed call sheet and nothing else, which is exactly why ' +
+        'their phone number is on it.</div>'
+      : '<div class="empty" style="padding:22px;line-height:1.6">Nobody is on this show yet.<br>' +
+        '<span style="color:var(--muted);font-size:12px">Crew is what fills the call sheet, the travel ' +
+        'panel and the show reports owed after strike — and it is what the scheduler push sends as staff. ' +
+        'Add someone from the roster, or a local hire by name and phone.</span></div>') +
+    '</div>';
 }
 
 function tabSchedule(show) {
@@ -318,7 +376,12 @@ function tabSchedule(show) {
       '<div style="display:flex;gap:9px;justify-content:center;margin-top:16px;flex-wrap:wrap">' +
       '<button class="btn primary" ' + toastAttrs('Generate from template', 'Seeds load-in / show / strike days from the ' + typeLabel(show.type) + ' template — modeled') + '>' + icon('bolt') + 'Generate from template</button>' +
       (editable ? '<button class="btn ghost" ' + act('schedAdd', show.id) + '>' + icon('plus') + 'Add first item</button>' : '') +
-      '</div></div>';
+      (editable ? '<button class="btn ghost" ' + act('editCallSheet', show.id) + '>' + icon('pencil') + 'Set the call sheet header</button>' : '') +
+      '</div>' +
+      /* B1. A show with no schedule can still have crew — and usually gets crew
+         FIRST. The empty state used to be a dead end for the one thing that
+         matters most on this tab. */
+      crewPanelFor(show, editable) + '</div>';
   }
 
   var day = schedSelectedDay(show, days);
@@ -354,6 +417,10 @@ function tabSchedule(show) {
   var bar = '<div class="sched-bar">' +
     '<div class="daychips">' + chips + '</div>' +
     '<span style="flex:1"></span>' +
+    /* B2. Ten fields rendered on this strip, on the printed call sheet and in
+       the push payload, and written by nothing until now. */
+    (editable ? '<button class="btn sm ghost" ' + act('editCallSheet', show.id) + ' title="Times, address, parking, radio, dress, POCs">' +
+      icon('pencil') + 'Call sheet</button>' : '') +
     '<button class="btn sm ' + (SCHED_UI.my ? 'primary' : 'ghost') + '" ' + act('schedMyDay', show.id) + ' title="Just my items + my travel">' + icon('check') + 'My day</button>' +
     (editable ? '<button class="btn sm ghost" ' + act('schedAdd', show.id) + '>' + icon('plus') + 'Add item</button>' : '') +
     '<button class="btn sm ghost" ' + act('schedPreview', show.id) + '>' + icon('eye') + 'Sheet</button>' +
@@ -402,13 +469,14 @@ function tabSchedule(show) {
     '</div><div class="perm-note">' + inlineIcon('phone') + ' Tap a number to call — this panel is the 6am problem-solver.</div></div>';
   var weather = '<div class="hint" style="margin-top:0">' + icon('sun') + '<span><b>Weather</b> — forecast lands with the live backend; check radar before an outdoor load-in.</span></div>';
 
-  /* ---- crew grid ---------------------------------------------------------- */
-  var crewShown = SCHED_UI.my && mine ? [mine] : crew;
-  var crewPanel = crew.length
-    ? '<div class="panel" style="margin-top:16px"><h3>Crew on site · ' + crewShown.length + (SCHED_UI.my ? ' of ' + crew.length : '') + '</h3>' +
-      '<div class="sched-crew">' + crewShown.map(function (c) { return schedCrewCard(c, show); }).join('') + '</div>' +
-      '<div class="perm-note">' + inlineIcon('send') + ' Travel reads back from the staffing app (travel_info + hotel bookings) once promoted — one record, both systems.</div></div>'
-    : '';
+  /* ---- crew grid ----------------------------------------------------------
+     B1. This panel used to render only when `crew.length` — which, since
+     crew_assignments had exactly one write site in the repository and no way to
+     reach it, meant NEVER in production. It now always renders, because the
+     thing a PM needs most on this tab is the button that puts a person on the
+     show. Everything downstream — the call sheet, travel, the tech-report
+     obligation, closeout integrity, the push's staff list — hangs off it. */
+  var crewPanel = crewPanelFor(show, editable, SCHED_UI.my && mine ? [mine] : null);
 
   return strip + venueLine + bar +
     '<div class="ov sched-ov">' + tlPanel +
@@ -431,18 +499,50 @@ function taskCard(lane, s) {
     act('noteToggleStep', s.id) + '>' + icon('chat') + (nN ? '<span>' + nN + '</span>' : '') + '</button>';
   var thread = NOTES_UI.openSteps[s.id]
     ? '<div class="task-thread">' + notesThread('step', s.id) + '</div>' : '';
+  /* D3/B4. The only status control anywhere was the done<->todo checkbox, so
+     nothing in the product could set `blocked` — the input the RAG derivation
+     treats as crit, the thing the Overview's "biggest risk" reads, and the
+     field signal the whole health model is built on. The person standing in
+     front of the problem could not report it. A tech who OWNS the step may set
+     it (the server's canUpdateStepStatus admits them); a pm+ on the project may
+     also re-date, re-lane and re-title it. */
+  var canStat = SHOW_FOR_TASKS && (canEditFolderOf(SHOW_FOR_TASKS) || s.owner === ME);
+  var canEditTask = SHOW_FOR_TASKS && canEditFolderOf(SHOW_FOR_TASKS);
+  var stNow = normStatus(s.status);
+  var statBtns = canStat
+    ? (stNow === 'blocked'
+        ? '<button class="cchip has" title="Unblock — back to in progress" ' +
+          act('stepStatus', s.id, 'in_progress') + '>' + icon('lock') + '<span>blocked</span></button>'
+        : '<button class="cchip" title="Mark blocked — tells the show owner and the folder owner" ' +
+          act('stepStatus', s.id, 'blocked') + '>' + icon('lock') + '</button>')
+    : '';
+  var editBtn = canEditTask
+    ? '<button class="cchip" title="Edit · re-date · re-lane · re-assign" ' +
+      act('editTask', s.id, String(SHOW_FOR_TASKS.id)) + '>' + icon('pencil') + '</button>'
+    : '';
   return '<div class="task ' + (isDone ? 'done' : '') + '">' +
     '<div class="tt"><div class="chk" ' + act('toggleStep', s.id) + '>' + icon('check') + '</div><div class="txt">' + esc(s.title) + '</div></div>' +
-    '<div class="tm">' + pill + '<span class="due ' + lateCls + '">' + esc(fmtDate(s.due_date)) + '</span>' + mini + noteBtn + attach + '<span style="flex:1"></span>' + assignableOwner(s) +
+    '<div class="tm">' + pill + '<span class="due ' + lateCls + '">' + esc(fmtDate(s.due_date)) + '</span>' + mini + noteBtn + attach + statBtns + editBtn + '<span style="flex:1"></span>' + assignableOwner(s) +
     '</div>' + thread + '</div>';
 }
+/* taskCard() is called without the show in scope. Rather than thread it through
+   every call site, the board publishes it the same way SCHED_UI / PH_UI /
+   RECAP_UI publish their per-tab state. */
+var SHOW_FOR_TASKS = null;
 function tabPipeline(show) {
+  SHOW_FOR_TASKS = show;
+  var editable = canEditFolderOf(show);
   var lanes = laneSteps(show).map(function (x) {
     var done = x.steps.filter(function (s) { return normStatus(s.status) === 'done'; }).length;
     var body = x.steps.length ? x.steps.map(function (s) { return taskCard(x.lane, s); }).join('') : '<div class="lane-empty">no steps yet</div>';
     return '<div class="lane"><div class="lane-h"><span class="ld" style="background:' + esc(x.lane.color) + '"></span><b>' + esc(x.lane.label) + '</b><span class="frac">' + done + '/' + x.steps.length + '</span></div><div class="lane-b">' + body + '</div></div>';
   }).join('');
-  return '<div class="lanes">' + lanes + '</div>';
+  /* B3. Every step in the system came from a template; a PM could not add
+     "chase the venue about the rigging plot". */
+  var bar = '<div class="sched-bar" style="margin-bottom:12px"><span style="flex:1"></span>' +
+    (editable ? '<button class="btn sm primary" ' + act('addTask', show.id) + '>' + icon('plus') +
+      'Add task</button>' : '') + '</div>';
+  return bar + '<div class="lanes">' + lanes + '</div>';
 }
 
 /* --------------------------------------------------- specs & chain tab ---- */
@@ -742,55 +842,301 @@ function tabBookings(show) {
       '<td><span class="pill ' + esc(STATUS[s].pill) + '"><span class="dot"></span>' + esc(lbl) + '</span></td>' +
       '<td style="text-align:right"><span style="display:inline-flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">' +
       '<button class="btn sm ghost" ' + act('attachBooking', b.id) + '>' + icon('link') + 'Attach</button>' +
-      (s === 'done' ? '<button class="btn sm ghost" ' + toastAttrs('Confirmation', 'Opened booking paperwork') + '>' + icon('file') + 'Paperwork</button>'
-        : '<button class="btn sm ghost" ' + toastAttrs('Assigned', 'Booking task assigned') + '>Assign</button>') +
+      /* The two buttons that used to sit here — "Paperwork" and "Assign" — were
+         toastAttrs fakes, on a table of rows that could not be created in the
+         first place. One real edit affordance replaces both. */
+      (canEditFolderOf(show)
+        ? '<button class="btn sm ghost" ' + act('editBooking', b.id, String(show.id)) + '>' +
+          icon('pencil') + 'Edit</button>'
+        : '') +
       '</span></td></tr>';
   }).join('');
   var split = show.bookings.some(function (b) { return b.job_id && b.job_id !== show.default_job_id; });
-  return '<div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Booking</th><th>Vendor</th><th>Status</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>' +
+  var bkHead = '<div class="files-head"><h3>Bookings \u00b7 ' + show.bookings.length + '</h3>' +
+    (canEditFolderOf(show)
+      ? '<button class="btn primary" ' + act('addBooking', show.id) + '>' + icon('plus') + 'Book a vendor</button>'
+      : '') + '</div>';
+  if (!show.bookings.length) {
+    return bkHead + '<div class="gear-empty">' + icon('truck') +
+      '<div style="font-weight:600;font-size:14px">Nothing booked yet</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:470px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+      'Trucking, forklift, feeder cable, install and strike labour, hotels \u2014 the logistics lane\u2019s ' +
+      'substance, and the rows the scheduler push maps onto staffing <b>/api/bookings</b>. A booking with an ' +
+      'amount and no paperwork lands on accounting\u2019s chase list until the confirmation is attached.</div>' +
+      (canEditFolderOf(show)
+        ? '<div style="display:flex;gap:9px;justify-content:center;margin-top:16px">' +
+          '<button class="btn primary" ' + act('addBooking', show.id) + '>' + icon('plus') +
+          'Book a vendor</button></div>'
+        : '') + '</div>';
+  }
+  return bkHead + '<div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Booking</th><th>Vendor</th><th>Status</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>' +
     '<div class="hint">' + icon('bolt') + 'Every confirmed booking keeps its paperwork here — so anyone can pick up the event and see exactly what’s locked. On push, these map to staffing <b>/api/bookings</b>.</div>' +
     (split ? '<div class="hint">' + icon('scale') + 'Rows tagged with a different <b>job number</b> bill to another deal in this folder — this show’s costs split across two jobs.</div>' : '');
 }
 
-/* ---------------------------------------------------------- activity tab -- */
-/* activity is stored structured {actor, action, detail, ts} — the bold-actor
-   formatting happens HERE, never in the data. */
-function tabActivity(show) {
-  var items = show.activity.map(function (a) {
-    /* actor may be 'agent:<username>' (AGENT_API attribution) -> "Tom's agent" */
-    var line = (a.actor ? '<b>' + esc(actorName(a.actor)) + '</b> ' : '') + esc(a.action) + (a.detail ? ' <span style="color:var(--muted)">· ' + esc(a.detail) + '</span>' : '');
-    return '<div class="tl-item ' + (a.accent ? 'accent' : '') + '"><div class="node"></div><div class="a-t">' + line + '</div><div class="a-m">' + esc(fmtTs(a.ts)) + '</div></div>';
-  }).join('');
-  return '<div class="panel"><div class="timeline">' + items + '</div></div>';
+
+/* ============================================================================
+   F3/F4 · THE CHANGELOG — rendering the before→after
+   ----------------------------------------------------------------------------
+   The activity table always had 68 verbs and 128 writers. What it did not have
+   was (a) a DIFF on the changes that matter — `show.update · Wrigley Field` was
+   the log line for a venue change, an owner change AND a date move alike — and
+   (b) any read surface but one per-show tab nobody opened.
+
+   (a) is fixed server-side: lib/activity.js now writes a structured `changes`
+   column, [{field,label,from,to}], on every material mutation. This is the
+   renderer for it, used by both the per-show Activity tab and the cross-project
+   feed below.
+   ========================================================================== */
+
+/* Dotted machine keys are what a filter, a digest and a changelog can key on
+   (F12) — and what a person should never have to read. One map, both needs. */
+var ACTION_LABELS = {
+  'show.create': 'opened the show', 'show.update': 'changed the show',
+  'show.struck': 'struck the show',
+  'project.create': 'opened the folder', 'project.update': 'changed the folder',
+  'step.create': 'added a task', 'step.update': 'changed a task',
+  'step.status': 'moved a task', 'step.assign': 'assigned a task',
+  'step.delete': 'deleted a task',
+  'crew.add': 'added crew', 'crew.update': 'changed a crew line',
+  'crew.remove': 'took someone off the crew',
+  'schedule.add': 'added to the schedule', 'schedule.update': 'changed the schedule',
+  'schedule.remove': 'removed from the schedule',
+  'callsheet.update': 'changed the call sheet',
+  'booking.add': 'made a booking', 'booking.update': 'changed a booking',
+  'booking.delete': 'cancelled a booking',
+  'budget.line.add': 'set an allotment', 'budget.line.update': 'changed an allotment',
+  'budget.line.delete': 'removed an allotment',
+  'job.create': 'opened a job', 'job.update': 'changed the job',
+  'job.number.confirm': 'confirmed the job number',
+  'expense.add': 'recorded a cost', 'expense.update': 'corrected a cost',
+  'expense.delete': 'voided a cost',
+  'po.update': 'changed a PO', 'po.status': 'moved a PO',
+  'proof.add': 'added a proof', 'proof.update': 'changed a proof',
+  'proof.round.add': 'opened a proof round', 'proof.delete': 'deleted a proof',
+  'milestone.delete': 'removed a milestone',
+  'template.instantiate': 'seeded the pipeline',
+  'agent.proposal.confirm': 'confirmed an agent proposal',
+  'agent.proposal.reject': 'rejected an agent proposal',
+  'notification.sent': 'sent a notification'
+};
+function actionLabel(a) {
+  var k = String(a || '');
+  if (ACTION_LABELS[k]) return ACTION_LABELS[k];
+  /* a dotted key nobody has named yet reads better as words than as a key */
+  return k.indexOf('.') > 0 ? k.replace(/\./g, ' ').replace(/_/g, ' ') : k;
 }
 
-/* ------------------------------------------------------ proofs & approval -- */
-function tabProofs(show) {
-  var flow = [{ k: 'Design', ic: 'pencil', sub: firstName('jhawk'), st: 'done' },
-    { k: 'Internal QC', ic: 'checkC', sub: firstName('lfarkos'), st: 'done' },
-    { k: 'Sent to client', ic: 'send', sub: 'R2', st: 'done' },
-    { k: 'Client markup', ic: 'mail', sub: 'logged', st: 'done' },
-    { k: 'Approved', ic: 'lock', sub: 'e-sign', st: 'done' },
-    { k: 'Released to floor', ic: 'print', sub: 'print queue', st: 'active' }];
-  var steps = flow.map(function (f, i) {
-    var sep = i < flow.length - 1 ? '<span class="fsep">' + icon('chevR') + '</span>' : '';
-    return '<div class="fstep ' + f.st + '"><div class="fi">' + icon(f.ic) + '</div><div class="ft"><b>' + esc(f.k) + '</b><span>' + esc(f.sub) + '</span></div></div>' + sep;
+/* One diff row: label, the old value struck through, the new one. `—` stands
+   for "nothing was there", which is a real and different answer from blank. */
+function changeChips(changes) {
+  if (!changes || !changes.length) return '';
+  return '<div class="chg-list">' + changes.map(function (c) {
+    return '<div class="chg"><span class="chg-f">' + esc(c.label || c.field) + '</span>' +
+      '<span class="chg-a">' + esc(c.from == null ? '—' : c.from) + '</span>' +
+      '<span class="chg-x">' + inlineIcon('chevR') + '</span>' +
+      '<span class="chg-b">' + esc(c.to == null ? '—' : c.to) + '</span></div>';
+  }).join('') + '</div>';
+}
+
+/* The per-show Activity tab, now with the diffs rendered under each line. */
+function tabActivity(show) {
+  var items = show.activity.map(function (a) {
+    var line = (a.actor ? '<b>' + esc(actorName(a.actor)) + '</b> ' : '') + esc(actionLabel(a.action)) +
+      (a.detail && !(a.changes && a.changes.length)
+        ? ' <span style="color:var(--muted)">· ' + esc(a.detail) + '</span>' : '');
+    return '<div class="tl-item ' + (a.accent ? 'accent' : '') + '"><div class="node"></div>' +
+      '<div class="a-t">' + line + changeChips(a.changes) + '</div>' +
+      '<div class="a-m">' + esc(fmtTs(a.ts)) + '</div></div>';
   }).join('');
-  var approvedFile = show.files.filter(function (f) { return f.kind === 'proof'; })[0];
-  var proofs = show.proofs.map(function (p) {
-    var rounds = p.rounds.map(function (r) {
-      return '<div class="round"><div class="rn">' + esc(r.round) + '</div><div class="rc"><div class="rnote">' + esc(r.note) + '</div><div class="rd">' + psPill(r.status) + ' sent ' + esc(fmtDate(r.date)) + '</div></div></div>';
+  return '<div class="panel"><div class="timeline">' + (items ||
+    '<div class="empty">Nothing has happened on this show yet.</div>') + '</div></div>';
+}
+
+/* ── the cross-project feed ────────────────────────────────────────────────── */
+/* per-view state, declared beside its view — the same device as SCHED_UI,
+   PH_UI, RECAP_UI and NOTES_UI. app.js owns the ACTIONS that mutate it. */
+var CHANGES_UI = { scope: 'mine', action: '' };
+var CHANGE_FILTERS = [
+  { k: 'show.', label: 'Dates & venue' },
+  { k: 'step.', label: 'Tasks' },
+  { k: 'crew.', label: 'Crew' },
+  { k: 'callsheet.', label: 'Call sheet' },
+  { k: 'schedule.', label: 'Schedule' },
+  { k: 'booking.', label: 'Bookings' },
+  { k: 'budget.', label: 'Budget' },
+  { k: 'po.', label: 'Purchasing' }
+];
+function viewChanges(rows) {
+  rows = rows || [];
+  var scope = CHANGES_UI.scope;
+  var chips = CHANGE_FILTERS.map(function (f) {
+    return '<button class="btn sm ' + (CHANGES_UI.action === f.k ? 'primary' : 'ghost') + '" ' +
+      act('changesFilter', null, f.k) + '>' + esc(f.label) + '</button>';
+  }).join('');
+
+  var byShow = {};
+  var order = [];
+  rows.forEach(function (a) {
+    var key = a.show_id ? 'show:' + a.show_id : (a.project_id ? 'proj:' + a.project_id : 'other');
+    if (!byShow[key]) { byShow[key] = []; order.push(key); }
+    byShow[key].push(a);
+  });
+
+  var groups = order.map(function (key) {
+    var list = byShow[key];
+    var label = 'Elsewhere', goAct = '';
+    if (key.indexOf('show:') === 0) {
+      var sh = SHOWS_BY_ID[Number(key.slice(5))];
+      label = sh ? showLabel(sh) : 'Show ' + key.slice(5);
+      goAct = act('openShow', Number(key.slice(5)));
+    } else if (key.indexOf('proj:') === 0) {
+      var pr = PROJECTS_BY_ID[Number(key.slice(5))];
+      label = pr ? pr.name : 'Folder ' + key.slice(5);
+      goAct = act('openFolder', Number(key.slice(5)));
+    }
+    var items = list.map(function (a) {
+      return '<div class="tl-item ' + (a.accent ? 'accent' : '') + '"><div class="node"></div>' +
+        '<div class="a-t"><b>' + esc(actorName(a.actor)) + '</b> ' + esc(actionLabel(a.action)) +
+        changeChips(a.changes) + '</div>' +
+        '<div class="a-m">' + esc(fmtTs(a.ts)) + '</div></div>';
     }).join('');
-    var actions = p.status === 'approved'
-      ? (approvedFile ? '<button class="btn sm ghost" ' + act('openViewer', approvedFile.id) + '>' + icon('eye') + 'View approved proof</button>' : '')
-      : '<button class="btn sm" ' + act('proofApprove', p.id) + '>' + icon('check') + 'Approve</button>' +
-        '<button class="btn sm ghost" ' + act('proofRevise', p.id) + '>' + icon('pencil') + 'Request changes</button>';
-    return '<div class="proof"><div class="proof-h"><div class="pth">' + proofThumbSVG() + '</div><div class="pn"><b>' + esc(p.name) + '</b><span>' + esc(p.code + ' · ' + p.client) + '</span></div>' + psPill(p.status) + '</div>' +
-      '<div class="rounds">' + rounds + '</div>' +
-      '<div class="proof-foot"><span class="who">' + icon('clock') + ' ' + p.rounds.length + ' round' + (p.rounds.length > 1 ? 's' : '') + '</span><span class="sp"></span>' + actions + '</div></div>';
+    return '<div class="panel" style="margin-bottom:16px"><h3>' +
+      (goAct ? '<span class="lnk" style="cursor:pointer" ' + goAct + '>' + esc(label) + '</span>'
+             : esc(label)) +
+      ' <span class="frac">' + list.length + '</span></h3>' +
+      '<div class="timeline">' + items + '</div></div>';
   }).join('');
-  return '<div class="panel" style="margin-bottom:16px"><h3>Approval flow</h3><div class="flow">' + steps + '</div>' +
-    '<div class="perm-note">' + inlineIcon('lock') + ' Once a proof is approved it is locked and versioned — the approved file is what releases to the print floor, and it is what the Viewer prints.</div></div>' +
+
+  return '<div class="page-h"><div><h1>What changed</h1>' +
+    '<div class="sub">Every material change — a date, a venue, a call time, a task, an allotment, a ' +
+    'delivery — with what it was and what it is now. This is the same set of events the app ' +
+    '<b>tells people about</b>; here it is as a list you can read.</div></div>' +
+    '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
+    '<button class="btn ' + (scope === 'mine' ? 'primary' : 'ghost') + '" ' +
+      act('changesScope', null, 'mine') + '>' + icon('users') + 'My shows</button>' +
+    (canViewAllChanges()
+      ? '<button class="btn ' + (scope === 'all' ? 'primary' : 'ghost') + '" ' +
+        act('changesScope', null, 'all') + '>' + icon('grid') + 'Everything</button>'
+      : '') +
+    '</div></div>' +
+    '<div class="sched-bar" style="margin-bottom:14px"><div class="daychips" style="gap:7px">' + chips +
+    '</div></div>' +
+    (rows.length ? groups
+      : '<div class="gear-empty">' + icon('bolt') +
+        '<div style="font-weight:600;font-size:14px">Nothing has changed' +
+        (scope === 'mine' ? ' on your shows' : '') + '</div>' +
+        '<div style="font-size:12.5px;margin-top:7px;max-width:460px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+        (scope === 'mine'
+          ? 'You are on a show the moment you own it, own a task on it, or are put on its crew — and from then on ' +
+            'every material change to it lands here and in your inbox.'
+          : 'A change with a before and an after shows up here. Routine edits — a typo in a detail line — stay ' +
+            'out of it on purpose.') +
+        '</div></div>');
+}
+/* Company-wide is a manager/admin question; a tech's feed is their own shows.
+   Mirrors nothing on the server (the route is session-only by design, like the
+   rest of the activity feed) — this is about what is USEFUL, not what is
+   permitted, and the honest scope for one person is the shows they are on. */
+function canViewAllChanges() {
+  var r = CURRENT_USER.role;
+  return r === 'admin' || r === 'manager';
+}
+
+
+/* ------------------------------------------------------ proofs & approval --
+   HOUSE RULE, APPLIED: no fabrication reachable in API mode.
+
+   This tab used to render a HARDCODED six-stage approval flow with invented
+   attributions — Design/jhawk, Internal QC/lfarkos, "Sent to client · R2",
+   "Approved · e-sign" — for EVERY show, regardless of what was in `proofs` /
+   `proof_rounds`. Approve and Request-changes fired a toast and called no API.
+   It was the print persona's core workflow rendered as a screenshot, and it is
+   the same disease HARDENING_TODO 21 swept everywhere else.
+
+   What is here now is the real thing: rows from `proofs`, rounds from
+   `proof_rounds`, an approve that writes and a request-changes that opens the
+   next round. The stage strip is DERIVED from the proof's own rounds rather
+   than asserted, so a show with one round shows one round.
+   -------------------------------------------------------------------------- */
+function proofFlow(p) {
+  /* the stages a proof has actually been through, read off its rounds */
+  var rounds = (p.rounds || []).slice();
+  var steps = [{ k: 'Drafted', ic: 'pencil', sub: rounds.length ? 'R1' : 'not sent yet',
+                 st: rounds.length ? 'done' : 'active' }];
+  rounds.forEach(function (r, i) {
+    steps.push({ k: r.status === 'markup' ? 'Client markup' : 'Sent to client',
+                 ic: r.status === 'markup' ? 'mail' : 'send',
+                 sub: (r.round || 'R' + (i + 1)) + (r.date ? ' · ' + fmtDate(r.date) : ''),
+                 st: 'done' });
+  });
+  steps.push({ k: p.status === 'approved' ? 'Approved' : 'Awaiting approval',
+               ic: p.status === 'approved' ? 'lock' : 'clock',
+               sub: p.status === 'approved' ? 'locked' : 'open',
+               st: p.status === 'approved' ? 'done' : 'active' });
+  return '<div class="flow">' + steps.map(function (f, i) {
+    var sep = i < steps.length - 1 ? '<span class="fsep">' + icon('chevR') + '</span>' : '';
+    return '<div class="fstep ' + f.st + '"><div class="fi">' + icon(f.ic) + '</div>' +
+      '<div class="ft"><b>' + esc(f.k) + '</b><span>' + esc(f.sub) + '</span></div></div>' + sep;
+  }).join('') + '</div>';
+}
+
+function tabProofs(show) {
+  var editable = canEditFolderOf(show);
+  var list = show.proofs || [];
+  var head = '<div class="files-head"><h3>Proofs · ' + list.length + '</h3>' +
+    (editable ? '<button class="btn primary" ' + act('addProof', show.id) + '>' + icon('plus') +
+      'New proof</button>' : '') + '</div>';
+
+  if (!list.length) {
+    return head + '<div class="gear-empty">' + icon('palette') +
+      '<div style="font-weight:600;font-size:14px">No proofs on this show yet</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:480px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+      'A proof is one printed piece going out for client sign-off. Each trip to the client and back is a ' +
+      '<b>round</b>; the last one that comes back approved is what releases to the print floor. Attach the ' +
+      'artwork on the Files tab and it opens in the Viewer from here.</div>' +
+      (editable
+        ? '<div style="display:flex;gap:9px;justify-content:center;margin-top:16px">' +
+          '<button class="btn primary" ' + act('addProof', show.id) + '>' + icon('plus') +
+          'New proof</button></div>'
+        : '') + '</div>';
+  }
+
+  var approvedFile = show.files.filter(function (f) { return f.kind === 'proof'; })[0];
+  var proofs = list.map(function (p) {
+    var rounds = (p.rounds || []).map(function (r) {
+      return '<div class="round"><div class="rn">' + esc(r.round) + '</div><div class="rc">' +
+        '<div class="rnote">' + esc(r.note || '') + '</div>' +
+        '<div class="rd">' + psPill(r.status) + (r.date ? ' sent ' + esc(fmtDate(r.date)) : '') +
+        '</div></div></div>';
+    }).join('') || '<div class="empty" style="padding:14px">No rounds yet — nothing has gone to the client.</div>';
+    var actions = p.status === 'approved'
+      ? (approvedFile
+          ? '<button class="btn sm ghost" ' + act('openViewer', approvedFile.id) + '>' + icon('eye') +
+            'View approved proof</button>' : '')
+      : (editable
+          ? '<button class="btn sm" ' + act('proofApprove', p.id) + '>' + icon('check') + 'Approve</button>' +
+            '<button class="btn sm ghost" ' + act('proofRevise', p.id) + '>' + icon('pencil') +
+            'Request changes</button>'
+          : '');
+    var pen = editable
+      ? '<button class="iconbtn" title="Edit proof" ' + act('editProof', p.id, String(show.id)) + '>' +
+        icon('pencil') + '</button>'
+      : '';
+    return '<div class="proof"><div class="proof-h"><div class="pth">' + proofThumbSVG() + '</div>' +
+      '<div class="pn"><b>' + esc(p.name) + '</b><span>' + esc((p.code || '') + (p.client ? ' · ' + p.client : '')) +
+      '</span></div>' + psPill(p.status) + pen + '</div>' +
+      proofFlow(p) +
+      '<div class="rounds">' + rounds + '</div>' +
+      '<div class="proof-foot"><span class="who">' + icon('clock') + ' ' + (p.rounds || []).length +
+      ' round' + ((p.rounds || []).length === 1 ? '' : 's') + '</span><span class="sp"></span>' +
+      actions + '</div></div>';
+  }).join('');
+
+  return head +
+    '<div class="hint" style="margin:0 0 14px">' + icon('lock') + '<span>Once a proof is approved it is ' +
+    'locked and versioned — the approved file is what releases to the print floor, and it is what the ' +
+    'Viewer prints. Approving it tells everyone on this show.</span></div>' +
     '<div class="proofs">' + proofs + '</div>';
 }
 

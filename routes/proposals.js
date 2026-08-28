@@ -27,6 +27,7 @@ const { requireAuth, roleRank, canEditProject } = require('../lib/auth');
 const { asyncH, badRequest, forbidden, notFound, conflict, idParam, limitOf } = require('../lib/http');
 const { logActivity } = require('../lib/activity');
 const { notifyTargets } = require('../lib/mentions');
+const notify = require('../lib/notify');
 const { storage, buildNasPath, buildQuarantinePath, thumbPathFor } = require('../lib/storage');
 const { dbToProposal, pick } = require('../lib/mappers');
 const { BUDGET_CATS, PROJECT_TYPES, STAGES, DEAL_TYPES, isTempJobNumber, oneOf, money,
@@ -206,14 +207,25 @@ async function confirmDocument(c, proposal, overrides, session) {
   if (amount != null && show) {
     const cat = BUDGET_CATS.includes(overrides.category || resolved.category)
       ? (overrides.category || resolved.category) : 'misc';
+    // E6. `memo` and `match_reason` survived AUTO-FILING and were dropped the
+    // moment a human confirmed — which is backwards. The *why* behind a match
+    // ("client, date, vendor history") is worth more once a person has looked at
+    // it, not less, and losing it means the confirmed row can never answer the
+    // question the proposed row could. Both now come off the payload the agent
+    // sent, with an override taking precedence when the human retyped one.
+    const memo = overrides.memo !== undefined ? String(overrides.memo || '')
+      : String((proposal.payload && proposal.payload.memo) || resolved.memo || '');
+    const matchReason = String(
+      (proposal.provenance && proposal.provenance.source_label) ||
+      (proposal.payload && proposal.payload.match_reason) || '');
     const e = await c.query(
       `INSERT INTO expenses (show_id, project_id, job_id, budget_line_category, category, vendor,
          amount, txn_date, status, file_id, by, memo, evidence_ref, match_confidence,
-         provenance, source_ref)
-       VALUES ($1,$2,$3,$4,$4,$5,$6,$7,'filed',$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+         match_reason, provenance, source_ref)
+       VALUES ($1,$2,$3,$4,$4,$5,$6,$7,'filed',$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
       [show.id, project.id, jobId, cat, vendor || '', amount,
-       file.doc_date || todayISO(), file.id, proposal.proposed_by, '', String(file.id),
-       proposal.confidence, JSON.stringify(prov), prov.source_ref || null]);
+       file.doc_date || todayISO(), file.id, proposal.proposed_by, memo, String(file.id),
+       proposal.confidence, matchReason, JSON.stringify(prov), prov.source_ref || null]);
     expenseId = e.rows[0].id;
   }
 
@@ -389,6 +401,23 @@ router.post('/proposals/:id/reject', asyncH(async (req, res) => {
       action: 'agent.proposal.reject', provenance: proposal.provenance,
       detail: `rejected a proposed ${proposal.kind}${reason ? ' — ' + reason : ''}`
     });
+    // F6. Confirm notified and reject did not, so the person whose agent filed
+    // the thing never learned it was refused — and an agent that is never told
+    // "no" cannot be corrected. The owner is the human behind the agent
+    // (`agent:tom` → `tom`), or whoever the proposal was assigned to.
+    const owner = String(proposal.proposed_by || '').replace(/^agent:/, '').trim();
+    const to = Array.from(new Set([owner, proposal.assigned_to].filter(Boolean)));
+    for (const u of to) {
+      await notify.enqueue(c, {
+        username: u, kind: 'change', actor: req.session.username,
+        subject: `Proposal rejected — ${proposal.kind}`,
+        body: `${req.session.username} rejected the ${proposal.kind} your agent proposed` +
+              `${reason ? `.\n\nReason: ${reason}` : ' — no reason given.'}` +
+              '\n\nNothing was filed. The quarantined copy is kept for the audit trail.',
+        projectId: proposal.project_id, showId: proposal.show_id,
+        link: proposal.show_id ? '/#show/' + proposal.show_id : ''
+      });
+    }
   });
 
   // A rejected proposal must leave NO TRACE on the NAS for someone to find

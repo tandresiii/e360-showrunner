@@ -101,4 +101,11 @@ The test for every feature: *a change made anywhere becomes visible to everyone 
 - **Resolves the notify tension deliberately:** Tony's rule (sender picks who gets pinged; routine edits silent) governs *ad-hoc* pings. Tom's rule governs *material changes* (dates, scope, specs, schedule, confirm/stage, budget): the show's assigned team is AUTO-informed — subscription by assignment, not by the changer's memory. Digest-friendly so it binds without spamming.
 - Needs (candidate mechanisms, coherence review to refine): a per-show **"What changed" feed/changelog** everyone on the crew sees; material-change classification on mutations; assignment = subscription; the client-facing person's inputs (calls, emails, meetings) becoming tasks via the agent pipeline (the transcript toggle is upstream of this); "waiting on me" generalized beyond finance (everyone has a cracks-list).
 
+## Gear history — snapshot the pull sheet (Tom, 2026-08-28)
+"Would like to look back and see what gear was used on previous events." The Flex LINK is stored (flex_state) but sheet contents are live-read only — no historical record survives Flex edits/archival. Build:
+- **Snapshot on strike/closeout (auto) + on-demand button**: persist the normalized pull-sheet JSON (the flexReadPullSheet shape — groups/items/qty/serials/pack-status) as a permanent record on the show (spec_renders-style row or a files entry + render), stamped with fetchedAt. Renders/prints forever from the DB, independent of Flex.
+- Multiple lists (pull sheet + manifest) each snapshotable; re-snapshot supersedes (keep history, never overwrite — supersede pattern).
+- **Future unlock**: cross-event gear search over snapshots ("when did we last send the Lex 400 · which shows used BP2s"), gear-usage stats per season. The snapshot table is the foundation.
+- Fits the north star: the gear record becomes part of the event folder's permanent truth, not tribal memory in Flex.
+
 ## (more team wishes to be added here as responses come in)

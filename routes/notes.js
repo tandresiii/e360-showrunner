@@ -336,7 +336,15 @@ router.get('/me/inbox', asyncH(async (req, res) => {
     proposals: proposals.map((p) => ({
       id: p.id, kind: p.kind, status: p.status, proposed_by: p.proposed_by,
       show_id: p.show_id, project_id: p.project_id, confidence: p.confidence == null ? null : Number(p.confidence),
-      created_at: p.created_at, payload: p.payload, provenance: p.provenance
+      created_at: p.created_at, payload: p.payload, provenance: p.provenance,
+      // E2. `created_rows` is the join the bell needs and this route did not
+      // send it. public/api.js reads `p.created_rows.files` to find the real
+      // QUARANTINED FILE behind a document proposal; with the field missing the
+      // lookup threw on undefined, EVERY proposal fell through to the
+      // synthesize branch and got a negative pseudo-id, and from there "View"
+      // 404'd and "Confirm" threw after the server had already committed. One
+      // field, and the whole review loop comes back.
+      created_rows: p.created_rows || null
     }))
   });
 }));

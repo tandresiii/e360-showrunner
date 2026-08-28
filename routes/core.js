@@ -21,7 +21,8 @@ const { pool, withTx, loadProject, loadShow, loadJob, projectForRow, mintTempJob
 const { requireAuth, requireRole, canEditProject, canUpdateStepStatus, roleRank,
         hasFinance } = require('../lib/auth');
 const { asyncH, badRequest, forbidden, notFound, conflict, idParam, limitOf, offsetOf } = require('../lib/http');
-const { logActivity } = require('../lib/activity');
+const { logActivity, diffFields, changeSummary } = require('../lib/activity');
+const { announceShowChange, projectAudience, showAudience } = require('../lib/audience');
 const { lanesForType, allLaneKeys } = require('../lib/seed');
 const { resolveUsernames, recordMentions, parseMentions, notifyTargets } = require('../lib/mentions');
 const {
@@ -49,6 +50,34 @@ const {
 
 const router = express.Router();
 router.use(requireAuth);
+
+// ════════════════════════════════════════════════════════════════════════════
+// F3/F5/F8. THE MATERIAL SETS — classification as DATA, not as if-statements
+// ────────────────────────────────────────────────────────────────────────────
+// The review's sharpest process finding is that the app split notification on
+// CREATE vs EDIT, which is the wrong axis: moving load-in from 08:00 to 05:00
+// the night before a show is an "edit". The right axis is MATERIAL vs ROUTINE,
+// and the cheapest honest way to express it is a named list of fields per
+// entity. A field in the map produces a diff and addresses the audience; a
+// field outside it (slug, summary, source — bookkeeping) does neither.
+//
+// Adding a column to one of these maps is the whole ceremony for making it
+// announce itself. That is deliberate: the pre-build checklist asks "name the
+// audience of every mutation", and this is where the answer gets written down.
+const MATERIAL_SHOW_FIELDS = {
+  name: 'name', venue: 'venue', city: 'city',
+  load_in_date: 'load-in', event_date: 'event date', strike_date: 'strike',
+  stage: 'stage', owner: 'owner', on_site_poc: 'on-site POC',
+  cabinets: 'cabinets', rag_override: 'RAG override', default_job_id: 'job'
+};
+const MATERIAL_PROJECT_FIELDS = {
+  name: 'name', client: 'client', stage: 'stage', owner: 'owner',
+  type: 'type', description: 'description'
+};
+const MATERIAL_STEP_FIELDS = {
+  title: 'title', lane: 'lane', owner: 'owner', due_date: 'due',
+  status: 'status', risk: 'risk flag', depends_on: 'depends on'
+};
 
 // ── shared hydration ────────────────────────────────────────────────────────
 // `money` is the finance-capability gate (hardening 2): a job's contract value
@@ -218,8 +247,21 @@ router.put('/projects/:id', asyncH(async (req, res) => {
      has(b, 'summary') ? pick(b, 'summary') : p.summary,
      has(b, 'source') ? pick(b, 'source') : p.source, p.id]
   );
+  const changes = diffFields(p, r.rows[0], MATERIAL_PROJECT_FIELDS);
   await logActivity(pool, { projectId: p.id, actor: req.actor, action: 'project.update',
-    detail: r.rows[0].name });
+    accent: changes.length > 0, detail: changeSummary(changes, r.rows[0].name), changes });
+  // A folder-level change reaches everyone on every show inside it — a client
+  // rename or an owner handover is exactly the kind of thing that used to
+  // travel by word of mouth or not at all.
+  if (changes.length) {
+    const people = await projectAudience(pool, p.id);
+    if (people.length) {
+      await announceShowChange(pool, {
+        showId: null, projectId: p.id, actor: req.actor, to: people,
+        what: `the folder ${r.rows[0].name}`, changes, link: `/#folder/${p.id}`
+      });
+    }
+  }
   res.json(await hydrateProject(r.rows[0], pool, { session: req.session }));
 }));
 
@@ -342,6 +384,7 @@ router.put('/shows/:id', asyncH(async (req, res) => {
     );
     // Keeping BOTH due_date and due_offset_days means a date change recomputes
     // the back-schedule instead of stranding it (SCHEMA.md).
+    let moved = 0;
     if (newEventDate !== s.event_date && isISODate(newEventDate)) {
       const steps = await c.query(
         'SELECT id, due_offset_days FROM steps WHERE show_id=$1 AND due_offset_days IS NOT NULL', [s.id]);
@@ -349,11 +392,31 @@ router.put('/shows/:id', asyncH(async (req, res) => {
         await c.query('UPDATE steps SET due_date=$1, updated_at=NOW() WHERE id=$2',
           [addDays(newEventDate, st.due_offset_days), st.id]);
       }
+      moved = steps.rows.length;
     }
+    // F3. The diff, over the named MATERIAL set — so `show.update` stops
+    // meaning "something about this show changed" and starts saying which
+    // field, from what, to what. `detail` is now built from the same array.
+    const changes = diffFields(s, r.rows[0], MATERIAL_SHOW_FIELDS);
     await logActivity(c, { projectId: s.project_id, showId: s.id, actor: req.actor,
-      action: 'show.update', detail: r.rows[0].name });
+      action: 'show.update', accent: changes.length > 0,
+      detail: changeSummary(changes, r.rows[0].name), changes });
     await notifyTargets(c, { body: b, anchorType: 'show', anchorId: s.id, projectId: s.project_id,
       showId: s.id, actor: req.actor, summary: `updated the show —` });
+    // F1/F5. THE POINT OF THE WHOLE PASS. Moving the event date used to rewrite
+    // every deadline in the show and tell only whoever the caller happened to
+    // type into notify:[]. Now the show's own people are addressed because they
+    // are on it — no notify array involved, nobody having to remember.
+    if (changes.length) {
+      await announceShowChange(c, {
+        showId: s.id, projectId: s.project_id, actor: req.actor,
+        what: `${r.rows[0].name || 'the show'}`,
+        changes,
+        extra: moved
+          ? `${moved} task deadline${moved === 1 ? '' : 's'} moved with the date. Check yours.`
+          : ''
+      });
+    }
     return r.rows[0];
   });
   res.json(await hydrateShow(row, pool, { withSteps: true }));
@@ -386,8 +449,18 @@ router.post('/shows/:id/milestones', requireRole('pm'), asyncH(async (req, res) 
     [showId, label, date, parseInt(pick(req.body, 'sort_order'), 10) || 0]);
   res.json(dbToMilestone(r.rows[0]));
 }));
+// H1 + H3. This carried a rank check, no ownership check and no existence
+// check — so any pm could delete any milestone on anybody's project, and a
+// stale screen got {ok:true} for an id that was already gone.
 router.delete('/milestones/:id', requireRole('pm'), asyncH(async (req, res) => {
-  await pool.query('DELETE FROM milestones WHERE id=$1', [idParam(req)]);
+  const id = idParam(req);
+  const cur = (await pool.query('SELECT * FROM milestones WHERE id=$1', [id])).rows[0];
+  if (!cur) throw notFound(`milestone ${id} not found`);
+  const project = await projectForRow(cur);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to delete this milestone');
+  await pool.query('DELETE FROM milestones WHERE id=$1', [id]);
+  await logActivity(pool, { projectId: project ? project.id : null, showId: cur.show_id || null,
+    actor: req.actor, action: 'milestone.delete', detail: cur.label });
   res.json({ ok: true });
 }));
 
@@ -895,6 +968,31 @@ router.get('/my-steps', asyncH(async (req, res) => {
   })));
 }));
 
+// F5 (narrow form). A task changing under its owner is THEIR event, not the
+// show's. Reassignment is the one case with two interested parties — the person
+// who just lost it and the person who just gained it — and both are told.
+async function notifyChangedStep(c, { step, prev, changes, project, actor }) {
+  const show = step.show_id ? await loadShow(step.show_id, c) : null;
+  const where = show ? (show.name || show.venue || ('show ' + show.id))
+    : (project ? project.name : 'Showrunner');
+  const link = step.show_id ? '/#show/' + step.show_id : '';
+  const reassigned = changes.some((ch) => ch.field === 'owner');
+  // The new owner is told by the assignment path's own words, so this is the
+  // 'change' kind and not a duplicate 'assignment'.
+  const people = new Set();
+  if (step.owner) people.add(step.owner);
+  if (reassigned && prev.owner) people.add(prev.owner);
+  const targets = Array.from(people).filter(Boolean);
+  if (!targets.length) return [];
+  return announceShowChange(c, {
+    showId: step.show_id || null, projectId: project ? project.id : null,
+    actor, to: targets, link,
+    subject: `Your task changed — “${step.title}” on ${where}`,
+    what: `“${step.title}” on ${where}`,
+    changes
+  });
+}
+
 router.post('/steps', requireRole('pm'), asyncH(async (req, res) => {
   const b = req.body || {};
   const showId = intOrNull(pick(b, 'show_id'));
@@ -916,20 +1014,57 @@ router.post('/steps', requireRole('pm'), asyncH(async (req, res) => {
     if (show && show.event_date) dueDate = addDays(show.event_date, off);
   }
 
-  const r = await pool.query(
-    `INSERT INTO steps (show_id, project_id, lane, title, status, owner, owner_role, due_date,
-       due_offset_days, evidence_type, evidence_ref, depends_on, auto_source, sort_order, notes, risk)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-    [showId, projectId, lane, title, oneOf(pick(b, 'status'), STEP_STATUSES, 'todo'),
-     pick(b, 'owner') || '', pick(b, 'owner_role') || null, dueDate,
-     off != null ? parseInt(off, 10) : null,
-     oneOf(pick(b, 'evidence_type'), EVIDENCE_TYPES, 'none'), pick(b, 'evidence_ref') || '',
-     intOrNull(pick(b, 'depends_on')), oneOf(pick(b, 'auto_source'), AUTO_SOURCES, 'none'),
-     parseInt(pick(b, 'sort_order'), 10) || 0, pick(b, 'notes') || '', !!pick(b, 'risk')]
-  );
-  await logActivity(pool, { projectId: owningProject.id, showId, actor: req.actor,
-    action: 'step.create', detail: `[${lane}] ${title}` });
-  res.json(dbToStep(r.rows[0]));
+  // An owner named at CREATE time is an assignment and must ping exactly as
+  // PUT /steps/:id/assign does.
+  //
+  // It is NOT validated against the roster here, deliberately. `steps.owner` is
+  // free text on purpose: a template seeds role slugs ('lead_tech'), and a local
+  // hire can own a step without ever having a login. The canonical-name gate
+  // lives at the push (lib/scheduler.js validateForPush, M6) — that is where an
+  // unresolvable owner has a consequence, and moving the check here would refuse
+  // rows the product legitimately creates. So: resolve, and ping only if there
+  // is a real person on the other end. You cannot email a role slug.
+  const newOwner = String(pick(b, 'owner') || '').trim();
+  const ownerIsPerson = newOwner
+    ? (await resolveUsernames([newOwner])).valid.length > 0 : false;
+
+  const row = await withTx(async (c) => {
+    const r = await c.query(
+      `INSERT INTO steps (show_id, project_id, lane, title, status, owner, owner_role, due_date,
+         due_offset_days, evidence_type, evidence_ref, depends_on, auto_source, sort_order, notes, risk)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+      [showId, projectId, lane, title, oneOf(pick(b, 'status'), STEP_STATUSES, 'todo'),
+       newOwner, pick(b, 'owner_role') || null, dueDate,
+       off != null ? parseInt(off, 10) : null,
+       oneOf(pick(b, 'evidence_type'), EVIDENCE_TYPES, 'none'), pick(b, 'evidence_ref') || '',
+       intOrNull(pick(b, 'depends_on')), oneOf(pick(b, 'auto_source'), AUTO_SOURCES, 'none'),
+       parseInt(pick(b, 'sort_order'), 10) || 0, pick(b, 'notes') || '', !!pick(b, 'risk')]
+    );
+    await logActivity(c, { projectId: owningProject.id, showId, actor: req.actor,
+      action: 'step.create', detail: `[${lane}] ${title}` });
+    if (ownerIsPerson) {
+      const show = showId ? await loadShow(showId, c) : null;
+      const where = show ? (show.name || show.venue || ('show ' + show.id)) : owningProject.name;
+      await notify.enqueue(c, {
+        username: newOwner, kind: 'assignment', actor: req.actor,
+        subject: `Assigned to you — ${title}`,
+        body: `${req.actor} created “${title}” on ${where} and assigned it to you` +
+              (dueDate ? `, due ${dueDate}.` : '.'),
+        projectId: owningProject.id, showId: showId || null,
+        link: showId ? '/#show/' + showId : ''
+      });
+    }
+    // F6. Every step route now takes the picker's list, like schedule.js does.
+    // The note anchors on whichever parent the step actually has.
+    await notifyTargets(c, {
+      body: b,
+      anchorType: showId ? 'show' : 'project', anchorId: showId || owningProject.id,
+      projectId: owningProject.id, showId: showId || null, actor: req.actor,
+      summary: `added the task “${title}” —`
+    });
+    return r.rows[0];
+  });
+  res.json(dbToStep(row));
 }));
 
 router.put('/steps/:id', asyncH(async (req, res) => {
@@ -947,23 +1082,47 @@ router.put('/steps/:id', asyncH(async (req, res) => {
     if (show && show.event_date && off != null) dueDate = addDays(show.event_date, off);
   }
 
-  const r = await pool.query(
-    `UPDATE steps SET lane=$1, title=$2, status=$3, owner=$4, owner_role=$5, due_date=$6,
-       due_offset_days=$7, evidence_type=$8, evidence_ref=$9, depends_on=$10, auto_source=$11,
-       sort_order=$12, notes=$13, risk=$14, updated_at=NOW() WHERE id=$15 RETURNING *`,
-    [lane, pick(b, 'title', cur.title), oneOf(pick(b, 'status'), STEP_STATUSES, cur.status),
-     pick(b, 'owner', cur.owner), pick(b, 'owner_role', cur.owner_role), dueDate, off,
-     oneOf(pick(b, 'evidence_type'), EVIDENCE_TYPES, cur.evidence_type),
-     pick(b, 'evidence_ref', cur.evidence_ref),
-     has(b, 'depends_on') ? intOrNull(pick(b, 'depends_on')) : cur.depends_on,
-     oneOf(pick(b, 'auto_source'), AUTO_SOURCES, cur.auto_source),
-     has(b, 'sort_order') ? (parseInt(pick(b, 'sort_order'), 10) || 0) : cur.sort_order,
-     pick(b, 'notes', cur.notes),
-     has(b, 'risk') ? !!pick(b, 'risk') : cur.risk, cur.id]
-  );
-  await logActivity(pool, { projectId: project ? project.id : null, showId: cur.show_id,
-    actor: req.actor, action: 'step.update', detail: r.rows[0].title });
-  res.json(dbToStep(r.rows[0]));
+  const row = await withTx(async (c) => {
+    const r = await c.query(
+      `UPDATE steps SET lane=$1, title=$2, status=$3, owner=$4, owner_role=$5, due_date=$6,
+         due_offset_days=$7, evidence_type=$8, evidence_ref=$9, depends_on=$10, auto_source=$11,
+         sort_order=$12, notes=$13, risk=$14, updated_at=NOW() WHERE id=$15 RETURNING *`,
+      [lane, pick(b, 'title', cur.title), oneOf(pick(b, 'status'), STEP_STATUSES, cur.status),
+       pick(b, 'owner', cur.owner), pick(b, 'owner_role', cur.owner_role), dueDate, off,
+       oneOf(pick(b, 'evidence_type'), EVIDENCE_TYPES, cur.evidence_type),
+       pick(b, 'evidence_ref', cur.evidence_ref),
+       has(b, 'depends_on') ? intOrNull(pick(b, 'depends_on')) : cur.depends_on,
+       oneOf(pick(b, 'auto_source'), AUTO_SOURCES, cur.auto_source),
+       has(b, 'sort_order') ? (parseInt(pick(b, 'sort_order'), 10) || 0) : cur.sort_order,
+       pick(b, 'notes', cur.notes),
+       has(b, 'risk') ? !!pick(b, 'risk') : cur.risk, cur.id]
+    );
+    const next = r.rows[0];
+    const changes = diffFields(cur, next, MATERIAL_STEP_FIELDS);
+    await logActivity(c, { projectId: project ? project.id : null, showId: cur.show_id,
+      actor: req.actor, action: 'step.update',
+      accent: changes.some((ch) => ch.field === 'status' && ch.to === 'blocked'),
+      detail: changes.length ? `${next.title} · ${changeSummary(changes)}` : next.title,
+      changes });
+    // A re-date or a re-lane lands on the person doing the work. The owner is
+    // told directly (it is their deadline); the wider audience is not, because
+    // one task moving is not a show-level event — the show's date moving is,
+    // and that path is PUT /shows/:id above.
+    if (changes.length && next.owner) {
+      await notifyChangedStep(c, {
+        step: next, prev: cur, changes, project, actor: req.actor
+      });
+    }
+    await notifyTargets(c, {
+      body: b,
+      anchorType: cur.show_id ? 'show' : 'project',
+      anchorId: cur.show_id || (project ? project.id : null),
+      projectId: project ? project.id : null, showId: cur.show_id || null,
+      actor: req.actor, summary: `updated the task “${next.title}” —`
+    });
+    return next;
+  });
+  res.json(dbToStep(row));
 }));
 
 // Assigning work to someone else is a management act.
@@ -1016,13 +1175,61 @@ router.put('/steps/:id/status', asyncH(async (req, res) => {
   if (!status) throw badRequest('Invalid status');
   const notes = has(req.body, 'notes') ? pick(req.body, 'notes') : cur.notes;
   const risk = has(req.body, 'risk') ? !!pick(req.body, 'risk') : cur.risk;
-  const r = await pool.query(
-    'UPDATE steps SET status=$1, notes=$2, risk=$3, updated_at=NOW() WHERE id=$4 RETURNING *',
-    [status, notes, risk, cur.id]);
-  await logActivity(pool, { projectId: project ? project.id : null, showId: cur.show_id,
-    actor: req.actor, action: 'step.status', detail: `${cur.title} → ${status}`,
-    accent: status === 'done' || status === 'blocked' });
-  res.json(dbToStep(r.rows[0]));
+  const row = await withTx(async (c) => {
+    const r = await c.query(
+      'UPDATE steps SET status=$1, notes=$2, risk=$3, updated_at=NOW() WHERE id=$4 RETURNING *',
+      [status, notes, risk, cur.id]);
+    const changes = diffFields(cur, r.rows[0], { status: 'status', risk: 'risk flag' });
+    await logActivity(c, { projectId: project ? project.id : null, showId: cur.show_id,
+      actor: req.actor, action: 'step.status', detail: `${cur.title} → ${status}`,
+      accent: status === 'done' || status === 'blocked', changes });
+
+    // ── F2. "THIS IS STUCK" NOW REACHES A HUMAN ────────────────────────────
+    // The app already flagged `blocked` as significant to ITSELF — the activity
+    // row is accented, the RAG model treats it as crit, the Overview's "biggest
+    // risk" reads it. It told nobody. That is the single most crack-shaped
+    // event in the business and it was the cheapest fix in the document.
+    //
+    // The audience is deliberately NARROW: the show owner and the folder owner,
+    // the two people who can unblock something, plus the step's owner if
+    // somebody else marked their task stuck. Not the whole crew — a blocked
+    // task is a management event, not a broadcast.
+    const wentBlocked = status === 'blocked' && cur.status !== 'blocked';
+    const wentRisky = !!risk && !cur.risk;
+    if (wentBlocked || wentRisky) {
+      const show = cur.show_id ? await loadShow(cur.show_id, c) : null;
+      const where = show ? (show.name || show.venue || ('show ' + show.id))
+        : (project ? project.name : 'Showrunner');
+      const to = [];
+      if (show && show.owner) to.push(show.owner);
+      if (project && project.owner) to.push(project.owner);
+      if (cur.owner) to.push(cur.owner);
+      await announceShowChange(c, {
+        showId: cur.show_id || null, projectId: project ? project.id : null,
+        actor: req.actor, to: Array.from(new Set(to.filter(Boolean))),
+        kind: 'change',
+        subject: wentBlocked
+          ? `Blocked — “${cur.title}” on ${where}`
+          : `Flagged at risk — “${cur.title}” on ${where}`,
+        what: `“${cur.title}” on ${where}`,
+        changes,
+        extra: wentBlocked
+          ? (notes ? `Why: ${notes}` : 'No reason given — ask before it becomes a surprise.')
+          : (notes || '')
+      });
+    }
+    // F6. The status route now carries the picker's list too. It was the one
+    // route family where a person could not say "and tell Brenden" at all.
+    await notifyTargets(c, {
+      body: req.body,
+      anchorType: cur.show_id ? 'show' : 'project',
+      anchorId: cur.show_id || (project ? project.id : null),
+      projectId: project ? project.id : null, showId: cur.show_id || null,
+      actor: req.actor, summary: `marked “${cur.title}” ${status} —`
+    });
+    return r.rows[0];
+  });
+  res.json(dbToStep(row));
 }));
 
 router.delete('/steps/:id', requireRole('pm'), asyncH(async (req, res) => {
@@ -1036,9 +1243,27 @@ router.delete('/steps/:id', requireRole('pm'), asyncH(async (req, res) => {
     await c.query(`DELETE FROM note_mentions WHERE note_id NOT IN (SELECT id FROM notes)`);
     await c.query('UPDATE steps SET depends_on=NULL WHERE depends_on=$1', [cur.id]);
     await c.query('DELETE FROM steps WHERE id=$1', [cur.id]);
+    await logActivity(c, { projectId: project ? project.id : null, showId: cur.show_id,
+      actor: req.actor, action: 'step.delete', detail: cur.title });
+    // Work disappearing off someone's list is exactly as material as work
+    // arriving on it, and until now it happened in total silence.
+    if (cur.owner) {
+      await announceShowChange(c, {
+        showId: cur.show_id || null, projectId: project ? project.id : null,
+        actor: req.actor, to: [cur.owner],
+        subject: `Removed from your list — “${cur.title}”`,
+        what: `“${cur.title}”`,
+        changes: [{ field: 'status', label: 'task', from: cur.status || 'todo', to: 'deleted' }]
+      });
+    }
+    await notifyTargets(c, {
+      body: req.body,
+      anchorType: cur.show_id ? 'show' : 'project',
+      anchorId: cur.show_id || (project ? project.id : null),
+      projectId: project ? project.id : null, showId: cur.show_id || null,
+      actor: req.actor, summary: `deleted the task “${cur.title}” —`
+    });
   });
-  await logActivity(pool, { projectId: project ? project.id : null, showId: cur.show_id,
-    actor: req.actor, action: 'step.delete', detail: cur.title });
   res.json({ ok: true });
 }));
 
@@ -1188,6 +1413,44 @@ router.get('/activity', asyncH(async (req, res) => {
   if (poId) add('po_id=$?', poId);
   if (jobId) add('job_id=$?', jobId);
   if (req.query.actor) add('actor=$?', req.query.actor);
+
+  // ── F4. THE READ SHAPE THE CHANGELOG NEEDS ─────────────────────────────────
+  // The table had 68 verbs, 128 writers and one buried per-show tab. These four
+  // filters are what turn it into something a person can ask a question of.
+  //
+  //   ?since=ISO           everything after a timestamp — the "what changed
+  //                        while I was on site" question
+  //   ?action=show.update  one verb, or a family with a trailing dot
+  //                        (?action=step. matches step.create/update/status/…)
+  //   ?changed=1           ONLY rows carrying a before→after. This is the
+  //                        changelog filter: it drops creates, reads and
+  //                        bookkeeping and leaves the decisions.
+  //   ?mine=1              scoped to the shows I am ON (audience membership),
+  //                        which is the cross-project feed F4 asks for without
+  //                        inventing a second table.
+  const since = pick(req.query, 'since');
+  if (since) {
+    const d = new Date(String(since));
+    if (isNaN(d.getTime())) throw badRequest('since must be an ISO timestamp');
+    add('created_at > $?', d.toISOString());
+  }
+  const action = String(pick(req.query, 'action') || '').trim();
+  if (action) {
+    if (action.endsWith('.')) add('action LIKE $?', action + '%');
+    else add('action=$?', action);
+  }
+  if (pick(req.query, 'changed') === '1' || pick(req.query, 'changed') === 'true') {
+    where.push('changes IS NOT NULL');
+  }
+  if (pick(req.query, 'mine') === '1' || pick(req.query, 'mine') === 'true') {
+    const ids = await showsIAmOn(req.session.username);
+    // No shows means no feed — NOT "the whole company's feed". An empty answer
+    // to "what changed on my shows" is the honest answer when you are on none.
+    if (!ids.length) return res.json([]);
+    params.push(ids);
+    where.push(`show_id = ANY($${params.length}::int[])`);
+  }
+
   let q = 'SELECT * FROM activity';
   if (where.length) q += ' WHERE ' + where.join(' AND ');
   params.push(limitOf(req, 100, 500));
@@ -1195,6 +1458,25 @@ router.get('/activity', asyncH(async (req, res) => {
   const r = await pool.query(q, params);
   res.json(r.rows.map(dbToActivity));
 }));
+
+// The inverse of lib/audience.showAudience(): which shows is THIS person on?
+// Same four memberships, so "you are told about it" and "you can read about it"
+// can never disagree.
+async function showsIAmOn(username) {
+  const u = String(username || '').trim();
+  if (!u) return [];
+  const r = await pool.query(
+    `SELECT DISTINCT s.id FROM shows s
+      LEFT JOIN projects p ON p.id = s.project_id
+      WHERE LOWER(s.owner) = LOWER($1)
+         OR LOWER(p.owner) = LOWER($1)
+         OR EXISTS (SELECT 1 FROM steps st
+                     WHERE st.show_id = s.id AND LOWER(st.owner) = LOWER($1))
+         OR EXISTS (SELECT 1 FROM crew_assignments ca
+                     WHERE ca.show_id = s.id AND LOWER(ca.username) = LOWER($1))`,
+    [u]);
+  return r.rows.map((x) => x.id);
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // PUSH TO SCHEDULER  (Showrunner show -> the staffing app)

@@ -49,7 +49,7 @@ under each item; the detail lives in `SCHEMA.md` and `INTEGRATIONS_SPEC.md`.
 
 ---
 
-## Open handoff — two buttons in `public/views-global.js`  *(storage pass, 2026-08-28)*
+## ~~Open handoff~~ **DONE** — two buttons in `public/views-global.js`  *(closed in the seam pass, 2026-08-28)*
 
 The NAS byte layer is live: `GET /api/files/:id/content` streams a file back,
 `api.downloadFileBytes(id)` fetches it with the session in hand, and
@@ -76,5 +76,17 @@ acts.push('<button class="btn" ' + act('downloadFile', f.id) + '>' + icon('downl
 `downloadFile()` already degrades correctly in demo mode (it emits the same
 toast those placeholders do), so the swap is safe in both modes. Nothing else in
 the viewer needs to change.
+
+> **DONE.** Both swaps applied verbatim as written below. `drawViewer()`'s document
+> Download and `drawPhotoMeta()`'s *Download original* now call
+> `act('downloadFile', f.id)`, which reaches the real `GET /api/files/:id/content`
+> byte route through `api.downloadFileBytes()`. The persona walk asserts no
+> `toastAttrs('Download'` placeholder survives anywhere in `views-global.js`.
+>
+> Two more fakes went with them, found while in the file: `tabBookings()`'s
+> **Paperwork** and **Assign** buttons (toast-only, on a table of rows that could
+> not be created in the first place) are now one real *Edit* affordance, and the
+> season header's **Apply to all shows** / **Push season** toasts now say *"not
+> built yet"* and point at the per-show controls that are real.
 
 (more items as the tour continues)

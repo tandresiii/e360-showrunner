@@ -1,5 +1,40 @@
 # Showrunner — product coherence review
 
+> ## STATUS — THE SEAM PASS, 2026-08-28
+>
+> This document was the workbook for a pass that closed the top ten. What
+> follows is the review **as written**; the items below are now done, and the
+> gate for all of them is `npm run walk` (`scripts/persona-walk.mjs`, 157
+> assertions, an empty database, driven through the real seam).
+>
+> **Closed:** B1 (crew) · B2 (call-sheet header) · B3 · B4 · B5 (tasks:
+> create · edit · re-date · re-lane · delete) · D3 (a tech can report trouble)
+> · A2 · A3 (show and folder edit) · C1 (budget lines) · C2 · C3 (contract
+> value, deal type — and both are now gated to WRITE as they are to read) · C4
+> (correct or void an expense) · B6 (bookings) · B7 (proofs — the hardcoded
+> demo flow is gone) · B8 · B9 (PO ETA + tracking, so the delivery alarm can
+> fire) · A7 · A8 (the live push has a trigger, and `features.schedulerPush` is
+> consumed) · E2 · E3 · E4 · E5 · E6 (the agent review loop, end to end) · F1 ·
+> F2 · F3 · F4 · F5 · F8 · F12 (the propagation layer: material-change
+> classification, structured diffs, an audience per show, a cross-project
+> changelog, dotted action keys) · H1 · H2 · H3 (the gates that carried rank
+> and no ownership) · the POLISH_LIST download-button handoff.
+>
+> **Also fixed, found while walking:** the local storage driver reported
+> `ready` with no `STORAGE_ROOT` set, so a container accepted uploads onto a
+> disk the next redeploy destroys. It now refuses honestly and `/api/health`
+> carries `storageEphemeralRisk`. See `SCHEMA.md`.
+>
+> **Deliberately deferred** (and why): A1/A5/A6 (add-a-second-show, template
+> admin, apply-a-template — an SOP-editing pass of its own), A9/A10
+> (on/offboarding), A11 (agent key provisioning — needs a screen and a
+> credential story), A12 (global search), A13 (milestone CRUD + calendar),
+> B10/D5 (the file/photo *upload* UI beyond what the NAS pass built), B12
+> (a Tom decision), B13/B14, C5/C6/C7, D1/D4/D6/D7, E7/E8/E9/E10, F6/F7/F9/F10/
+> F11 (generalised "waiting on me", the cross-project crew/schedule/notes
+> routes), H4–H11. Everything marked POLISH.
+
+
 **Method.** Five personas walked end to end through a real month, against the
 code rather than the docs: `public/` (what a person can actually click),
 `routes/` + `lib/` (what the server will actually accept), `SCHEMA.md`,

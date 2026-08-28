@@ -161,6 +161,11 @@ UTF-8**; activity details and note bodies carry `→`, `—` and typographic quo
 ### 3. Suites
 
 ```bash
+npm run walk                      # scripts/persona-walk.mjs — THE ACCEPTANCE TEST.
+                                  # Brings up its own Postgres; needs no DATABASE_URL.
+                                  # A scripted month on an EMPTY database, driven
+                                  # through the real seam, that FAILS if any step has
+                                  # no reachable affordance. Run this one first.
 DATABASE_URL="…" npm run smoke    # scripts/smoke.js — the end-to-end suite
 npm run storage:test              # the NAS byte layer — no NAS, no DB needed
 npm run flex:test                 # offline, no key needed

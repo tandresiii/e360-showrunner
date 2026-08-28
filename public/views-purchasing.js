@@ -313,7 +313,11 @@ function viewPO(po) {
       (r ? '<span class="pill ' + (r.level === 'crit' ? 'crit' : 'warn') + '"><span class="dot"></span>' + esc(r.why) + '</span>'
          : received ? '<span class="pill go"><span class="dot"></span>landed</span>' : '<span class="pill go"><span class="dot"></span>clear</span>') + '</div>';
   }).join('') || '<div class="empty">No shows pinned — season-wide allocation.</div>';
-  var shipPanel = '<div class="panel"><h3>Delivery vs load-ins</h3>' +
+  var shipPanel = '<div class="panel"><h3>Delivery vs load-ins<span style="flex:1"></span>' +
+    /* B8. The one screen that renders expected_date and tracking as facts, and
+       the place a buyer is standing when they learn them. */
+    '<button class="btn sm ghost" ' + act('editPOEta', po.id) + '>' + icon('pencil') +
+    (po.expected_date ? 'Update delivery' : 'Set expected date') + '</button></h3>' +
     '<div class="glance" style="margin-bottom:10px">' +
     '<div class="g"><span class="k">Expected</span><span class="mono">' + esc(po.expected_date ? fmtDateFull(po.expected_date) : '—') + '</span></div>' +
     (po.tracking ? '<div class="g"><span class="k">Tracking</span><span class="mono">' + esc(po.tracking) + '</span></div>' : '') +
@@ -322,9 +326,12 @@ function viewPO(po) {
 
   /* ---- activity ---- */
   var actRows = (po.activity || []).map(function (a) {
-    var line = (a.actor ? '<b>' + esc(actorName(a.actor)) + '</b> ' : '') + esc(a.action) +
-      (a.detail ? ' <span style="color:var(--muted)">· ' + esc(a.detail) + '</span>' : '');
-    return '<div class="tl-item ' + (a.accent ? 'accent' : '') + '"><div class="node"></div><div class="a-t">' + line + '</div><div class="a-m">' + esc(fmtTs(a.ts)) + '</div></div>';
+    var line = (a.actor ? '<b>' + esc(actorName(a.actor)) + '</b> ' : '') + esc(actionLabel(a.action)) +
+      (a.detail && !(a.changes && a.changes.length)
+        ? ' <span style="color:var(--muted)">· ' + esc(a.detail) + '</span>' : '');
+    return '<div class="tl-item ' + (a.accent ? 'accent' : '') + '"><div class="node"></div>' +
+      '<div class="a-t">' + line + changeChips(a.changes) + '</div>' +
+      '<div class="a-m">' + esc(fmtTs(a.ts)) + '</div></div>';
   }).join('') || '<div class="empty">No activity yet.</div>';
   var actPanel = '<div class="panel"><h3>Activity</h3><div class="timeline">' + actRows + '</div></div>';
 
@@ -385,7 +392,13 @@ function poGearStrip(show) {
         ? '<span class="pill ' + (r.risk.level === 'crit' ? 'crit' : 'warn') + '">' + inlineIcon('truck') + ' ' + esc(r.risk.why) + '</span>'
         : po.expected_date
           ? '<span class="mini" title="expected delivery">' + esc('exp ' + fmtDate(po.expected_date)) + '</span>'
-          : '<span class="mini dep">no ETA</span>';
+          /* B8. `expected_date` and `tracking` are the SOLE inputs to the
+             delivery-risk engine — poRisks, the season-row flag, the Purchasing
+             cockpit's crit/warn counters — and PUT /api/pos/:id had no client
+             method, so on real data the alarm could never fire and every PO
+             read "no ETA" forever. */
+          : '<span class="mini dep" title="Nothing can go critical without one" ' +
+            act('editPOEta', po.id) + ' style="cursor:pointer">+ set ETA</span>';
     return '<div class="next-item" ' + act('openPO', po.id) + ' style="cursor:pointer"><div class="txt">' +
       '<span class="po-num" style="margin-right:7px">' + esc(po.po_number) + '</span><b style="font-weight:600">' + esc(po.vendor) + '</b>' +
       '<span>' + esc(r.n + ' line' + (r.n === 1 ? '' : 's') + ' for this show') + '</span></div>' +

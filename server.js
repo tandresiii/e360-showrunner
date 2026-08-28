@@ -171,6 +171,10 @@ app.get('/api/health', async (req, res) => {
                storage: storage.name, nasRoot: NAS_ROOT,
                storageReady: si.ready, storageTarget: si.target,
                storageVia: si.via, storageTls: si.tls || null,
+               // TRUE means bytes are landing on a disk this deploy owns and the
+               // next deploy destroys. Never inferred from `ready` — a store can
+               // be perfectly ready and still be about to lose everything.
+               storageEphemeralRisk: !!si.ephemeralRisk,
                storageError: si.error || null });
   } catch (e) {
     res.status(503).json({ ok: false, error: e.message });
@@ -315,9 +319,14 @@ async function boot() {
     const server = app.listen(PORT, () => {
       console.log(`E360 Showrunner ${APP_VERSION} running on port ${PORT}`);
       const si = storageInfo();
-      console.log(`  storage driver : ${storage.name}  ->  ${si.target || STORAGE_ROOT}` +
+      console.log(`  storage driver : ${storage.name}  ->  ${si.target || '(unset)'}` +
                   `${si.via && si.via !== 'filesystem' ? '  via ' + si.via : ''}` +
-                  `${si.ready ? '' : '  [NOT CONFIGURED]'}`);
+                  `${si.ready ? '' : '  [NOT CONFIGURED — uploads refused]'}`);
+      if (si.ephemeralRisk) {
+        console.log(`  storage WARN   : EPHEMERAL DISK — ${si.target} is inside this container. ` +
+                    `Bytes written here do not survive a redeploy. Mount a volume there, ` +
+                    `or use STORAGE_DRIVER=webdav.`);
+      }
       if (si.error) console.log(`  storage WARN   : ${si.error}`);
       console.log(`  NAS path root  : ${NAS_ROOT}`);
       console.log(`  CORS origins   : ${ORIGINS.length ? ORIGINS.join(', ') : '(same-origin only)'}`);

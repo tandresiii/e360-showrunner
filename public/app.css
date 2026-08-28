@@ -189,6 +189,20 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
 .timeline::before{content:""; position:absolute; left:8px; top:6px; bottom:6px; width:1.5px; background:var(--border)}
 .tl-item{position:relative; padding:0 0 20px}
 .tl-item:last-child{padding-bottom:0}
+/* F3 · the before→after, under an activity line. The OLD value is struck
+   through and muted, the NEW one is solid: a diff should be readable at a
+   glance without reading the words, because most of the time you are scanning
+   for "did MY thing move", not reading a changelog end to end. */
+.chg-list{display:flex; flex-direction:column; gap:3px; margin-top:6px}
+.chg{display:flex; align-items:baseline; gap:7px; flex-wrap:wrap; font-size:11.5px; line-height:1.5}
+.chg-f{color:var(--muted); text-transform:uppercase; letter-spacing:.06em; font-size:9.5px;
+       font-weight:600; min-width:78px}
+.chg-a{font-family:var(--font-mono); font-size:11px; color:var(--muted); text-decoration:line-through;
+       text-decoration-color:color-mix(in srgb,var(--muted) 55%,transparent)}
+.chg-x{color:var(--muted); display:inline-flex; align-items:center}
+.chg-x svg{width:11px;height:11px}
+.chg-b{font-family:var(--font-mono); font-size:11px; color:var(--text); font-weight:600}
+@media (max-width:640px){ .chg-f{min-width:0; width:100%} }
 .tl-item .node{position:absolute; left:-22px; top:2px; width:13px;height:13px; border-radius:50%; background:var(--surface); border:2px solid var(--border-strong)}
 .tl-item.accent .node{border-color:var(--accent); background:var(--accent)}
 .tl-item .a-t{font-size:13px; font-weight:500}
@@ -826,7 +840,11 @@ table.tbl td.money,table.tbl th.money{text-align:right}
 .poc-tel svg{color:var(--accent)}
 /* crew cards — role · call · flights · hotel · phone */
 .sched-crew{display:grid; grid-template-columns:repeat(auto-fill,minmax(270px,1fr)); gap:12px}
-.crewcard{background:var(--surface-2); border:1px solid var(--border); border-radius:var(--r); padding:12px 13px; display:flex; flex-direction:column; gap:8px}
+.crewcard{background:var(--surface-2); border:1px solid var(--border); border-radius:var(--r); padding:12px 13px; display:flex; flex-direction:column; gap:8px; position:relative}
+/* B1 · same reveal-on-hover pencil the schedule items carry, so the two
+   editable things on this tab behave identically. Always visible on touch. */
+.crewcard .sched-edit{position:absolute; top:8px; right:8px}
+@media(hover:hover){ .crewcard .sched-edit{opacity:0} .crewcard:hover .sched-edit,.crewcard:focus-within .sched-edit{opacity:1} }
 .crewcard.me{border-color:color-mix(in srgb,var(--accent) 40%,var(--border)); background:linear-gradient(180deg,var(--accent-ghost),var(--surface-2))}
 .cc-h{display:flex; align-items:center; gap:9px}
 .cc-h .avatar{width:28px;height:28px;font-size:11px}

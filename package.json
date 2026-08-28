@@ -1,7 +1,7 @@
 {
   "name": "e360-showrunner",
   "version": "2.0.0",
-  "description": "E360 Showrunner — project-management app for E360 Sport live-event LED/Print production. Separate service from the staffing/scheduler app; integrates via 'push to scheduler'. Serves its own SPA plus an agent-facing API (AGENT_API.md).",
+  "description": "E360 Showrunner \u2014 project-management app for E360 Sport live-event LED/Print production. Separate service from the staffing/scheduler app; integrates via 'push to scheduler'. Serves its own SPA plus an agent-facing API (AGENT_API.md).",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,7 +9,8 @@
     "smoke": "node scripts/smoke.js",
     "storage:test": "node scripts/storage-test.js",
     "flex:test": "node scripts/flex-test.js",
-    "flex:probe": "node scripts/flex-probe.js"
+    "flex:probe": "node scripts/flex-probe.js",
+    "walk": "node scripts/persona-walk.mjs"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -20,5 +21,8 @@
     "express": "^4.18.2",
     "luxon": "^3.7.2",
     "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "embedded-postgres": "^18.4.0-beta.17"
   }
 }
