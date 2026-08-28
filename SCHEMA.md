@@ -373,10 +373,35 @@ key **by FK, not by regex**.
 
 ### Identity, agents, audit
 
-**`users`** — `id · username (unique) · password_hash · pw_algo · role · name · initials · color · title · discipline · phone · email · finance BOOL · active BOOL · created_at`
+**`users`** — `id · username (unique) · password_hash · pw_algo · role · name · initials · color · title · discipline · phone · email · finance BOOL · active BOOL · must_change_password BOOL · created_at`
 Passwords are **bcrypt**; a legacy `sha256+salt` hash still verifies and is
 re-hashed in place on the next successful login. `finance` is a **capability,
 not a rank**: it grants margin visibility and PO approval without changing role.
+
+**`active` is the whole offboarding story — nothing here ever deletes a person.**
+A row that goes inactive is refused at login (a *clear* 403 saying so, returned
+only **after** the password verifies, so the endpoint is still not an
+account-existence oracle), has its live sessions destroyed, and disappears from
+the default `GET /api/users` roster — while every step it owns, note it wrote,
+report it filed and activity line it caused keeps rendering with its name on it.
+`GET /api/users/:idOrUsername` is deliberately **not** filtered by `active`,
+because that lookup is what every attribution surface uses.
+
+**`must_change_password`** is set when the server mints a temporary password
+(on create, and on reset) and cleared when the person sets one of their own. It
+gates **nothing** server-side — a session is a full session — it rides the login
+response and `GET /api/auth/me` as `must_change` so the SPA can insist on a real
+password before it renders. The API record calls it `must_change` and not
+`must_change_password` on purpose: the roster assertion in `scripts/smoke.js`
+proves no user record ever carries the substring `password`.
+
+**The lockout guard.** `active = true AND role = 'admin'` is the set that must
+never be emptied: with no active admin there is no in-app way back — it is a
+`psql` session from whoever still holds the database URL. So deactivating,
+demoting or deleting the **last active admin** is refused with a 400 that names
+the fix. The rule is written against the set rather than against the caller;
+through HTTP the two coincide, because demoting somebody else requires being an
+active admin yourself, which means the target was not the last one.
 
 **`sessions`** *(idx: `user_id`, `expires_at`)* — `token PK · user_id · username · created_at · expires_at · last_seen_at · ip`
 Durable: sessions survive a redeploy. Role and capabilities are read **live from
@@ -494,9 +519,14 @@ spellings everywhere. Success is always `200` — there is no `201`/`204`.
 ```
 Meta        GET /api/version · GET /api/health
 Auth        POST /api/auth/login · POST /api/auth/logout · GET /api/auth/me
-Users       GET /api/users (any) · GET /api/users/:idOrUsername · POST /api/users (admin)
-            PUT /api/users/:id · PUT /api/users/:id/role · PUT /api/users/:id/finance
-            PUT /api/users/:id/password · DELETE /api/users/:id
+Users       GET /api/users (any — ACTIVE ONLY; ?all=1 adds the inactive, admin)
+            GET /api/users/:idOrUsername (any — never filtered by active)
+            POST /api/users (admin — mints a temp password, returned ONCE)
+            PUT /api/users/:id (admin: role/finance/active/profile · self: profile)
+            PUT /api/users/:id/role · PUT /api/users/:id/finance          (admin)
+            POST /api/users/:id/reset-password (admin — new temp pw, returned ONCE)
+            PUT /api/me/password (any — needs the CURRENT password)
+            PUT /api/users/:id/password · DELETE /api/users/:id           (admin)
 Keys        GET/POST /api/keys · DELETE /api/keys/:id            (session only)
 Projects    GET /api/projects · GET /api/projects/:id · GET /api/projects/:id/folder
             POST /api/projects · PUT/DELETE /api/projects/:id
@@ -602,7 +632,12 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | `api.*` | Endpoint |
 |---|---|
 | `currentUser()` | `GET /api/auth/me` → `.user` |
-| `listUsers()` / `getUser(u)` | `GET /api/users` / `GET /api/users/:u` |
+| `listUsers()` / `listUsers({all:true})` | `GET /api/users` (active only) / `GET /api/users?all=1` |
+| `getUser(u)` | `GET /api/users/:u` — resolves inactive people too |
+| `createUser(p)` | `POST /api/users` → `{user, temp_password}` — the password is lifted off before the record enters the store |
+| `updateUser(id, patch)` / `setUserActive(id, on)` | `PUT /api/users/:id` |
+| `resetUserPassword(id)` | `POST /api/users/:id/reset-password` → `{temp_password}` |
+| `changeMyPassword(cur, next)` | `PUT /api/me/password` |
 | `listProjects()` / `getProject(id)` | `GET /api/projects` / `GET /api/projects/:id` |
 | `resolveFolder(pid)` | `GET /api/projects/:id/folder` |
 | `listShows(pid)` / `getShow(id)` | `GET /api/shows?project_id=` / `GET /api/shows/:id` |

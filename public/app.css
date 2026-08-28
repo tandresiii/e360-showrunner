@@ -401,6 +401,27 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
 .can-chips{display:flex; gap:5px; flex-wrap:wrap}
 .perm-note{color:var(--muted); font-size:11.5px; margin-top:12px; line-height:1.5}
 
+/* ---------- people admin (Team & Roles) ---------- */
+.team-acts{white-space:nowrap}
+.team-acts .btn{margin-right:5px}
+.team-acts .btn:last-child{margin-right:0}
+/* An inactive person is DIMMED, never hidden and never struck through: their
+   work is still real, they are simply not on the roster any more. */
+.team-off > td{opacity:.55}
+.team-off .avatar{filter:grayscale(1)}
+/* the one-time temp-password reveal */
+.temp-pw{display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  background:var(--surface-2); border:1px solid var(--border-strong); border-radius:var(--r); padding:13px 15px}
+.temp-pw .tp-k{font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); font-weight:600}
+.temp-pw .tp-v{flex:1; min-width:150px; font-size:17px; letter-spacing:.06em; color:var(--accent);
+  user-select:all; -webkit-user-select:all; word-break:break-all}
+/* the finance-capability checkbox on the add/edit person form */
+.pu-cap{display:flex; align-items:flex-start; gap:10px; margin-top:12px; padding:11px 13px;
+  background:var(--surface-2); border:1px solid var(--border); border-radius:var(--r);
+  font-size:12px; line-height:1.55; color:var(--text-2); cursor:pointer}
+.pu-cap input{margin-top:2px; flex:none; accent-color:var(--accent)}
+.pu-cap b{color:var(--text)}
+
 /* ---------- calendar ---------- */
 .cal-group{margin-bottom:22px}
 .cal-group h4{font-family:var(--font-display); font-size:12px; text-transform:uppercase; letter-spacing:.09em; color:var(--muted); margin-bottom:11px}

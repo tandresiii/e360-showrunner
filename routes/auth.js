@@ -14,14 +14,53 @@ const express = require('express');
 const { pool } = require('../lib/db');
 const {
   hashPassword, verifyPassword, createSession, destroySession, destroyUserSessions,
+  destroyUserSessionsExcept, generateTempPassword, isLastActiveAdmin,
   getSession, generateApiKey, requireAuth, requireRole, loginRateLimit, clientIp, roleRank
 } = require('../lib/auth');
 const { asyncH, badRequest, forbidden, notFound, idParam } = require('../lib/http');
 const { dbToUser, dbToApiKey, pick } = require('../lib/mappers');
-const { oneOf, ALL_ROLES, AGENT_SCOPES } = require('../lib/enums');
+const { oneOf, ALL_ROLES, AGENT_SCOPES, USER_COLORS, initialsFrom } = require('../lib/enums');
 const { logActivity } = require('../lib/activity');
 
 const router = express.Router();
+
+// ════════════════════════════════════════════════════════════════════════════
+// PEOPLE — the shared helpers the user-admin routes lean on
+// ════════════════════════════════════════════════════════════════════════════
+
+// 2–32 chars, a letter first. The same rule POST has always enforced, lifted
+// out so the error text is authored once.
+const USERNAME_RE = /^[a-z][a-z0-9_.-]{1,31}$/;
+const USERNAME_RULE = 'Username must be 2–32 characters: a letter, then letters, digits, _ . or -';
+
+// The first palette colour nobody is wearing; once all ten are taken it wraps
+// on the row count so the choice is at least stable and spread out.
+async function nextColor(q = pool) {
+  const r = await q.query(`SELECT color FROM users`);
+  const taken = new Set(r.rows.map((x) => String(x.color || '').toUpperCase()).filter(Boolean));
+  const free = USER_COLORS.find((c) => !taken.has(c.toUpperCase()));
+  return free || USER_COLORS[r.rows.length % USER_COLORS.length];
+}
+
+// The lockout guard, as a throwing assertion — see lib/auth.js isLastActiveAdmin
+// for WHY. Called on every path that could empty the active-admin set:
+// deactivation, demotion, and deletion. The message names the fix, because a
+// refusal that does not is just a wall.
+async function assertNotLastAdmin(userId, what) {
+  if (await isLastActiveAdmin(userId)) {
+    throw badRequest(
+      `This is the only active admin — ${what} would leave nobody able to manage ` +
+      'people or reset a password. Make somebody else an admin first.');
+  }
+}
+
+// A user row, or a 404. Never filtered by `active`: an inactive person is still
+// a person, and every history surface has to be able to look them up.
+async function loadUser(id, q = pool) {
+  const r = await q.query('SELECT * FROM users WHERE id=$1', [id]);
+  if (!r.rows.length) throw notFound('User not found');
+  return r.rows[0];
+}
 
 // ── AUTH ────────────────────────────────────────────────────────────────────
 router.post('/auth/login', loginRateLimit, asyncH(async (req, res) => {
@@ -33,10 +72,23 @@ router.post('/auth/login', loginRateLimit, asyncH(async (req, res) => {
   // Same response for "no such user" and "wrong password" — never leak which.
   if (!r.rows.length) return res.status(401).json({ error: 'Invalid username or password' });
   const user = r.rows[0];
-  if (user.active === false) return res.status(401).json({ error: 'Invalid username or password' });
 
   const { ok, needsRehash } = await verifyPassword(password, user.password_hash);
   if (!ok) return res.status(401).json({ error: 'Invalid username or password' });
+
+  // A DEACTIVATED account is told so, plainly — but only AFTER the password has
+  // verified. That ordering is the whole trick: somebody who cannot produce the
+  // password learns nothing (they get the same generic 401 as a typo, so the
+  // endpoint is still not an account-existence oracle), while the person who
+  // actually owns the account is not left staring at "invalid password",
+  // retyping a password they know is right. 403, not 401: the credentials were
+  // correct and the client must not treat this as "your session expired".
+  if (user.active === false) {
+    return res.status(403).json({
+      error: 'That account has been deactivated. Ask an admin to turn it back on.',
+      deactivated: true
+    });
+  }
 
   // F. legacy sha256 row -> bcrypt, in place, on the next successful login.
   if (needsRehash) {
@@ -46,7 +98,16 @@ router.post('/auth/login', loginRateLimit, asyncH(async (req, res) => {
   }
 
   const token = await createSession(user.id, user.username, clientIp(req));
-  res.json({ token, username: user.username, role: user.role, user: dbToUser(user, { self: true }) });
+  // `must_change` rides the login response so the client can put the
+  // change-password overlay up BEFORE the app renders. It is not a server-side
+  // gate and is not pretending to be one — the session is a full session, and
+  // an API client that ignores the flag works exactly as before. What it buys
+  // is that nobody keeps living on a password an admin read off their screen.
+  res.json({
+    token, username: user.username, role: user.role,
+    must_change: user.must_change_password === true,
+    user: dbToUser(user, { self: true })
+  });
 }));
 
 router.post('/auth/logout', asyncH(async (req, res) => {
@@ -62,19 +123,44 @@ router.get('/auth/me', asyncH(async (req, res) => {
   const r = await pool.query('SELECT * FROM users WHERE id=$1', [session.userId]);
   res.json({
     loggedIn: true, username: session.username, role: session.role,
-    finance: session.finance, user: dbToUser(r.rows[0], { self: true })
+    finance: session.finance,
+    // A returning visit with a valid token never passes through /auth/login, so
+    // the flag has to be here too or the forced change is skippable by simply
+    // reloading the page.
+    must_change: r.rows[0] && r.rows[0].must_change_password === true,
+    user: dbToUser(r.rows[0], { self: true })
   });
 }));
 
 // ── USERS / ROSTER ──────────────────────────────────────────────────────────
 // READ is open to every authenticated user: the roster drives owner pickers,
 // @mentions, call sheets and initials chips. WRITE is admin-only.
+//
+// THE DEFAULT IS THE WORKING ROSTER — active people only. Every consumer of
+// this endpoint is a place you are about to hand somebody WORK: an owner
+// picker, a crew list, a notify picker, the @mention lookup. Offering a person
+// who left the company in any of those is not a small cosmetic wrong; it puts
+// their name on a call sheet. The people who left are still in the table, still
+// resolve by id or username through GET /users/:key, and still render on every
+// history surface — they are simply not on the list of who you can pick.
+//
+// `?all=1` returns everyone, including the inactive, and is for the ONE screen
+// that manages people. It is admin-only, and a non-admin who asks for it just
+// gets the working roster rather than a 403: the parameter is a view option on
+// a read they were always allowed to make, not a privilege boundary being
+// probed. Nothing they could see changes.
 router.get('/users', requireAuth, asyncH(async (req, res) => {
-  const r = await pool.query('SELECT * FROM users ORDER BY id');
+  const wantsAll = String(req.query.all || '') === '1' && req.session.role === 'admin';
+  const r = wantsAll
+    ? await pool.query('SELECT * FROM users ORDER BY id')
+    : await pool.query('SELECT * FROM users WHERE active IS NOT FALSE ORDER BY id');
   res.json(r.rows.map((row) => dbToUser(row)));
 }));
 
-// api.getUser(username) — accepts a numeric id or a username.
+// api.getUser(username) — accepts a numeric id or a username. Deliberately NOT
+// filtered by `active`: this is the lookup every attribution surface uses to
+// turn an owner/actor/author string into a name and an avatar, and a former
+// teammate's old work has to keep rendering with their name on it.
 router.get('/users/:key', requireAuth, asyncH(async (req, res) => {
   const key = String(req.params.key);
   const r = /^\d+$/.test(key)
@@ -85,62 +171,137 @@ router.get('/users/:key', requireAuth, asyncH(async (req, res) => {
   res.json(dbToUser(r.rows[0], { self }));
 }));
 
+// ── ADD A PERSON ────────────────────────────────────────────────────────────
+// The SERVER mints the password. An admin adding a teammate should never have
+// to invent one, and more to the point should never be able to CHOOSE one —
+// "welcome123" for everybody is how a workspace ends up with nine accounts
+// sharing a password. The minted value is returned in THIS response and in no
+// other, is never written to the activity trail, and `must_change` means the
+// person cannot keep using it past their first sign-in.
+//
+// An explicit `password` is still accepted, because scripted setup and the
+// smoke suite create users that way and that is a legitimate admin act; when
+// one is supplied the server does not echo it back — it already has it.
 router.post('/users', requireAuth, requireRole('admin'), asyncH(async (req, res) => {
   const b = req.body || {};
   const username = String(pick(b, 'username') || '').toLowerCase().trim();
-  const password = pick(b, 'password');
-  if (!username || !password) throw badRequest('Username and password required');
-  if (!/^[a-z][a-z0-9_.-]{1,31}$/.test(username)) {
-    throw badRequest('Username must be 2–32 chars: a letter, then letters/digits/_.-');
+  if (!username) throw badRequest('A username is required');
+  if (!USERNAME_RE.test(username)) throw badRequest(USERNAME_RULE);
+
+  const supplied = pick(b, 'password');
+  if (supplied !== undefined && String(supplied).length < 8) {
+    throw badRequest('Password must be at least 8 characters');
   }
+  const generated = supplied === undefined ? generateTempPassword() : null;
+  const password = generated || String(supplied);
+
   const role = oneOf(pick(b, 'role'), ALL_ROLES, 'viewer');
+  const name = String(pick(b, 'name') || '').trim();
+  const initials = String(pick(b, 'initials') || '').trim().slice(0, 4)
+                   || initialsFrom(name, username);
+  const color = String(pick(b, 'color') || '').trim() || await nextColor();
+
   try {
     const r = await pool.query(
       `INSERT INTO users (username, password_hash, role, name, initials, color, title,
-                          discipline, phone, email, finance, pw_algo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'bcrypt') RETURNING *`,
+                          discipline, phone, email, finance, active,
+                          must_change_password, pw_algo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,TRUE,TRUE,'bcrypt') RETURNING *`,
       [username, await hashPassword(password), role,
-       pick(b, 'name') || '', pick(b, 'initials') || '', pick(b, 'color') || '',
+       name, initials, color,
        pick(b, 'title') || '', pick(b, 'discipline') || '', pick(b, 'phone') || '',
        pick(b, 'email') || '', !!pick(b, 'finance')]
     );
-    await logActivity(pool, { actor: req.session.username, action: 'user.create', detail: username });
-    res.json(dbToUser(r.rows[0]));
+    // The detail names the person and the role and STOPS. Whatever else is
+    // tempting to record here, the password is not a candidate — the audit
+    // trail is readable by every authenticated user.
+    await logActivity(pool, { actor: req.session.username, action: 'user.create',
+      detail: `${username} · ${role}${pick(b, 'finance') ? ' · finance' : ''}` });
+    // Shown once. There is no second endpoint that returns it, and no row that
+    // holds it — losing it means running a reset, which is one click away.
+    res.json({ ...dbToUser(r.rows[0]), ...(generated ? { temp_password: generated } : {}) });
   } catch (e) {
-    if (e.code === '23505') throw badRequest('Username already exists');
+    if (e.code === '23505') throw badRequest('That username is already taken');
     throw e;
   }
 }));
 
-// Display columns (13) + the finance capability. Admin for anyone; a user may
-// edit their own display fields but NEVER their own role or finance flag.
+// ── EDIT A PERSON ───────────────────────────────────────────────────────────
+// Display columns (13) + the finance capability + the role + the active
+// toggle, in ONE call, because that is how the Team view's edit form works —
+// one dialog, one save. Admin for anyone; a user may edit their own display
+// fields but NEVER their own role, finance flag or active state.
+//
+// Deactivation is the OFFBOARDING act, and it does not delete anything. The
+// row stays, every foreign reference to the username stays, and the person's
+// history keeps rendering. What it does is: refuse their login, drop their live
+// sessions on the floor, and take them off every picker.
 router.put('/users/:id', requireAuth, asyncH(async (req, res) => {
   const id = idParam(req);
   const isAdmin = req.session.role === 'admin';
   if (!isAdmin && req.session.userId !== id) throw forbidden('Not allowed');
-  const cur = (await pool.query('SELECT * FROM users WHERE id=$1', [id])).rows[0];
-  if (!cur) throw notFound();
+  const cur = await loadUser(id);
   const b = req.body || {};
   const val = (k) => (pick(b, k) !== undefined ? pick(b, k) : cur[k]);
+
+  const wasActive = cur.active !== false;
+  const nextActive = isAdmin && pick(b, 'active') !== undefined ? !!pick(b, 'active') : wasActive;
+
+  let nextRole = cur.role;
+  if (isAdmin && pick(b, 'role') !== undefined) {
+    nextRole = oneOf(pick(b, 'role'), ALL_ROLES, null);
+    if (!nextRole) throw badRequest(`'${pick(b, 'role')}' is not a role`);
+  }
+
+  // The two acts that can empty the active-admin set, refused BEFORE anything
+  // is written. Order matters: check, then write, so a refusal changes nothing.
+  if (wasActive && !nextActive) await assertNotLastAdmin(id, 'deactivating them');
+  if (cur.role === 'admin' && nextRole !== 'admin') await assertNotLastAdmin(id, 'changing their role');
+
   const r = await pool.query(
     `UPDATE users SET name=$1, initials=$2, color=$3, title=$4, discipline=$5,
-       phone=$6, email=$7, finance=$8, active=$9 WHERE id=$10 RETURNING *`,
+       phone=$6, email=$7, finance=$8, active=$9, role=$10 WHERE id=$11 RETURNING *`,
     [val('name') || '', val('initials') || '', val('color') || '', val('title') || '',
      val('discipline') || '', val('phone') || '', val('email') || '',
-     // capability + active are admin-only, whoever is asking
+     // capability, active and role are admin-only, whoever is asking
      isAdmin ? !!val('finance') : cur.finance,
-     isAdmin ? (pick(b, 'active') !== undefined ? !!pick(b, 'active') : cur.active !== false) : cur.active !== false,
-     id]
+     nextActive, nextRole, id]
   );
+
+  // A deactivated person must not keep browsing on the session they already
+  // hold. getSession() re-reads `active` every request and would refuse them
+  // anyway, so this is belt AND braces — but it is the half that does not
+  // depend on a future refactor keeping that check in place.
+  if (wasActive && !nextActive) await destroyUserSessions(id);
+
+  if (isAdmin && nextRole !== cur.role) {
+    await logActivity(pool, { actor: req.session.username, action: 'user.role',
+      detail: `${cur.username} → ${nextRole}` });
+  }
+  if (isAdmin && !!val('finance') !== !!cur.finance) {
+    await logActivity(pool, { actor: req.session.username, action: 'user.finance',
+      detail: `${cur.username} → ${val('finance') ? 'granted' : 'revoked'}` });
+  }
+  if (wasActive !== nextActive) {
+    await logActivity(pool, { actor: req.session.username, action: 'user.active',
+      detail: `${cur.username} → ${nextActive ? 'reactivated' : 'deactivated'}` });
+  } else if (isAdmin && nextRole === cur.role && !!val('finance') === !!cur.finance) {
+    await logActivity(pool, { actor: req.session.username, action: 'user.update',
+      detail: cur.username });
+  }
   res.json(dbToUser(r.rows[0], { self: req.session.userId === id }));
 }));
 
+// The role on its own. Kept as its own route (the Team view's quick role
+// change, and every existing caller) and carrying the SAME lockout guard —
+// a guard that only exists on one of two doors is not a guard.
 router.put('/users/:id/role', requireAuth, requireRole('admin'), asyncH(async (req, res) => {
   const id = idParam(req);
   const role = oneOf(pick(req.body, 'role'), ALL_ROLES, null);
   if (!role) throw badRequest('Invalid role');
+  const cur = await loadUser(id);
+  if (cur.role === 'admin' && role !== 'admin') await assertNotLastAdmin(id, 'changing their role');
   const r = await pool.query('UPDATE users SET role=$1 WHERE id=$2 RETURNING *', [role, id]);
-  if (!r.rows.length) throw notFound();
   await logActivity(pool, { actor: req.session.username, action: 'user.role',
     detail: `${r.rows[0].username} → ${role}` });
   res.json(dbToUser(r.rows[0]));
@@ -163,22 +324,85 @@ router.put('/users/:id/finance', requireAuth, requireRole('admin'), asyncH(async
 router.put('/users/:id/password', requireAuth, asyncH(async (req, res) => {
   const id = idParam(req);
   if (req.session.role !== 'admin' && req.session.userId !== id) throw forbidden('Not allowed');
+  const cur = await loadUser(id);
   const password = pick(req.body, 'password');
   if (!password || String(password).length < 8) {
     throw badRequest('Password must be at least 8 characters');
   }
-  await pool.query('UPDATE users SET password_hash=$1, pw_algo=$2 WHERE id=$3',
+  await pool.query(
+    `UPDATE users SET password_hash=$1, pw_algo=$2, must_change_password=FALSE WHERE id=$3`,
     [await hashPassword(password), 'bcrypt', id]);
   await destroyUserSessions(id);
+  await logActivity(pool, { actor: req.session.username, action: 'user.password',
+    detail: `${cur.username} · password set` });
   res.json({ ok: true });
 }));
 
+// ── RESET SOMEBODY'S PASSWORD ───────────────────────────────────────────────
+// "I'm locked out." The admin does not need to know, invent, or ever see the
+// person's real password — they mint a new temp one, read it out once, and the
+// person replaces it the moment they sign in. Every session the account had is
+// destroyed, because a reset is also what you do when you think an account is
+// compromised, and a reset that leaves the intruder's session alive is theatre.
+router.post('/users/:id/reset-password', requireAuth, requireRole('admin'), asyncH(async (req, res) => {
+  const id = idParam(req);
+  const cur = await loadUser(id);
+  const temp = generateTempPassword();
+  await pool.query(
+    `UPDATE users SET password_hash=$1, pw_algo='bcrypt', must_change_password=TRUE WHERE id=$2`,
+    [await hashPassword(temp), id]);
+  await destroyUserSessions(id);
+  await pool.query('UPDATE api_keys SET revoked_at=NOW() WHERE user_id=$1 AND revoked_at IS NULL', [id]);
+  // Names WHO, never WHAT.
+  await logActivity(pool, { actor: req.session.username, action: 'user.password_reset',
+    detail: cur.username });
+  res.json({ ok: true, username: cur.username, temp_password: temp,
+             must_change: true, sessions_ended: true });
+}));
+
+// ── CHANGE YOUR OWN PASSWORD ────────────────────────────────────────────────
+// Any signed-in user, and the ONE password route that demands the current
+// password: this is the endpoint an attacker sitting at an unlocked laptop
+// would reach for. Clearing `must_change` is what ends the forced flow, so this
+// route is also the exit from the temp password an admin read aloud.
+router.put('/me/password', requireAuth, asyncH(async (req, res) => {
+  const b = req.body || {};
+  const current = pick(b, 'current_password', pick(b, 'current'));
+  const next = pick(b, 'password', pick(b, 'new_password'));
+  if (!current) throw badRequest('Your current password is required');
+  if (!next || String(next).length < 8) throw badRequest('The new password must be at least 8 characters');
+  if (String(next) === String(current)) throw badRequest('The new password must be different from the current one');
+
+  const cur = await loadUser(req.session.userId);
+  const { ok } = await verifyPassword(current, cur.password_hash);
+  if (!ok) throw badRequest('That is not your current password');
+
+  await pool.query(
+    `UPDATE users SET password_hash=$1, pw_algo='bcrypt', must_change_password=FALSE WHERE id=$2`,
+    [await hashPassword(next), cur.id]);
+  // Every OTHER device is signed out; the one doing the changing stays in.
+  // Bouncing somebody to the login screen for successfully doing what the app
+  // just insisted they do would be an unforced insult.
+  await destroyUserSessionsExcept(cur.id, req.headers['x-auth-token']);
+  await logActivity(pool, { actor: cur.username, action: 'user.password',
+    detail: `${cur.username} · changed their own password` });
+  res.json({ ok: true, must_change: false, other_sessions_ended: true });
+}));
+
+// Deletion still exists for a mistake — a username typed wrong, an account
+// created twice — but it is NOT how somebody leaves. Offboarding is the active
+// toggle above, precisely so nothing they touched loses its author. The lockout
+// guard applies here too: deleting the last admin is the same hole as demoting
+// them, and the self-check alone never covered one admin deleting another.
 router.delete('/users/:id', requireAuth, requireRole('admin'), asyncH(async (req, res) => {
   const id = idParam(req);
   if (id === req.session.userId) throw badRequest('You cannot delete your own account');
+  const cur = await loadUser(id);
+  if (cur.role === 'admin') await assertNotLastAdmin(id, 'deleting them');
   await destroyUserSessions(id);
   await pool.query('UPDATE api_keys SET revoked_at=NOW() WHERE user_id=$1 AND revoked_at IS NULL', [id]);
   await pool.query('DELETE FROM users WHERE id=$1', [id]);
+  await logActivity(pool, { actor: req.session.username, action: 'user.delete', detail: cur.username });
   res.json({ ok: true });
 }));
 

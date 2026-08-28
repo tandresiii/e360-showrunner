@@ -162,6 +162,11 @@ async function renderView(view, arg) {
     crumb([{ t: 'Calendar' }]);
 
   } else if (view === 'team') {
+    /* THE ONE VIEW that asks for the people who have left as well. Everywhere
+       else reads the working roster; here an admin has to be able to see, and
+       reactivate, somebody who is switched off. Non-admins get the server's
+       default (active only) whatever they send, so the flag is not a gate. */
+    if (CURRENT_USER.role === 'admin') await api.listUsers({ all: true });
     s.innerHTML = viewTeam(await api.listShows());
     crumb([{ t: 'Team' }]);
 
@@ -311,7 +316,7 @@ function repaintNotifyRow() {
 }
 function notifyPopInner() {
   return '<div class="rp-h">Notify · lands in their inbox</div>' +
-    USERS.filter(function (u) { return u.username !== ME; }).map(function (u) {
+    activeUsers().filter(function (u) { return u.username !== ME; }).map(function (u) {
       var on = NOTIFY_SEL.indexOf(u.username) >= 0;
       return '<button class="rp-opt ' + (on ? 'on' : '') + '" ' + act('notifyToggle', u.id) + '>' + av(u.username) +
         '<span class="ri2"><span class="rn">' + esc(u.name) + '</span><span class="rr">' + esc(roleName(u.role) + ' · ' + u.title) + '</span></span>' +
@@ -880,7 +885,7 @@ function newEventForm(type) {
   /* a pm always owns what they create; manager+ may hand it to someone else —
      the same rule the server enforces in POST /api/events */
   var canPickOwner = CURRENT_USER.role === 'admin' || CURRENT_USER.role === 'manager';
-  var ownerOpts = (canPickOwner ? USERS : [CURRENT_USER])
+  var ownerOpts = (canPickOwner ? activeUsers() : [CURRENT_USER])
     .filter(function (u) { return u.role !== 'viewer'; })
     .map(function (u) {
       return '<option value="' + esc(u.username) + '"' + (u.username === ME ? ' selected' : '') + '>' +
@@ -2168,6 +2173,341 @@ async function runSweepAct() {
 }
 
 /* ============================================================================
+   PEOPLE ADMIN — add · edit · reset · deactivate/reactivate
+   ----------------------------------------------------------------------------
+   Every mutation goes through api.* (which is gated server-side, and simulates
+   locally in demo mode) and re-renders Team from fresh data. The refusals are
+   surfaced verbatim: when the server says "this is the only active admin", the
+   toast says that, not "Something went wrong".
+   ========================================================================== */
+var PENDING_USER = null;      /* the id the open edit dialog belongs to */
+var TEMP_REVEAL = null;       /* {username, password} — held only while shown */
+
+function roleOptions(sel) {
+  return ROLE_ORDER.map(function (r) {
+    return '<option value="' + esc(r) + '"' + (r === sel ? ' selected' : '') + '>' +
+      esc(roleName(r)) + '</option>';
+  }).join('');
+}
+function personFields(u) {
+  u = u || {};
+  return '<div class="fin-inputs" style="grid-template-columns:1.4fr 1fr">' +
+    finLabelWrap('Full name', '<input id="puName" class="cell-in" value="' + esc(u.name || '') + '" placeholder="Devin Vargas">') +
+    finLabelWrap('Initials', '<input id="puInitials" class="cell-in" maxlength="4" value="' + esc(u.initials || '') + '" placeholder="auto">') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+    finLabelWrap('Role', '<select id="puRole" class="cell-in">' + roleOptions(u.role || 'viewer') + '</select>') +
+    finLabelWrap('Discipline', '<select id="puDiscipline" class="cell-in">' +
+      ['', 'led', 'print', 'both'].map(function (d) {
+        return '<option value="' + esc(d) + '"' + (d === (u.discipline || '') ? ' selected' : '') + '>' +
+          esc(d ? (typeDef(d) ? typeDef(d).label : d) : '—') + '</option>';
+      }).join('') + '</select>') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.4fr 1fr">' +
+    finLabelWrap('Title', '<input id="puTitle" class="cell-in" value="' + esc(u.title || '') + '" placeholder="Gear / Prep Tech">') +
+    finLabelWrap('Phone', '<input id="puPhone" class="cell-in" value="' + esc(u.phone || '') + '" placeholder="(414) 555-0100">') +
+    '</div>' +
+    '<label class="pu-cap"><input type="checkbox" id="puFinance"' + (u.finance ? ' checked' : '') + '>' +
+    '<span><b>Finance capability</b> — sees margin and approves purchase orders, without being an admin. ' +
+    'This is how accounting gets accounting rights.</span></label>';
+}
+function personFromForm() {
+  var v = function (id) { var el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; };
+  var c = function (id) { var el = document.getElementById(id); return !!(el && el.checked); };
+  return { name: v('puName'), initials: v('puInitials'), role: v('puRole'),
+           discipline: v('puDiscipline'), title: v('puTitle'), phone: v('puPhone'),
+           finance: c('puFinance') };
+}
+
+/* ---- the one-time reveal ------------------------------------------------ */
+/* The ONLY moment this password exists anywhere a human can read it. It is not
+   in the roster record, not in the activity trail, not returned by any GET, and
+   not recoverable — losing it costs one click on Reset, which is exactly the
+   trade we want. Held in TEMP_REVEAL only so the Copy button has something to
+   read, and dropped the moment the dialog closes. */
+function revealTempPassword(title, username, temp, lead) {
+  TEMP_REVEAL = { username: username, password: temp };
+  openModal(title,
+    '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px;line-height:1.6">' + lead + '</p>' +
+    '<div class="temp-pw"><div class="tp-k">' + esc(username) + '</div>' +
+    '<div class="tp-v mono" id="tempPwVal">' + esc(temp) + '</div>' +
+    '<button class="btn sm" ' + act('copyTempPw') + '>' + icon('doc') + 'Copy</button></div>' +
+    '<div class="hint" style="margin-top:12px">' + inlineIcon('lock') + '<span><b>Shown once.</b> Nothing stores ' +
+    'it and no screen will show it again — if it gets lost, reset the password and read out a new one. ' +
+    'They will be asked to change it the first time they sign in.' +
+    (api.isDemo() ? ' <b>Demo mode: this is a simulated password for a simulated person.</b>' : '') +
+    '</span></div>' +
+    '<div style="display:flex;justify-content:flex-end;margin-top:14px">' +
+    '<button class="btn primary" ' + act('closeModal') + '>Done</button></div>');
+}
+async function copyTempPwAct() {
+  if (!TEMP_REVEAL) return;
+  var txt = TEMP_REVEAL.password;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(txt);
+      toast('Copied', 'The temporary password is on your clipboard');
+      return;
+    }
+  } catch (_) { /* fall through to the selection fallback */ }
+  /* No clipboard API (an insecure origin, or an older browser): select the
+     text so ctrl-C still works, and say so rather than claiming a copy. */
+  try {
+    var el = document.getElementById('tempPwVal');
+    var range = document.createRange();
+    range.selectNodeContents(el);
+    var sel = window.getSelection();
+    sel.removeAllRanges(); sel.addRange(range);
+    toast('Selected — press Ctrl-C', 'This browser will not let a page write to the clipboard');
+  } catch (_) {
+    toast('Copy it by hand', 'This browser will not let a page write to the clipboard');
+  }
+}
+
+/* ---- add ---------------------------------------------------------------- */
+function openAddPerson() {
+  if (CURRENT_USER.role !== 'admin') { toast('Admins add people', 'Ask Tom, Tony or Jim'); return; }
+  PENDING_USER = null;
+  openModal('Add a person',
+    '<div class="hint" style="margin:0 0 12px">' + icon('users') + '<span>Creates the account and mints a ' +
+    '<b>temporary password</b>, shown once on the next screen. Read it out; they are asked to replace it the ' +
+    'first time they sign in.' + (api.isDemo() ? ' <b>Demo mode — nothing is created on a server.</b>' : '') +
+    '</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr"><label style="display:flex;flex-direction:column;gap:5px;font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;font-weight:600">Username' +
+    '<input id="puUsername" class="cell-in" autocapitalize="off" spellcheck="false" placeholder="dvargas">' +
+    '<span style="text-transform:none;letter-spacing:0;font-weight:400;font-size:11px;color:var(--muted)">' +
+    'What they sign in with. 2–32 characters: a letter, then letters, digits, _ . or - · it cannot be changed later.' +
+    '</span></label></div>' +
+    personFields({ role: 'tech' }) +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:14px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('userAddCommit') + '>' + icon('plus') + 'Create account</button></div>');
+}
+async function commitAddPerson() {
+  var uEl = document.getElementById('puUsername');
+  var username = uEl ? String(uEl.value || '').toLowerCase().trim() : '';
+  if (!username) { toast('A username is required', 'It is what they type to sign in'); return; }
+  var body = personFromForm();
+  body.username = username;
+  var r;
+  try { r = await api.createUser(body); }
+  catch (e) { toast('Not created', String((e && e.message) || e)); return; }
+  var who = (r.user && (r.user.name || r.user.username)) || username;
+  revealTempPassword('Account created · ' + who, username, r.temp_password,
+    '<b>' + esc(who) + '</b> can sign in now with this temporary password. It is the only time it is shown.');
+  await hydrateSession();
+  return render('team');
+}
+
+/* ---- edit --------------------------------------------------------------- */
+function openEditPerson(userId) {
+  var u = USERS_BY_ID[Number(userId)];
+  if (!u) return;
+  if (CURRENT_USER.role !== 'admin') { toast('Admins manage the roster', 'Ask Tom, Tony or Jim'); return; }
+  PENDING_USER = u.id;
+  openModal('Edit · ' + u.name,
+    '<div class="hint" style="margin:0 0 12px">' + icon('users') + '<span>Signs in as <b>' + esc(u.username) +
+    '</b> — a username never changes, because every step, note and activity line points at it.</span></div>' +
+    personFields(u) +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:14px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('userEditCommit') + '>' + icon('check') + 'Save changes</button></div>');
+}
+async function commitEditPerson() {
+  if (!PENDING_USER) return;
+  var id = PENDING_USER;
+  try { await api.updateUser(id, personFromForm()); }
+  catch (e) { toast('Not saved', String((e && e.message) || e)); return; }
+  closeM();
+  PENDING_USER = null;
+  toast('Saved', 'Their role and permissions take effect on their next request');
+  /* their role may have changed — including possibly OUR own */
+  await api.currentUser().catch(function () { return null; });
+  await hydrateSession();
+  return render('team');
+}
+
+/* ---- reset a password --------------------------------------------------- */
+function openResetPassword(userId) {
+  var u = USERS_BY_ID[Number(userId)];
+  if (!u) return;
+  openModal('Reset password · ' + u.name,
+    '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px;line-height:1.6">' +
+    'This replaces <b>' + esc(u.name) + '</b>’s password with a new temporary one and shows it to you once. ' +
+    'Every device they are currently signed in on is signed out, and any agent key they hold is revoked — ' +
+    'a reset is also what you do when you think an account has been got at, and one that left the intruder ' +
+    'signed in would be theatre.</p>' +
+    '<div style="display:flex;justify-content:flex-end;gap:9px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('userResetCommit', u.id) + '>' + icon('lock') + 'Reset it</button></div>');
+}
+async function commitResetPassword(userId) {
+  var u = USERS_BY_ID[Number(userId)];
+  var r;
+  try { r = await api.resetUserPassword(userId); }
+  catch (e) { toast('Not reset', String((e && e.message) || e)); return; }
+  revealTempPassword('Password reset · ' + ((u && u.name) || r.username), r.username, r.temp_password,
+    'Read this to <b>' + esc((u && u.name) || r.username) + '</b>. Their old password no longer works and ' +
+    'they have been signed out everywhere.');
+  return render('team');
+}
+
+/* ---- deactivate / reactivate -------------------------------------------- */
+function openDeactivate(userId) {
+  var u = USERS_BY_ID[Number(userId)];
+  if (!u) return;
+  var isMe = u.username === CURRENT_USER.username;
+  openModal('Deactivate · ' + u.name,
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px;line-height:1.6">' +
+    '<b>' + esc(u.name) + '</b> will not be able to sign in, and disappears from owner pickers, crew lists ' +
+    'and @mentions. Anyone signed in as them right now is signed out.</p>' +
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px;line-height:1.6">' +
+    '<b>Nothing is deleted.</b> Every step they own, note they wrote and report they filed keeps their name ' +
+    'on it, and the activity trail is untouched. This is how somebody leaves — you can switch them back on ' +
+    'any time and they pick up where they were.</p>' +
+    (isMe ? '<div class="hint" style="margin:0 0 12px">' + icon('alert') + '<span>This is <b>your own account</b>. ' +
+      'You will be signed out immediately and will need another admin to let you back in.</span></div>' : '') +
+    '<div style="display:flex;justify-content:flex-end;gap:9px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Keep them active</button>' +
+    '<button class="btn primary" ' + act('userDeactivateCommit', u.id) + '>' + icon('x') + 'Deactivate</button></div>');
+}
+async function commitSetActive(userId, on) {
+  var u = USERS_BY_ID[Number(userId)];
+  var isMe = !!(u && u.username === CURRENT_USER.username);
+  try { await api.setUserActive(userId, on); }
+  catch (e) { toast(on ? 'Not reactivated' : 'Not deactivated', String((e && e.message) || e)); return; }
+  closeM();
+  if (!on && isMe && !api.isDemo()) {
+    /* We just switched off the account this window is holding. Say it plainly
+       and go to the login screen rather than letting the next request 401 into
+       a confusing "your session expired". */
+    api.logout();
+    toast('Your account is deactivated', 'Another admin has to switch it back on');
+    openLogin('This account has been deactivated. Ask an admin to turn it back on.', null);
+    return;
+  }
+  toast(on ? 'Back on the roster' : 'Deactivated',
+    on ? ((u && u.name) || 'They') + ' can sign in again and appears in pickers'
+       : ((u && u.name) || 'They') + ' can no longer sign in — nothing was deleted');
+  await hydrateSession();
+  return render('team');
+}
+
+/* ============================================================================
+   PASSWORDS — the forced change, and the voluntary one
+   ----------------------------------------------------------------------------
+   `must_change` rides the login response and GET /api/auth/me. It gates
+   nothing server-side (a session is a session) — it is the app insisting,
+   before it renders anything, that nobody keeps living on a password an admin
+   read off their screen. The overlay reuses the login screen's own chrome
+   because it IS the same moment: you are not in yet.
+   ========================================================================== */
+var PWGATE = { open: false, busy: false };
+
+function pwGateHTML(msg, forced) {
+  return '<div class="login-card">' +
+    '<div class="login-brand"><div class="logo">e</div>' +
+      '<div><b>Showrunner</b><span>e360 Sport</span></div></div>' +
+    '<h1>' + (forced ? 'Choose a password' : 'Change your password') + '</h1>' +
+    '<p class="login-sub">' + (forced
+      ? 'You are signed in on a temporary password. Pick one only you know before you go any further.'
+      : 'Changing it signs you out on every other device. This one stays signed in.') + '</p>' +
+    '<form id="pwForm" autocomplete="on">' +
+      '<label class="login-f"><span>' + (forced ? 'Temporary password' : 'Current password') + '</span>' +
+        '<input id="pwCur" type="password" autocomplete="current-password" required></label>' +
+      '<label class="login-f"><span>New password</span>' +
+        '<input id="pwNew" type="password" autocomplete="new-password" minlength="8" required></label>' +
+      '<label class="login-f"><span>New password again</span>' +
+        '<input id="pwNew2" type="password" autocomplete="new-password" minlength="8" required></label>' +
+      '<div class="login-err" id="pwErr"' + (msg ? '' : ' style="display:none"') + '>' + esc(msg || '') + '</div>' +
+      '<button class="btn primary login-go" id="pwGo" type="submit">' + icon('check') + '<span>Set my password</span></button>' +
+    '</form>' +
+    '<div class="login-foot">' + inlineIcon('lock') +
+      'At least 8 characters. It is hashed with bcrypt — nobody, including an admin, can read it back.</div>' +
+  '</div>';
+}
+function openPwGate(msg) {
+  if (PWGATE.open) return;
+  PWGATE.open = true;
+  closeM(); closeBellPanel(); closeNotifyPop(); closeRosterPicker();
+  var el = document.getElementById('pwScreen');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'login-screen'; el.id = 'pwScreen';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = pwGateHTML(msg, true);
+  el.style.display = '';
+  var form = document.getElementById('pwForm');
+  if (form) form.onsubmit = function (e) { e.preventDefault(); return submitPwGate(); };
+  var c = document.getElementById('pwCur');
+  if (c && c.focus) { try { c.focus(); } catch (_) {} }
+}
+function closePwGate() {
+  PWGATE.open = false;
+  var el = document.getElementById('pwScreen');
+  if (el) el.style.display = 'none';
+}
+async function submitPwGate() {
+  if (PWGATE.busy) return;
+  var v = function (id) { var el = document.getElementById(id); return el ? String(el.value || '') : ''; };
+  var errEl = document.getElementById('pwErr');
+  var go = document.getElementById('pwGo');
+  function showErr(m) { if (errEl) { errEl.textContent = m; errEl.style.display = ''; } }
+  var cur = v('pwCur'), a = v('pwNew'), b = v('pwNew2');
+  if (a !== b) { showErr('The two new passwords do not match.'); return; }
+  PWGATE.busy = true;
+  if (go) { go.classList.add('busy'); go.disabled = true; }
+  try {
+    await api.changeMyPassword(cur, a);
+    closePwGate();
+    toast('Password set', 'You are signed out on every other device');
+    await hydrateSession();
+    await render('projects');
+  } catch (e) {
+    showErr(String((e && e.message) || e));
+  } finally {
+    PWGATE.busy = false;
+    if (go) { go.classList.remove('busy'); go.disabled = false; }
+  }
+}
+
+/* The voluntary one, from Settings → Your session. Same fields, in a modal,
+   because here you are already inside the app. */
+function openChangePassword() {
+  if (api.isDemo()) {
+    toast('Demo data — no account to change', 'This window is running the modeled dataset; there is no password behind it');
+    return;
+  }
+  openModal('Change your password',
+    '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px;line-height:1.6">' +
+    'Your current password proves it is you sitting here. Changing it signs you out on every <b>other</b> ' +
+    'device; this one stays signed in.</p>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Current password', '<input id="cpCur" class="cell-in" type="password" autocomplete="current-password">') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+    finLabelWrap('New password', '<input id="cpNew" class="cell-in" type="password" autocomplete="new-password">') +
+    finLabelWrap('New password again', '<input id="cpNew2" class="cell-in" type="password" autocomplete="new-password">') +
+    '</div>' +
+    '<div class="hint" style="margin-top:10px">' + inlineIcon('lock') + '<span>At least 8 characters, and different ' +
+    'from the current one. Stored as a bcrypt hash — nobody can read it back, which is also why an admin resetting ' +
+    'it mints a new one rather than telling you the old one.</span></div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:14px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('changePwCommit') + '>' + icon('check') + 'Change password</button></div>');
+}
+async function commitChangePassword() {
+  var v = function (id) { var el = document.getElementById(id); return el ? String(el.value || '') : ''; };
+  if (v('cpNew') !== v('cpNew2')) { toast('They do not match', 'Type the new password the same way twice'); return; }
+  try { await api.changeMyPassword(v('cpCur'), v('cpNew')); }
+  catch (e) { toast('Not changed', String((e && e.message) || e)); return; }
+  closeM();
+  toast('Password changed', 'You are signed out on every other device');
+  return render('settings');
+}
+
+/* ============================================================================
    ONE DELEGATED LISTENER — every data-act in the app lands here
    ========================================================================== */
 var ACTIONS = {
@@ -2276,7 +2616,7 @@ var ACTIONS = {
   /* the notify-picker's "everyone" shortcut — Tom's one-click on the event
      flow. Never the default; always one deliberate click. */
   notifyAll:     function () {
-    NOTIFY_SEL = USERS.filter(function (u) { return u.username !== ME; })
+    NOTIFY_SEL = activeUsers().filter(function (u) { return u.username !== ME; })
       .map(function (u) { return u.username; });
     repaintNotifyRow();
     var p = document.getElementById('notifyPop');
@@ -2308,6 +2648,20 @@ var ACTIONS = {
   notifPref:     function (t, id, k) { return notifPrefAct(k); },
   openOutbox:    function () { return render('outbox'); },
   runSweep:      function () { return runSweepAct(); },
+  /* people admin — the Team view's controls (admin-only, server-enforced) */
+  userAdd:              function () { return openAddPerson(); },
+  userAddCommit:        function () { return commitAddPerson(); },
+  userEdit:             function (t, id) { return openEditPerson(id); },
+  userEditCommit:       function () { return commitEditPerson(); },
+  userReset:            function (t, id) { return openResetPassword(id); },
+  userResetCommit:      function (t, id) { return commitResetPassword(id); },
+  userDeactivate:       function (t, id) { return openDeactivate(id); },
+  userDeactivateCommit: function (t, id) { return commitSetActive(id, false); },
+  userActivate:         function (t, id) { return commitSetActive(id, true); },
+  copyTempPw:           function () { return copyTempPwAct(); },
+  /* passwords */
+  changePw:       function () { return openChangePassword(); },
+  changePwCommit: function () { return commitChangePassword(); },
   closeModal:    function () { closeM(); closeNotifyPop(); },
   toggleTheme:   function () { toggleTheme(); },
   /* notes + mentions (notes pass) */
@@ -2449,8 +2803,12 @@ async function submitLogin() {
   LOGIN.busy = true;
   if (go) { go.classList.add('busy'); go.disabled = true; }
   try {
-    await api.login(String(u).trim(), p);
+    var me = await api.login(String(u).trim(), p);
     closeLogin();
+    /* A temp password gets you a session and no further. The overlay goes up
+       BEFORE anything is hydrated or rendered, so nobody works a whole day on
+       a password an admin read off their screen. */
+    if (me && me.must_change) { openPwGate(null); return; }
     await hydrateSession();
     var r = LOGIN.resume; LOGIN.resume = null;
     if (r) await r(); else await render('projects');
@@ -2582,6 +2940,9 @@ async function boot() {
     var me = null;
     try { me = await api.currentUser(); } catch (_) { me = null; }
     if (!me) { openLogin(null, null); return; }
+    /* A returning visit never passes through the login form, so the forced
+       change has to be re-asserted here or reloading the page skips it. */
+    if (me.must_change) { openPwGate(null); return; }
     await hydrateSession();
     return render('projects');
   }

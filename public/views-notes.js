@@ -255,7 +255,10 @@ function mentionToken(ta) {
 }
 function mentionMatches(token) {
   var t = String(token).toLowerCase();
-  return USERS.filter(function (u) {
+  /* the server's mention resolver already refuses inactive usernames
+     (lib/mentions.js), so offering one here would be a suggestion that
+     silently fails to notify anybody */
+  return activeUsers().filter(function (u) {
     return u.name.split(' ')[0].toLowerCase().indexOf(t) === 0 || u.username.toLowerCase().indexOf(t) === 0;
   });
 }

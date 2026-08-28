@@ -140,10 +140,61 @@ function viewFiles(shows) {
 }
 
 /* ============================================================================
-   TEAM & ROLES — permission matrix
+   TEAM & ROLES — the roster, the permission matrix, and people admin
+   ----------------------------------------------------------------------------
+   "I want to be able to create and manage users and permissions… people come
+   and go" (Tom). Everything an admin needs to run the roster lives on this one
+   screen: add a person, change what they can do, reset a password they lost,
+   and switch somebody off when they leave.
+
+   DEACTIVATE, NEVER DELETE. A person who goes still owns steps, wrote notes,
+   filed reports and shows up all over the activity trail. Deleting the row
+   would orphan every one of those; deactivating refuses their login, ends
+   their sessions and takes them off every picker while leaving their name on
+   their work. That is why the inactive people are still ON this page, in their
+   own section — they are part of the record, not a mistake to be tidied away.
    ========================================================================== */
+function teamCanAdmin() { return CURRENT_USER.role === 'admin'; }
+
+function teamRowActions(u) {
+  if (!teamCanAdmin()) return '';
+  var isMe = u.username === CURRENT_USER.username;
+  return '<td class="team-acts">' +
+    '<button class="btn sm ghost" ' + act('userEdit', u.id) + ' title="Role, finance capability and profile">' +
+      icon('pencil') + 'Edit</button>' +
+    '<button class="btn sm ghost" ' + act('userReset', u.id) + ' title="Mint a new temporary password">' +
+      icon('lock') + 'Reset password</button>' +
+    (u.active === false
+      ? '<button class="btn sm ghost" ' + act('userActivate', u.id) + '>' + icon('check') + 'Reactivate</button>'
+      : '<button class="btn sm ghost" ' + act('userDeactivate', u.id) +
+        (isMe ? ' title="This would sign you out of your own account"' : '') + '>' +
+        icon('x') + 'Deactivate</button>') +
+    '</td>';
+}
+
+function teamRow(u, load, dim) {
+  var can = roleDefOf(u.role).can;
+  var canChips = can.length
+    ? '<div class="can-chips">' + can.map(function (c) { return rolePill(c); }).join('') + '</div>'
+    : '<span class="pill idle">— cannot assign</span>';
+  return '<tr' + (dim ? ' class="team-off"' : '') + '>' +
+    '<td><div class="ev-name"><span class="avatar" style="width:34px;height:34px;background:' + esc(u.color) + '">' +
+      esc(u.initials) + '</span><div><b>' + esc(u.name) + '</b><span>' + esc(u.title || u.username) + '</span></div></div></td>' +
+    '<td>' + rolePill(u.role) +
+      (u.finance ? ' <span class="tag fin" title="The finance capability — accounting rights without the admin role. Margin is visible to admins AND finance.">finance</span>' : '') +
+      (u.must_change ? ' <span class="tag" title="Still on the temporary password the server minted — they will be asked to change it when they sign in.">temp password</span>' : '') +
+      '</td>' +
+    '<td>' + typeTag(u.discipline) + '</td>' +
+    '<td>' + canChips + '</td>' +
+    '<td class="mono" style="color:var(--text-2)">' + (load[u.username] || 0) + '</td>' +
+    teamRowActions(u) + '</tr>';
+}
+
 function viewTeam(shows) {
-  /* "shows" column is computed now: how many shows each person owns a step on */
+  /* "shows" column is computed now: how many shows each person owns a step on.
+     Computed for EVERYONE, active or not: somebody who left this month still
+     owned steps on shows that are still running, and blanking that column
+     would be the first place the record quietly stopped telling the truth. */
   var load = {};
   USERS.forEach(function (u) { load[u.username] = 0; });
   shows.forEach(function (s) {
@@ -152,29 +203,65 @@ function viewTeam(shows) {
     [s.owner, s.on_site_poc].forEach(function (u) { if (u && !seen[u]) { seen[u] = 1; load[u] = (load[u] || 0) + 1; } });
   });
 
-  var countBy = function (role) { return USERS.filter(function (u) { return u.role === role; }).length; };
-  var rows = USERS.map(function (u) {
-    var can = roleDefOf(u.role).can;
-    var canChips = can.length ? '<div class="can-chips">' + can.map(function (c) { return rolePill(c); }).join('') + '</div>' : '<span class="pill idle">— cannot assign</span>';
-    return '<tr><td><div class="ev-name"><span class="avatar" style="width:34px;height:34px;background:' + esc(u.color) + '">' + esc(u.initials) + '</span><div><b>' + esc(u.name) + '</b><span>' + esc(u.title) + '</span></div></div></td>' +
-      '<td>' + rolePill(u.role) + (u.finance ? ' <span class="tag fin" title="The finance capability — accounting rights without the admin role. Margin is visible to admins AND finance.">finance</span>' : '') + '</td><td>' + typeTag(u.discipline) + '</td><td>' + canChips + '</td><td class="mono" style="color:var(--text-2)">' + (load[u.username] || 0) + '</td></tr>';
-  }).join('');
+  /* USERS holds whoever the read-through cache has seen. Split it here, and
+     count the STATS off the active list only — "4 admins" has to mean four
+     people who can actually sign in, or the number is worse than useless. */
+  var active = USERS.filter(function (u) { return u.active !== false; });
+  var inactive = USERS.filter(function (u) { return u.active === false; });
+  var countBy = function (role) { return active.filter(function (u) { return u.role === role; }).length; };
+  var admin = teamCanAdmin();
+  var demo = api.isDemo();
+
+  var cols = 5 + (admin ? 1 : 0);
+  var head = '<tr><th>Person</th><th>Role</th><th>Discipline</th><th>Can assign</th><th>Shows</th>' +
+    (admin ? '<th>Manage</th>' : '') + '</tr>';
+  var rows = active.map(function (u) { return teamRow(u, load, false); }).join('') ||
+    '<tr><td colspan="' + cols + '"><div class="empty">Nobody on the roster.</div></td></tr>';
+  var offRows = inactive.map(function (u) { return teamRow(u, load, true); }).join('');
 
   return '<div class="page-h"><div><h1>Team &amp; Roles</h1><div class="sub">Who’s on the roster, what they can do, and who can assign whom. Mirrors the e360 scheduler roster.</div></div>' +
-    '<button class="btn" ' + toastAttrs('Invite', 'Send a Showrunner invite by email') + '>' + icon('mail') + 'Invite person</button></div>' +
+    (admin
+      ? '<button class="btn primary" ' + act('userAdd') + '>' + icon('plus') + 'Add person</button>'
+      : '') + '</div>' +
+    (admin && demo
+      ? '<div class="callout"><div class="ci">' + icon('layers') + '</div><div><b>Demo data — these controls are a simulation</b>' +
+        '<p>No Showrunner server answered on boot, so adding a person, changing a role or resetting a password ' +
+        'happens only in this browser tab and is gone on reload. The rules are the real ones — the same username ' +
+        'validation, the same refusal to strand the last admin — so what you learn here is what the server does.</p></div></div>'
+      : '') +
     '<div class="stats">' +
-    '<div class="stat accent"><div class="rail-c" style="background:var(--accent)"></div><div class="k">People</div><div class="v">' + USERS.length + '</div></div>' +
+    '<div class="stat accent"><div class="rail-c" style="background:var(--accent)"></div><div class="k">People</div><div class="v">' + active.length + '</div></div>' +
     '<div class="stat"><div class="rail-c" style="background:var(--accent)"></div><div class="k">Admins</div><div class="v">' + countBy('admin') + '</div></div>' +
     '<div class="stat"><div class="rail-c" style="background:var(--info)"></div><div class="k">Managers</div><div class="v" style="color:var(--info)">' + countBy('manager') + '</div></div>' +
     '<div class="stat"><div class="rail-c" style="background:var(--go)"></div><div class="k">PMs</div><div class="v" style="color:var(--go)">' + countBy('pm') + '</div></div>' +
     '<div class="stat"><div class="rail-c" style="background:var(--warn)"></div><div class="k">Techs</div><div class="v" style="color:var(--warn)">' + countBy('tech') + '</div></div>' +
     '</div>' +
     '<div class="card" style="margin-bottom:16px"><div class="card-h"><h3>Roster</h3><span class="pill idle">' + countBy('viewer') + ' read-only viewer</span></div>' +
-    '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Person</th><th>Role</th><th>Discipline</th><th>Can assign</th><th>Shows</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>' +
+    '<div class="tbl-wrap"><table class="tbl"><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div></div>' +
+
+    /* The inactive section only exists when somebody is in it — an empty
+       "Inactive" header on a company that has never lost anyone is noise. */
+    (offRows
+      ? '<div class="card" style="margin-bottom:16px"><div class="card-h"><h3>Inactive</h3>' +
+        '<span class="pill idle">' + inactive.length + ' no longer signing in</span></div>' +
+        '<div class="tbl-wrap"><table class="tbl"><thead>' + head + '</thead><tbody>' + offRows + '</tbody></table></div>' +
+        '<div class="perm-note">' + inlineIcon('lock') + ' Nothing was deleted. These people cannot sign in and ' +
+        'do not appear in owner pickers, crew lists or @mentions — but every step they owned, note they wrote and ' +
+        'report they filed still carries their name, everywhere in the app.' +
+        (admin ? ' Reactivate puts somebody straight back on the roster; they keep their old password unless you reset it.' : '') +
+        '</div></div>'
+      : '') +
+
     '<div class="ov" style="grid-template-columns:1.1fr 1fr">' +
     '<div class="panel"><h3>Who can assign whom</h3>' + assignMatrix() +
     '<div class="perm-note">Rows are the person assigning; columns are the role being assigned. Assignment flows down the chain — a PM can hand work to techs and viewers on their own events, but never to a manager or admin.</div></div>' +
-    '<div class="panel"><h3>Roles</h3><div class="role-defs">' + ROLE_ORDER.map(roleDef).join('') + '</div></div>' +
+    '<div class="panel"><h3>Roles</h3><div class="role-defs">' + ROLE_ORDER.map(roleDef).join('') +
+    (admin
+      ? '<div class="perm-note" style="margin-top:12px">' + inlineIcon('lock') + ' <b>finance</b> is a capability, ' +
+        'not a rank: it grants margin visibility and PO approval without making somebody an admin. That is how ' +
+        'Candice approves purchase orders while staying a manager.</div>'
+      : '') +
+    '</div></div>' +
     '</div>';
 }
 function assignMatrix() {
@@ -285,8 +372,14 @@ function viewSettings(ctx) {
         row('Mode', '<span style="color:var(--go)">Live · API</span>') +
         row('Signed in as', esc(CURRENT_USER.name) + ' · ' + esc(CURRENT_USER.username)) +
         row('Role', esc(roleName(CURRENT_USER.role)) + (CURRENT_USER.finance ? ' · finance capability' : '')) +
-        '<div class="set-row"><span class="k">Session</span><span class="v"><button class="btn sm ghost" ' + act('logout') + '>' + icon('lock') + 'Sign out</button></span></div>')) +
-    card('gear', 'Workspace', '<p>e360 Sport control-room workspace.</p>' + row('Organization', 'E360 Sport') + row('Members', USERS.length) + row('Event types', Object.keys(EVENT_TYPES).length) +
+        row('Password', CURRENT_USER.must_change
+          ? '<span style="color:var(--warn)">temporary — change it</span>'
+          : '<span style="color:var(--go)">yours</span>') +
+        '<div class="set-row"><span class="k">Session</span><span class="v" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">' +
+        '<button class="btn sm ghost" ' + act('changePw') + '>' + icon('lock') + 'Change password</button>' +
+        '<button class="btn sm ghost" ' + act('logout') + '>' + icon('lock') + 'Sign out</button>' +
+        '</span></div>')) +
+    card('gear', 'Workspace', '<p>e360 Sport control-room workspace.</p>' + row('Organization', 'E360 Sport') + row('Members', activeUsers().length) + row('Event types', Object.keys(EVENT_TYPES).length) +
       '<div class="set-row"><span class="k">Theme</span><span class="switch' + (isLight ? '' : ' on') + '" id="setTheme" ' + act('toggleTheme') + '><i></i></span></div>') +
     card('server', 'E360 NAS', '<p>Source files + heavy binaries. The DB stores a path + cached render; byte-serving is a deferred infra dependency.</p>' + row('Mount', '\\\\e360-nas\\showrunner') + row('Status', '<span style="color:var(--go)">reachable</span>') + row('Convention', 'P{id}-{slug}\\S{id}-{slug}\\{kind}')) +
     card('send', 'Staffing scheduler', '<p>Downstream system of record (e360-staffing3). Push-to-scheduler maps a show onto /api/events + child rows.</p>' + row('Base URL', 'SCHEDULER_BASE_URL') + row('Auth', 'service token') + row('Mode', 'dry-run default')) +

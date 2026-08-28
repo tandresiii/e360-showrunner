@@ -54,6 +54,22 @@ var ROSTER = {};                                  /* username -> user */
 var USERS_BY_ID = {};
 USERS.forEach(function (u) { ROSTER[u.username] = u; USERS_BY_ID[u.id] = u; });
 
+/* THE PICKER ROSTER — everybody who can still be handed work.
+   ---------------------------------------------------------------------------
+   USERS is the read-through cache and keeps every person it has ever seen,
+   deactivated ones included, because the app has to be able to render the name
+   on work a former teammate did. The moment an admin opens Team & Roles the
+   store also holds the people who have LEFT (that view asks for `?all=1`), and
+   from then on any picker reading USERS directly would offer them.
+
+   So: USERS is the RECORD, activeUsers() is the ROSTER. Anything that assigns,
+   notifies, crews or @mentions reads this one; anything that renders history
+   reads USERS. Getting that backwards is how a person who left in March ends
+   up on a call sheet in June. */
+function activeUsers() {
+  return USERS.filter(function (u) { return u.active !== false; });
+}
+
 /* ME stays a constant for now, but it READS from CURRENT_USER. */
 var CURRENT_USER = ROSTER.tandres;
 var ME = CURRENT_USER.username;

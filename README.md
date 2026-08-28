@@ -157,8 +157,11 @@ over HTTP exactly as a browser would: `initDB` idempotency, the seed loader,
 auth (including a legacy sha256 password being re-hashed to bcrypt), one
 representative call per route family, the whole agent-API happy path with its
 confidence bands and idempotent replay, the §9 guardrails, the recap content
-firewall, spec-bind, and **zero-orphan cascade integrity across every wired
-table**. Details and failure-reading guidance in **[SMOKE.md](./SMOKE.md)**.
+firewall, spec-bind, the **people-and-permissions lifecycle** (add · one-time
+temp password · forced change · edit · reset · deactivate/reactivate, plus the
+last-active-admin lockout guard), and **zero-orphan cascade integrity across
+every wired table**. Details and failure-reading guidance in
+**[SMOKE.md](./SMOKE.md)**.
 
 The SPA suites are harnesses that load `public/` into a DOM shim and drive the
 real render + action code (demo mode, API mode against a live server, and a

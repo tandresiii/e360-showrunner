@@ -295,7 +295,13 @@ function openModal(title, body) {
   $('#modal').innerHTML = '<div class="modal-h"><b>' + esc(title) + '</b><button class="iconbtn" ' + act('closeModal') + '>' + icon('x') + '</button></div><div class="modal-b">' + body + '</div>';
   $('#overlay').classList.add('on');
 }
-function closeM() { $('#overlay').classList.remove('on'); }
+function closeM() {
+  $('#overlay').classList.remove('on');
+  /* A one-time password reveal must not outlive its dialog. `var` hoisting in
+     app.js means the binding exists by the time any click can reach here, and
+     the guard covers the popup shells that load components.js without it. */
+  if (typeof TEMP_REVEAL !== 'undefined') TEMP_REVEAL = null;
+}
 
 /* ---------------- lane-agnostic pipeline access + RAG rollup ---------------- */
 /* iterate ONLY the lanes this show's project type defines, in config order */
@@ -540,7 +546,8 @@ function openRosterPicker(anchor, stepId) {
   var step = STEPS_BY_ID[Number(stepId)];
   if (!step) return;
   ROSTER_NOTIFY.on = true;
-  var opts = USERS.map(function (u) {
+  /* the ROSTER, not the record: you cannot assign work to somebody who left */
+  var opts = activeUsers().map(function (u) {
     var on = u.username === step.owner;
     return '<button class="rp-opt ' + (on ? 'on' : '') + '" ' + act('assignStep', step.id, String(u.id)) + '>' + av(u.username) +
       '<span class="ri2"><span class="rn">' + esc(u.name) + '</span><span class="rr">' + esc(roleName(u.role) + ' · ' + u.title) + '</span></span>' +

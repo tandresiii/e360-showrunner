@@ -2681,6 +2681,309 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('16: the environment is restored and global fetch is the real one again',
      global.fetch === realFetch && !process.env.FLEX_BASE_URL === !FLEX_ENV_BEFORE.url);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // 17. PEOPLE & PERMISSIONS — "people come and go" (Tom)
+  // ──────────────────────────────────────────────────────────────────────────
+  // The whole lifecycle over the wire: an admin adds somebody and reads out a
+  // server-minted temp password once, that person signs in and is told to
+  // replace it, an admin edits their role and capability, resets a password
+  // they lost, switches them off when they leave and back on when they return —
+  // and at no point can the last active admin be stranded, nor a temp password
+  // be recovered from any GET or from the audit trail.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('17. people & permissions — the roster lifecycle');
+
+  // ── ADD ──────────────────────────────────────────────────────────────────
+  const newHire = TAG + 'hire';
+  const created = await POST('/api/users', {
+    username: newHire, name: 'New Hire', role: 'tech', discipline: 'led',
+    title: 'Install / Field Tech', phone: '(414) 555-0199'
+  }, { token: A });
+  ok('17 ADD: POST /api/users creates the person', created.status === 200 && created.body.id > 0, created.body);
+  const HIRE_ID = created.body.id;
+  const TEMP1 = created.body.temp_password;
+  ok('17 ADD: the server MINTED a temp password (the caller sent none)',
+     typeof TEMP1 === 'string' && TEMP1.length >= 8, created.body);
+  ok('17 ADD: ...and set must_change on the row', created.body.must_change === true, created.body);
+  ok('17 ADD: initials were derived from the name', created.body.initials === 'NH', created.body.initials);
+  ok('17 ADD: a colour was auto-assigned from the palette',
+     /^#[0-9A-Fa-f]{6}$/.test(created.body.color || ''), created.body.color);
+  ok('17 ADD: the new person is ACTIVE', created.body.active === true, created.body.active);
+  const dupUser = await POST('/api/users', { username: newHire }, { token: A });
+  ok('17 ADD: a duplicate username is a 400 that says so',
+     dupUser.status === 400 && /already taken/i.test(dupUser.body.error || ''), dupUser.body);
+  const badName = await POST('/api/users', { username: '9nope' }, { token: A });
+  ok('17 ADD: a username that breaks the slug rule is a 400',
+     badName.status === 400 && /2–32/.test(badName.body.error || ''), badName.body);
+  const pmAdds = await POST('/api/users', { username: TAG + 'sneak' }, { token: PMT });
+  ok('17 GATE: a pm cannot add a person', pmAdds.status === 403, pmAdds.body);
+  const sneakRow = await pool.query('SELECT id FROM users WHERE username=$1', [TAG + 'sneak']);
+  ok('17 GATE: ...and the refusal wrote nothing', sneakRow.rows.length === 0);
+
+  // ── THE TEMP PASSWORD IS A ONE-TIME FACT ─────────────────────────────────
+  const hireGet = await GET(`/api/users/${HIRE_ID}`, { token: A });
+  ok('17 SECRET: no GET returns the temp password',
+     hireGet.status === 200 && !JSON.stringify(hireGet.body).includes(TEMP1), hireGet.body);
+  const rosterAll = await GET('/api/users?all=1', { token: A });
+  ok('17 SECRET: ...nor does the full roster listing',
+     !JSON.stringify(rosterAll.body).includes(TEMP1));
+  const actAfterCreate = await pool.query(
+    `SELECT action, detail FROM activity WHERE action LIKE 'user.%' ORDER BY id DESC LIMIT 20`);
+  ok('17 SECRET: the activity trail records the act and NEVER the password',
+     actAfterCreate.rows.some((r) => r.action === 'user.create' && r.detail.includes(newHire))
+     && !actAfterCreate.rows.some((r) => (r.detail || '').includes(TEMP1)),
+     actAfterCreate.rows.slice(0, 3));
+
+  // ── THE must_change FLOW ─────────────────────────────────────────────────
+  const hireLogin = await POST('/api/auth/login', { username: newHire, password: TEMP1 });
+  ok('17 FLOW: the temp password signs them in', hireLogin.status === 200 && !!hireLogin.body.token, hireLogin.body);
+  ok('17 FLOW: ...and the LOGIN RESPONSE carries must_change',
+     hireLogin.body.must_change === true, hireLogin.body);
+  const HIRET = hireLogin.body.token;
+  const hireMe = await GET('/api/auth/me', { token: HIRET });
+  ok('17 FLOW: GET /api/auth/me carries it too (a reload cannot skip the gate)',
+     hireMe.body.must_change === true, hireMe.body);
+  const wrongCur = await PUT('/api/me/password',
+    { current_password: 'not-it', password: 'a-real-password-1' }, { token: HIRET });
+  ok('17 FLOW: changing your own password without the current one is a 400',
+     wrongCur.status === 400 && /current password/i.test(wrongCur.body.error || ''), wrongCur.body);
+  const shortPw = await PUT('/api/me/password',
+    { current_password: TEMP1, password: 'short' }, { token: HIRET });
+  ok('17 FLOW: a new password under 8 characters is a 400', shortPw.status === 400, shortPw.body);
+  const samePw = await PUT('/api/me/password',
+    { current_password: TEMP1, password: TEMP1 }, { token: HIRET });
+  ok('17 FLOW: re-setting the SAME password is refused', samePw.status === 400, samePw.body);
+  // a second device, to prove the "other sessions" half of the rule
+  const HIRET2 = (await POST('/api/auth/login', { username: newHire, password: TEMP1 })).body.token;
+  const changed = await PUT('/api/me/password',
+    { current_password: TEMP1, password: 'a-real-password-1' }, { token: HIRET });
+  ok('17 FLOW: with the current password it goes through', changed.status === 200, changed.body);
+  ok('17 FLOW: ...and clears must_change', changed.body.must_change === false, changed.body);
+  const meAfter = await GET('/api/auth/me', { token: HIRET });
+  ok('17 FLOW: the changing device STAYS signed in',
+     meAfter.status === 200 && meAfter.body.loggedIn === true && meAfter.body.must_change === false, meAfter.body);
+  const otherAfter = await GET('/api/auth/me', { token: HIRET2 });
+  ok('17 FLOW: every OTHER device is signed out',
+     otherAfter.status === 200 && otherAfter.body.loggedIn === false, otherAfter.body);
+  const oldPwLogin = await POST('/api/auth/login', { username: newHire, password: TEMP1 });
+  ok('17 FLOW: the temp password no longer works', oldPwLogin.status === 401, oldPwLogin.body);
+  const newPwLogin = await POST('/api/auth/login', { username: newHire, password: 'a-real-password-1' });
+  ok('17 FLOW: the new one does, with must_change cleared',
+     newPwLogin.status === 200 && newPwLogin.body.must_change === false, newPwLogin.body);
+
+  // ── EDIT ─────────────────────────────────────────────────────────────────
+  const edited = await PUT(`/api/users/${HIRE_ID}`, {
+    role: 'pm', finance: true, title: 'Project Manager', phone: '(414) 555-0200'
+  }, { token: A });
+  ok('17 EDIT: an admin sets role, capability and profile in one call',
+     edited.status === 200 && edited.body.role === 'pm' && edited.body.finance === true
+     && edited.body.title === 'Project Manager', edited.body);
+  const editLog = await pool.query(
+    `SELECT action, detail FROM activity WHERE action IN ('user.role','user.finance')
+     AND detail LIKE $1 ORDER BY id DESC`, [`%${newHire}%`]);
+  ok('17 EDIT: the role change and the capability grant are BOTH logged',
+     editLog.rows.some((r) => r.action === 'user.role')
+     && editLog.rows.some((r) => r.action === 'user.finance'), editLog.rows);
+  const selfPromote = await PUT(`/api/users/${HIRE_ID}`, { role: 'admin', finance: true },
+    { token: newPwLogin.body.token });
+  ok('17 GATE: a user editing THEMSELVES cannot change their own role or capability',
+     selfPromote.status === 200 && selfPromote.body.role === 'pm' && selfPromote.body.finance === true,
+     selfPromote.body);
+  const stillPm = await pool.query('SELECT role FROM users WHERE id=$1', [HIRE_ID]);
+  ok('17 GATE: ...the row is still a pm', stillPm.rows[0].role === 'pm', stillPm.rows[0]);
+  const badRole = await PUT(`/api/users/${HIRE_ID}`, { role: 'superuser' }, { token: A });
+  ok('17 EDIT: an unknown role is a 400 naming it',
+     badRole.status === 400 && /superuser/.test(badRole.body.error || ''), badRole.body);
+  const pmEditsOther = await PUT(`/api/users/${HIRE_ID}`, { title: 'nope' }, { token: TECHT });
+  ok('17 GATE: somebody else\'s profile is 403 for a non-admin', pmEditsOther.status === 403, pmEditsOther.body);
+
+  // ── RESET ────────────────────────────────────────────────────────────────
+  const HIRE_LIVE = (await POST('/api/auth/login',
+    { username: newHire, password: 'a-real-password-1' })).body.token;
+  const hireKey = await POST('/api/keys', { username: newHire, label: TAG + ' hire key' }, { token: A });
+  ok('17 RESET: the person holds a live agent key before the reset', hireKey.status === 200, hireKey.body);
+  const reset = await POST(`/api/users/${HIRE_ID}/reset-password`, {}, { token: A });
+  ok('17 RESET: an admin mints a new temp password', reset.status === 200 && !!reset.body.temp_password, reset.body);
+  const TEMP2 = reset.body.temp_password;
+  ok('17 RESET: it is a NEW value, not the first one', TEMP2 !== TEMP1);
+  ok('17 RESET: must_change is set again', reset.body.must_change === true, reset.body);
+  const liveAfterReset = await GET('/api/auth/me', { token: HIRE_LIVE });
+  ok('17 RESET: every session they held is destroyed',
+     liveAfterReset.body.loggedIn === false, liveAfterReset.body);
+  const keyAfterReset = await GET('/api/agent/whoami', { key: hireKey.body.key });
+  ok('17 RESET: ...and their agent keys are revoked', keyAfterReset.status === 401, keyAfterReset.body);
+  const resetLog = await pool.query(
+    `SELECT detail FROM activity WHERE action='user.password_reset' ORDER BY id DESC LIMIT 5`);
+  ok('17 RESET: the trail names WHO, never WHAT',
+     resetLog.rows.some((r) => r.detail === newHire)
+     && !resetLog.rows.some((r) => (r.detail || '').includes(TEMP2)), resetLog.rows);
+  const reLogin = await POST('/api/auth/login', { username: newHire, password: TEMP2 });
+  ok('17 RESET: the new temp password signs them in, must_change set',
+     reLogin.status === 200 && reLogin.body.must_change === true, reLogin.body);
+  const pmResets = await POST(`/api/users/${HIRE_ID}/reset-password`, {}, { token: PMT });
+  ok('17 GATE: a pm cannot reset anybody\'s password', pmResets.status === 403, pmResets.body);
+
+  // ── DEACTIVATE / REACTIVATE ──────────────────────────────────────────────
+  // A show step owned by this person, so the "history survives" claim is tested
+  // against a real row rather than asserted.
+  const hireStep = await POST('/api/steps', { show_id: S, lane: 'logistics', title: TAG + ' hire step',
+    owner: newHire, status: 'in_progress' }, { token: A });
+  ok('17 HISTORY: the person owns a step before they leave', hireStep.status === 200, hireStep.body);
+  const HIRE_SESSION = reLogin.body.token;
+  const deact = await PUT(`/api/users/${HIRE_ID}`, { active: false }, { token: A });
+  ok('17 LEAVE: an admin deactivates them', deact.status === 200 && deact.body.active === false, deact.body);
+  const rowStillThere = await pool.query('SELECT id, username, role FROM users WHERE id=$1', [HIRE_ID]);
+  ok('17 LEAVE: the ROW IS STILL THERE — deactivation is not deletion',
+     rowStillThere.rows.length === 1 && rowStillThere.rows[0].username === newHire, rowStillThere.rows);
+  const deactLogin = await POST('/api/auth/login', { username: newHire, password: TEMP2 });
+  ok('17 LEAVE: their login is refused with a CLEAR message, not "invalid password"',
+     deactLogin.status === 403 && /deactivated/i.test(deactLogin.body.error || ''), deactLogin.body);
+  const wrongPwDeact = await POST('/api/auth/login', { username: newHire, password: 'definitely-wrong' });
+  ok('17 LEAVE: ...but a WRONG password on that account is still the generic 401 — '
+     + 'the endpoint is not an account-existence oracle',
+     wrongPwDeact.status === 401 && !/deactivated/i.test(wrongPwDeact.body.error || ''), wrongPwDeact.body);
+  const deadSession = await GET('/api/auth/me', { token: HIRE_SESSION });
+  ok('17 LEAVE: the session they were holding is invalidated',
+     deadSession.body.loggedIn === false, deadSession.body);
+  const deadRead = await GET('/api/projects', { token: HIRE_SESSION });
+  ok('17 LEAVE: ...and it cannot read anything either', deadRead.status === 401, deadRead.status);
+
+  const workingRoster = await GET('/api/users', { token: PMT });
+  ok('17 ROSTER: the default roster is ACTIVE ONLY — pickers never offer them',
+     workingRoster.status === 200
+     && !workingRoster.body.some((u) => u.username === newHire), workingRoster.body.length);
+  const allRoster = await GET('/api/users?all=1', { token: A });
+  ok('17 ROSTER: ?all=1 returns them to an admin, flagged inactive',
+     allRoster.body.some((u) => u.username === newHire && u.active === false));
+  const pmAllRoster = await GET('/api/users?all=1', { token: PMT });
+  ok('17 ROSTER: ?all=1 from a non-admin still returns only the working roster',
+     !pmAllRoster.body.some((u) => u.username === newHire), pmAllRoster.body.length);
+  const hireByName = await GET(`/api/users/${newHire}`, { token: PMT });
+  ok('17 HISTORY: they still RESOLVE by username — every attribution surface needs this',
+     hireByName.status === 200 && hireByName.body.username === newHire
+     && hireByName.body.active === false, hireByName.body);
+  const stepStill = await GET(`/api/steps/${hireStep.body.id}`, { token: A });
+  ok('17 HISTORY: the step they owned still names them as owner',
+     stepStill.status === 200 && stepStill.body.owner === newHire, stepStill.body);
+  const showStill = await GET(`/api/shows/${S}`, { token: A });
+  ok('17 HISTORY: ...and the show renders with that step in it',
+     showStill.status === 200 && (showStill.body.steps || []).some((x) => x.owner === newHire));
+  const leaveLog = await pool.query(
+    `SELECT detail FROM activity WHERE action='user.active' ORDER BY id DESC LIMIT 3`);
+  ok('17 LEAVE: deactivation is logged', leaveLog.rows.some((r) => /deactivated/.test(r.detail || '')),
+     leaveLog.rows);
+
+  const react = await PUT(`/api/users/${HIRE_ID}`, { active: true }, { token: A });
+  ok('17 RETURN: reactivating puts them back', react.status === 200 && react.body.active === true, react.body);
+  const backRoster = await GET('/api/users', { token: PMT });
+  ok('17 RETURN: ...back on the working roster', backRoster.body.some((u) => u.username === newHire));
+  const backLogin = await POST('/api/auth/login', { username: newHire, password: TEMP2 });
+  ok('17 RETURN: ...and their old password still works — nothing was destroyed',
+     backLogin.status === 200, backLogin.body);
+  await PUT(`/api/users/${HIRE_ID}`, { active: false }, { token: A });   // park them off again
+
+  // ── THE LOCKOUT GUARD ────────────────────────────────────────────────────
+  // The foot-gun: the last admin walking out of their own admin rights. There
+  // is no recovery path in the app for a workspace with no active admin — it is
+  // psql, at night, from whoever still has the database URL. So the server
+  // counts, and refuses.
+  //
+  // The set-up matters as much as the assertion. `admNoFin` is a SECOND admin,
+  // so while he exists the guard must NOT fire: a rule that refuses every
+  // demotion is not a guard, it is a bug that happens to look like one. Only
+  // once he is out of the way does the last-admin refusal become correct.
+  const adminIdRow = await pool.query(`SELECT id FROM users WHERE username='admin'`);
+  const ADMIN_ID = adminIdRow.rows[0].id;
+  const admNoFinRow = await pool.query('SELECT id FROM users WHERE username=$1', [admNoFin]);
+  const ADMNF_ID = admNoFinRow.rows[0].id;
+  const otherAdmins = await pool.query(
+    `SELECT id, username FROM users WHERE role='admin' AND active IS NOT FALSE AND id <> $1`, [ADMIN_ID]);
+  ok('17 LOCKOUT: the fixture really does have more than one active admin to start',
+     otherAdmins.rows.length > 0, otherAdmins.rows.map((r) => r.username));
+
+  const demoteWhileCovered = await PUT(`/api/users/${ADMIN_ID}/role`, { role: 'manager' }, { token: A });
+  ok('17 LOCKOUT: with another admin in place, demoting one IS allowed',
+     demoteWhileCovered.status === 200 && demoteWhileCovered.body.role === 'manager',
+     demoteWhileCovered.body);
+  await PUT(`/api/users/${ADMIN_ID}/role`, { role: 'admin' }, { token: ADMNFT });   // put it back
+
+  // Now strip the cover: park every other active admin, leaving exactly one.
+  const strip = await pool.query(
+    `SELECT id, username FROM users WHERE role='admin' AND active IS NOT FALSE AND id <> $1`, [ADMIN_ID]);
+  for (const r of strip.rows) {
+    await PUT(`/api/users/${r.id}`, { active: false }, { token: A });
+  }
+  const soleCheck = await pool.query(
+    `SELECT id FROM users WHERE role='admin' AND active IS NOT FALSE`);
+  ok('17 LOCKOUT: exactly one active admin remains', soleCheck.rows.length === 1, soleCheck.rows);
+
+  const selfDeact = await PUT(`/api/users/${ADMIN_ID}`, { active: false }, { token: A });
+  ok('17 LOCKOUT: the last active admin cannot DEACTIVATE themselves',
+     selfDeact.status === 400 && /only active admin/i.test(selfDeact.body.error || ''), selfDeact.body);
+  const selfDemote = await PUT(`/api/users/${ADMIN_ID}`, { role: 'manager' }, { token: A });
+  ok('17 LOCKOUT: ...nor DEMOTE themselves',
+     selfDemote.status === 400 && /only active admin/i.test(selfDemote.body.error || ''), selfDemote.body);
+  const selfDemoteRoute = await PUT(`/api/users/${ADMIN_ID}/role`, { role: 'pm' }, { token: A });
+  ok('17 LOCKOUT: ...through the /role route either — a guard on one of two doors is no guard',
+     selfDemoteRoute.status === 400 && /only active admin/i.test(selfDemoteRoute.body.error || ''),
+     selfDemoteRoute.body);
+  // DELETE carries the same guard, but the self-delete check standing in front
+  // of it is what actually answers here — and by construction it always will:
+  // reaching the lockout branch on this route would need an ACTIVE admin
+  // deleting a DIFFERENT admin who is nonetheless the only active one, which
+  // cannot be true at the same time. The guard stays as belt-and-braces against
+  // a future refactor of that ordering; the reachable refusal is this one.
+  const selfDelete = await DEL(`/api/users/${ADMIN_ID}`, { token: A });
+  ok('17 LOCKOUT: ...and cannot delete the account out from under itself',
+     selfDelete.status === 400 && /your own account/i.test(selfDelete.body.error || ''), selfDelete.body);
+  const stillAdmin = await pool.query('SELECT role, active FROM users WHERE id=$1', [ADMIN_ID]);
+  ok('17 LOCKOUT: every refusal wrote NOTHING — still an active admin',
+     stillAdmin.rows[0].role === 'admin' && stillAdmin.rows[0].active !== false, stillAdmin.rows[0]);
+  const meStill = await GET('/api/auth/me', { token: A });
+  ok('17 LOCKOUT: ...and the admin is still signed in', meStill.body.loggedIn === true);
+
+  // The guard is written against the SET ("is this the only active admin?"),
+  // not against the caller ("are you doing this to yourself?"). Through HTTP
+  // those turn out to be the SAME rule, and it is worth writing down why rather
+  // than shipping an assertion that pretends otherwise: to demote somebody else
+  // you must be an active admin, and if you are, the target is not the only
+  // active admin. So there is no reachable "one admin strands another" case —
+  // the set-shaped guard simply has no false negatives, which is why it is
+  // written that way.
+  //
+  // What IS worth pinning: the guard is about the ROLE, not about being user
+  // id 1. A DIFFERENT admin account, the last one standing, hits the identical
+  // refusal — so nothing here is hardcoded to the seeded 'admin' row.
+  await PUT(`/api/users/${ADMNF_ID}`, { active: true }, { token: A });      // second admin back
+  // ...and he needs a NEW session: deactivating him a moment ago destroyed the
+  // one he had, which is the deactivation rule doing exactly its job.
+  const ADMNFT2 = (await POST('/api/auth/login',
+    { username: admNoFin, password: 'smokepass123' })).body.token;
+  ok('17 RETURN: a reactivated admin can sign in again', !!ADMNFT2);
+  await PUT(`/api/users/${ADMIN_ID}/role`, { role: 'manager' }, { token: ADMNFT2 });
+  const lastByOther = await PUT(`/api/users/${ADMNF_ID}`, { role: 'pm' }, { token: ADMNFT2 });
+  ok('17 LOCKOUT: a DIFFERENT admin account, left as the last one, hits the same refusal',
+     lastByOther.status === 400 && /only active admin/i.test(lastByOther.body.error || ''), lastByOther.body);
+  const lastByOtherDeact = await PUT(`/api/users/${ADMNF_ID}`, { active: false }, { token: ADMNFT2 });
+  ok('17 LOCKOUT: ...and cannot switch itself off either',
+     lastByOtherDeact.status === 400 && /only active admin/i.test(lastByOtherDeact.body.error || ''),
+     lastByOtherDeact.body);
+  // restore the fixture for the sections that follow
+  await PUT(`/api/users/${ADMIN_ID}/role`, { role: 'admin' }, { token: ADMNFT2 });
+  for (const r of strip.rows) {
+    await PUT(`/api/users/${r.id}`, { active: true }, { token: A });
+  }
+  const restored = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM users WHERE role='admin' AND active IS NOT FALSE`);
+  ok('17 LOCKOUT: the fixture is restored — the admins are back',
+     restored.rows[0].n === soleCheck.rows.length + strip.rows.length, restored.rows[0]);
+
+  const agentAddUser = await POST('/api/users', { username: TAG + 'agentmade' }, { key: K });
+  ok('17 GATE: an agent key cannot add a person (§9 route topology)', agentAddUser.status === 403,
+     agentAddUser.body);
+  const agentReset = await POST(`/api/users/${HIRE_ID}/reset-password`, {}, { key: K });
+  ok('17 GATE: ...nor reset one', agentReset.status === 403, agentReset.body);
+
   section('6. cascade integrity — a folder with a child of EVERY type');
   const before = await childCounts(P);
   ok('the smoke folder has children of every wired type',

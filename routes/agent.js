@@ -410,7 +410,13 @@ router.post('/tasks:batch', idempotent('tasks:batch'), asyncH(async (req, res) =
 
   // Validate EVERYTHING first, naming the index — one bad lane means nothing
   // is written at all.
-  const roster = (await pool.query('SELECT username FROM users')).rows.map((u) => u.username.toLowerCase());
+  // ACTIVE people only. This roster exists to answer "may this step be given to
+  // this person", and somebody who has left the company is not an answer to
+  // that question — an agent assigning them work would put a former teammate's
+  // name on a live task and on the call sheet built from it. The lookup that
+  // has to keep resolving them (attribution, history) is a different one.
+  const roster = (await pool.query('SELECT username FROM users WHERE active IS NOT FALSE'))
+    .rows.map((u) => u.username.toLowerCase());
   const prepared = [];
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i] || {};

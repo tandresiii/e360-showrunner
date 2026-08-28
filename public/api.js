@@ -727,6 +727,111 @@ var api = (function () {
     });
   }
 
+  /* ══════════════════════════════════════════════════════════════════════
+     PEOPLE ADMIN — the demo twins
+     ----------------------------------------------------------------------
+     Demo mode is a SIMULATION and the UI says so on every one of these, but
+     the simulation has to be honest about the RULES or it teaches the wrong
+     thing: the same username validation, the same auto-assigned colour and
+     initials, and above all the same last-active-admin refusal. Somebody
+     learning the Team view on the demo dataset should hit exactly the wall
+     the server would put in front of them.
+     ══════════════════════════════════════════════════════════════════════ */
+  /* The demo twins THROW, the way the rest of this file's demo branches
+     `fail(...)`. This turns one into the other so both modes reject with a
+     message the same catch block renders. */
+  function demoCall(fn) {
+    try { return ok(fn()); } catch (e) { return fail(String((e && e.message) || e)); }
+  }
+  var DEMO_PW_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+  function demoTempPassword() {
+    var s = '';
+    for (var i = 0; i < 12; i++) {
+      if (i && i % 4 === 0) s += '-';
+      s += DEMO_PW_ALPHABET.charAt(Math.floor(Math.random() * DEMO_PW_ALPHABET.length));
+    }
+    return s;
+  }
+  function demoInitials(name, username) {
+    var parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
+    return String(parts[0] || username || '').slice(0, 2).toUpperCase();
+  }
+  var DEMO_COLORS = ['#F4B740', '#59A9F0', '#8ED14A', '#E36FBE', '#35E0A1',
+                     '#F0616B', '#B98CF0', '#4ADEDE', '#F08C59', '#7C9FF2'];
+  function demoNextColor() {
+    var taken = {};
+    USERS.forEach(function (u) { taken[String(u.color || '').toUpperCase()] = 1; });
+    for (var i = 0; i < DEMO_COLORS.length; i++) {
+      if (!taken[DEMO_COLORS[i].toUpperCase()]) return DEMO_COLORS[i];
+    }
+    return DEMO_COLORS[USERS.length % DEMO_COLORS.length];
+  }
+  function demoIsAdmin() { return CURRENT_USER && CURRENT_USER.role === 'admin'; }
+  function demoActiveAdmins() {
+    return USERS.filter(function (u) { return u.role === 'admin' && u.active !== false; });
+  }
+  /* The mirror of lib/auth.js isLastActiveAdmin + assertNotLastAdmin. */
+  function demoLastAdminCheck(user, what) {
+    var admins = demoActiveAdmins();
+    if (admins.length === 1 && admins[0].id === user.id) {
+      throw new Error('This is the only active admin — ' + what + ' would leave nobody able to ' +
+                      'manage people or reset a password. Make somebody else an admin first.');
+    }
+  }
+  function demoCreateUser(b, username) {
+    if (!demoIsAdmin()) throw new Error('Adding a person is an admin act');
+    if (!username) throw new Error('A username is required');
+    if (!/^[a-z][a-z0-9_.-]{1,31}$/.test(username)) {
+      throw new Error('Username must be 2–32 characters: a letter, then letters, digits, _ . or -');
+    }
+    if (ROSTER[username]) throw new Error('That username is already taken');
+    var id = 1;
+    USERS.forEach(function (u) { if (u.id >= id) id = u.id + 1; });
+    var name = String(b.name || '').trim();
+    var u = { id: id, username: username, name: name || username,
+              initials: String(b.initials || '').trim().slice(0, 4) || demoInitials(name, username),
+              color: String(b.color || '').trim() || demoNextColor(),
+              role: ROLE_ORDER.indexOf(b.role) >= 0 ? b.role : 'viewer',
+              title: String(b.title || ''), discipline: String(b.discipline || ''),
+              phone: String(b.phone || ''), email: String(b.email || ''),
+              finance: !!b.finance, active: true, must_change: true };
+    USERS.push(u); ROSTER[username] = u; USERS_BY_ID[id] = u;
+    MENTION_LOOKUP = null;             /* a new name has to resolve in @mentions */
+    return { user: u, temp_password: demoTempPassword(), demo: true };
+  }
+  function demoUpdateUser(id, patch) {
+    var u = USERS_BY_ID[Number(id)];
+    if (!u) throw new Error('No such person');
+    var isAdmin = demoIsAdmin();
+    if (!isAdmin && CURRENT_USER.username !== u.username) throw new Error('Not allowed');
+    var wasActive = u.active !== false;
+    var nextActive = isAdmin && patch.active !== undefined ? !!patch.active : wasActive;
+    var nextRole = u.role;
+    if (isAdmin && patch.role !== undefined) {
+      if (ROLE_ORDER.indexOf(patch.role) < 0) throw new Error('“' + patch.role + '” is not a role');
+      nextRole = patch.role;
+    }
+    if (wasActive && !nextActive) demoLastAdminCheck(u, 'deactivating them');
+    if (u.role === 'admin' && nextRole !== 'admin') demoLastAdminCheck(u, 'changing their role');
+
+    ['name', 'initials', 'color', 'title', 'discipline', 'phone', 'email'].forEach(function (k) {
+      if (patch[k] !== undefined) u[k] = String(patch[k] || '');
+    });
+    if (isAdmin && patch.finance !== undefined) u.finance = !!patch.finance;
+    u.role = nextRole; u.active = nextActive;
+    MENTION_LOOKUP = null;
+    return u;
+  }
+  function demoResetPassword(id) {
+    if (!demoIsAdmin()) throw new Error('Resetting a password is an admin act');
+    var u = USERS_BY_ID[Number(id)];
+    if (!u) throw new Error('No such person');
+    u.must_change = true;
+    return { ok: true, username: u.username, temp_password: demoTempPassword(),
+             must_change: true, sessions_ended: false, demo: true };
+  }
+
   /* the file → proposal hop (DEVIATION 1). The caller holds a FILE id; the
      server resolves a PROPOSAL. One extra GET, not a refactor — and free when
      the bell already told us the proposal id. */
@@ -778,17 +883,77 @@ var api = (function () {
         return u;
       }, function (e) { if (e && e.status === 401) return null; throw e; });
     },
-    listUsers: function () {
-      if (!API()) return ok(USERS.slice());
-      return SR.get('/api/users').then(function (rows) {
+    /* The WORKING ROSTER by default — active people only, which is what every
+       picker, mention lookup and call sheet wants. `{all:true}` asks for the
+       people who have left as well and is for the Team view alone; the server
+       honours it for admins and quietly returns the working roster to anyone
+       else, so this never needs a role check on the client. */
+    listUsers: function (opts) {
+      var all = !!(opts && opts.all);
+      if (!API()) return ok(USERS.filter(function (u) { return all || u.active !== false; }));
+      return SR.get('/api/users' + SR.qs({ all: all ? 1 : null })).then(function (rows) {
         (rows || []).forEach(A.user);
-        return USERS.slice();
+        /* USERS is the read-through cache and keeps everyone it has ever seen,
+           so the FILTER has to be applied here rather than trusted from the
+           server's list — otherwise one Team-view visit leaves deactivated
+           people in every picker for the rest of the session. */
+        return USERS.filter(function (u) { return all || u.active !== false; });
       });
     },
     getUser: function (username) {
       if (!API()) return ok(ROSTER[username] || null);
       if (ROSTER[username]) return ok(ROSTER[username]);
       return SR.get('/api/users/' + encodeURIComponent(username)).then(A.user, function () { return null; });
+    },
+
+    /* ---- people admin (admin-only, server-enforced) ---------------------- */
+    /* The temp password comes back on `temp_password` in THIS response and in
+       no other. Nothing caches it, and the view shows it once. */
+    createUser: function (payload) {
+      var b = payload || {};
+      var username = String(b.username || '').toLowerCase().trim();
+      if (!API()) return demoCall(function () { return demoCreateUser(b, username); });
+      return SR.post('/api/users', {
+        username: username, name: b.name || '', initials: b.initials || '',
+        role: b.role || 'viewer', finance: !!b.finance, title: b.title || '',
+        discipline: b.discipline || '', phone: b.phone || '', email: b.email || '',
+        color: b.color || ''
+      }).then(function (r) {
+        /* The temp password is lifted OFF the record before it is absorbed.
+           A.user merges every key it is handed into the canonical roster
+           object and keeps it for the life of the session — so leaving the
+           field on would park a live credential in a store the whole app
+           reads. It travels back to the caller on its own, is rendered once,
+           and is referenced by nothing afterwards. */
+        var temp = r && r.temp_password ? String(r.temp_password) : null;
+        if (r) delete r.temp_password;
+        return { user: A.user(r), temp_password: temp };
+      });
+    },
+    updateUser: function (id, patch) {
+      if (!API()) return demoCall(function () { return demoUpdateUser(id, patch || {}); });
+      return SR.put('/api/users/' + Number(id), patch || {}).then(A.user);
+    },
+    setUserActive: function (id, on) {
+      if (!API()) return demoCall(function () { return demoUpdateUser(id, { active: !!on }); });
+      return SR.put('/api/users/' + Number(id), { active: !!on }).then(A.user);
+    },
+    resetUserPassword: function (id) {
+      if (!API()) return demoCall(function () { return demoResetPassword(id); });
+      return SR.post('/api/users/' + Number(id) + '/reset-password', {});
+    },
+    /* Requires the current password — the server checks it, and demo mode says
+       out loud that it did not. */
+    changeMyPassword: function (current, next) {
+      if (!String(current || '')) return fail('Your current password is required');
+      if (String(next || '').length < 8) return fail('The new password must be at least 8 characters');
+      if (String(next) === String(current)) return fail('The new password must be different from the current one');
+      if (!API()) {
+        CURRENT_USER.must_change = false;
+        return ok({ ok: true, must_change: false, demo: true });
+      }
+      return SR.put('/api/me/password', { current_password: current, password: next })
+        .then(function (r) { CURRENT_USER.must_change = false; return r; });
     },
 
     /* ---- projects ------------------------------------------------------ */
