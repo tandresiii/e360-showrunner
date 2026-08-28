@@ -658,6 +658,22 @@ client in the container. **Tom's hand:** update that package, then delete the
 the direct path is healed and the relay hop can go. To test without a deploy,
 set `TAILSCALE_FORCE_DERP=0` as a Railway variable — it overrides the Dockerfile.
 
+### Also found, and still Tom's
+
+Step 4 reads the real certificate, and the NAS is presenting one that
+**expired on 30 June 2023** — `CN=synology`, issued by `Synology Inc. CA`,
+`SAN: DNS:synology`, `verifyError: CERT_HAS_EXPIRED`. Bytes move today only
+because `ALLOW_SELF_SIGNED=1` turns verification off for this one host, and the
+transport is an authenticated WireGuard tunnel underneath, so the practical risk
+is low. But *"self-signed"* was a guess and *"expired for three years"* is a
+measurement, and the honest description of the current posture is **no
+certificate verification at all**.
+
+The cure is R5a: `tailscale cert` on the NAS issues a real, auto-renewing
+certificate for its tailnet name. When that is in place, point `NAS_WEBDAV_URL`
+at the MagicDNS name, drop the allowance, and re-run the probe — step 4 should
+say `wouldVerify: true` and health should read `storageTls: "system-trust"`.
+
 ### The rest
 
 | Symptom | Almost always | Fix |
