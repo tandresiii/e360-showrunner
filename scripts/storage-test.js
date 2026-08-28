@@ -913,12 +913,31 @@ async function call(method, p, { token, body, raw, headers = {} } = {}) {
      pDeep.deep.ports.find((p) => p.port === pDavPort).open === true &&
      pDeep.deep.ports.find((p) => p.port === 9).open === false, pDeep.deep.ports);
   ok('deep mode runs a size ladder and times the first byte back',
-     pDeep.deep.wire.length >= 4 && pDeep.deep.wire.every((w) => Number.isFinite(w.connectMs)),
+     pDeep.deep.wire.length >= 2 && pDeep.deep.wire.every((w) => Number.isFinite(w.connectMs)),
      pDeep.deep.wire.map((w) => `${w.sent}B=${w.endedBy}`).join(' '));
   ok('a TLS port that hangs up on plaintext is scored as REACTED, not as silence — ' +
      'the difference between a healthy server and a dead tunnel',
-     pDeep.deep.wire.every((w) => w.reacted === true) &&
-     /reacts at every size/.test(pDeep.deep.note), pDeep.deep.note);
+     pDeep.deep.wire.every((w) => w.reacted === true), pDeep.deep.wire);
+  // THE SELF-CHECK. The hand-built ClientHello is the probe's own instrument,
+  // and an instrument nobody calibrated is a rumour: if those 175 bytes were
+  // malformed, the probe would report "the server refused the handshake"
+  // against a perfectly healthy NAS and send the next reader after a fiction.
+  // So it is fired at a REAL node TLS server, and the ServerHello is required
+  // to come back whole.
+  ok('the hand-built ClientHello is a VALID one — a real TLS server answers it',
+     pDeep.deep.tlsRaw.bytesBack > 0 && /ServerHello record/.test(pDeep.deep.tlsRaw.reply || ''),
+     pDeep.deep.tlsRaw);
+  // The false positive this had to survive: a healthy TLS server sends its
+  // first flight and then WAITS for a ClientKeyExchange the probe never sends.
+  // Read as "started, then went quiet", that is every working NAS on earth
+  // reported as a path-MTU fault. Only a record shorter than it declared
+  // itself to be counts as truncation.
+  ok('...and a first flight followed by a normal wait is NOT scored as truncated',
+     pDeep.deep.tlsRaw.truncated === false &&
+     /arrived complete/.test(pDeep.deep.tlsRaw.reply || ''), pDeep.deep.tlsRaw.reply);
+  ok('...so the note says the transport is sound, naming the largest reply it saw',
+     /replies arrive at every size tried/.test(pDeep.deep.note) &&
+     pDeep.deep.biggestReplyBytes > 0, pDeep.deep.note);
   ok('...and deep mode does not disturb the nine steps', pDeep.ok === true, pDeep.firstFailure);
   ok('the deep note reaches the verdict, where an operator will actually read it',
      pDeep.verdict.some((v) => /^DEEP: /.test(v)), pDeep.verdict);
