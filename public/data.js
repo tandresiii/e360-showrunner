@@ -93,9 +93,50 @@ var STATUS = {
 var STATUS_ALIAS = { wip: 'in_progress', block: 'blocked', crit: 'blocked', prog: 'in_progress' };
 function normStatus(s) { return STATUS[s] ? s : (STATUS_ALIAS[s] || 'todo'); }
 
-/* projects.stage / shows.stage — enum value -> display label */
-var STAGE_LABELS = { lead: 'Sales', planning: 'Planning', ready: 'Ready', scheduled: 'Scheduled', closed: 'Closed' };
+/* projects.stage / shows.stage — enum value -> display label.
+
+   F5 (Tom-confirmed, 2026-08-27). The COMMERCIAL LIFECYCLE lands as a UNION:
+   the legacy five stay exactly as they are — no stored row is ever rewritten —
+   and the six lifecycle values join them.
+
+     quoted → confirmed → in_progress → delivered → closed → archived
+
+   STAGE_ALIAS maps a legacy value onto its lifecycle POSITION so a chip, a
+   timeline and the push gate can ORDER an old row without touching it. It is a
+   display/ordering map and nothing more: the CONFIRM FACT is `confirmed_at`,
+   never the stage string, so a legacy row reads as confirmed-by-position with
+   no datestamp — which is the truth about it.
+
+   Mirrors lib/enums.js exactly. */
+var LEGACY_STAGES = ['lead', 'planning', 'ready', 'scheduled', 'closed'];
+var LIFECYCLE_STAGES = ['quoted', 'confirmed', 'in_progress', 'delivered', 'closed', 'archived'];
+var STAGES = LEGACY_STAGES.concat(LIFECYCLE_STAGES.filter(function (s) {
+  return LEGACY_STAGES.indexOf(s) < 0;
+}));
+var STAGE_ALIAS = { lead: 'quoted', planning: 'confirmed', ready: 'confirmed',
+                    scheduled: 'in_progress' };
+var STAGE_LABELS = {
+  lead: 'Sales', planning: 'Planning', ready: 'Ready', scheduled: 'Scheduled', closed: 'Closed',
+  quoted: 'Quoted', confirmed: 'Confirmed', in_progress: 'In progress',
+  delivered: 'Delivered', archived: 'Archived'
+};
 function stageLabel(s) { return STAGE_LABELS[s] || s; }
+function canonicalStage(s) {
+  var v = String(s || '');
+  if (LIFECYCLE_STAGES.indexOf(v) >= 0) return v;
+  return STAGE_ALIAS[v] || 'quoted';
+}
+function stageIndex(s) { return LIFECYCLE_STAGES.indexOf(canonicalStage(s)); }
+function stageAtLeast(s, min) { return stageIndex(s) >= LIFECYCLE_STAGES.indexOf(min); }
+/* THE confirm predicate — an explicit datestamp, or a stage POSITION at or past
+   'confirmed'. The second clause is what keeps every pre-existing row pushable. */
+function isConfirmed(row) {
+  if (!row) return false;
+  if (row.confirmed_at) return true;
+  return stageAtLeast(row.stage, 'confirmed');
+}
+/* a legacy row is confirmed by POSITION but has no datestamp to show for it */
+function confirmIsLegacy(row) { return !!row && !row.confirmed_at && isConfirmed(row); }
 
 /* shows.rag */
 var RAG = { go: ['go', 'On track'], warn: ['warn', 'At risk'], crit: ['crit', 'Late'], idle: ['idle', 'Sales'] };
@@ -159,6 +200,74 @@ var EVENT_TYPES = {
 };
 function typeDef(t) { return EVENT_TYPES[t] || EVENT_TYPES.led; }
 function typeLabel(t) { return typeDef(t).label; }
+
+/* ============================================================================
+   F4 · THE SCOPE LINE — "what we're delivering", structured per show
+   ----------------------------------------------------------------------------
+   Typed per event type (Tom, 2026-08-27): LED carries linear feet / cabinet
+   count / cabinet type + pitch; Print carries pieces / sq ft; `both` carries
+   BOTH sets — which is why these are flat fields and not a discriminated union.
+   A show that starts LED and grows a print package must not lose its LED
+   numbers on the way.
+
+   ONE renderer, mirroring lib/enums.js scopeLine() byte for byte, so the show
+   header, the season row, the projects table, the call-sheet header and the
+   recap stat all print the same string:
+
+     LED   · 800′ · 144× P10
+     Print · 12 pcs · 3,400 sq ft
+     LED + Print · 800′ · 144× P10 · 12 pcs · 3,400 sq ft
+   ========================================================================== */
+var SCOPE_KINDS = ['led', 'print', 'both'];
+var SCOPE_LABEL = { led: 'LED', print: 'Print', both: 'LED + Print' };
+var SCOPE_FIELD_LABEL = {
+  linear_feet: 'Linear feet', cabinet_count: 'Cabinets', cabinet_type: 'Cabinet type',
+  pitch: 'Pitch', print_pieces: 'Pieces', print_sqft: 'Square feet'
+};
+/* accepts either a scope object or a show row carrying the scope_* fields */
+function scopeOf(row) {
+  if (!row) return null;
+  if (row.kind !== undefined || row.linear_feet !== undefined) return row;
+  return {
+    kind: row.scope_kind || null,
+    linear_feet: row.scope_linear_feet, cabinet_count: row.scope_cabinet_count,
+    cabinet_type: row.scope_cabinet_type, pitch: row.scope_pitch,
+    print_pieces: row.scope_print_pieces, print_sqft: row.scope_print_sqft,
+    source: row.scope_source || 'manual'
+  };
+}
+function _scopeNum(v) {
+  if (v === null || v === undefined || v === '') return null;
+  var n = Number(v);
+  return isFinite(n) ? n : null;
+}
+function _scopeGrouped(v) {
+  var n = _scopeNum(v);
+  if (n === null) return '';
+  var r = Math.round(n * 100) / 100, parts = String(r).split('.');
+  return parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (parts[1] ? '.' + parts[1] : '');
+}
+function scopeParts(raw) {
+  var sc = scopeOf(raw);
+  if (!sc || !sc.kind || SCOPE_KINDS.indexOf(sc.kind) < 0) return [];
+  var out = [SCOPE_LABEL[sc.kind]];
+  if (sc.kind === 'led' || sc.kind === 'both') {
+    if (_scopeNum(sc.linear_feet) !== null) out.push(_scopeGrouped(sc.linear_feet) + '′');
+    if (_scopeNum(sc.cabinet_count) !== null) {
+      var spec = [sc.cabinet_type, sc.pitch].map(function (x) { return String(x || '').trim(); })
+        .filter(Boolean).join(' ');
+      out.push(_scopeGrouped(sc.cabinet_count) + '×' + (spec ? ' ' + spec : ''));
+    }
+  }
+  if (sc.kind === 'print' || sc.kind === 'both') {
+    if (_scopeNum(sc.print_pieces) !== null) out.push(_scopeGrouped(sc.print_pieces) + ' pcs');
+    if (_scopeNum(sc.print_sqft) !== null) out.push(_scopeGrouped(sc.print_sqft) + ' sq ft');
+  }
+  /* a kind with no numbers behind it is a label with nothing to say */
+  return out.length > 1 ? out : [];
+}
+function scopeLine(raw) { return scopeParts(raw).join(' · '); }
+function hasScope(raw) { return scopeParts(raw).length > 0; }
 
 /* ============================================================================
    RECORD BUILDERS — allocate integer ids, keep authoring terse
@@ -720,7 +829,110 @@ var P_NRL = {
   }]
 };
 
-var PROJECTS = [P_AVCA, P_MARLINS, P_LOVB, P_NW, P_STL, P_NRL];
+/* ---- 7 · Bucks Preseason Courtside — the CLOSEOUT-IN-PROGRESS folder ------
+   F2/F6 demo. The show has already happened (strike 11 days ago) and was
+   struck, so every crew member owes a show report. Two are in, two are not —
+   and one of the two outstanding is TOM's, so the demo user's own My Tasks and
+   bell carry a live nag the moment the app opens. The recap is drafted but not
+   sent, so the closeout is deliberately INCOMPLETE and you can watch the three
+   conditions turn green one at a time.
+   Deliberately thin: no expenses, no POs, no photos, no budget lines — this
+   folder exists to tell the closeout story, not to move the money numbers. */
+var P_BUCKS = {
+  id: 7, slug: 'bucks-preseason-courtside', name: 'Bucks Preseason Courtside',
+  client: 'Milwaukee Bucks', type: 'led', stage: 'delivered', owner: 'tvigon',
+  description: 'Two-night preseason courtside LED. Delivered — closeout running.',
+  jobs: [{ id: 20, project_id: 7, qb_job_number: '26-1088', client: 'Milwaukee Bucks',
+           deal_type: 'rental', description: 'Preseason courtside LED — two nights',
+           contract_value: 41200 }],
+  shows: [{
+    id: 12, project_id: 7, slug: 'bucks-preseason-courtside', name: 'Bucks Preseason Courtside',
+    venue: 'Fiserv Forum — Milwaukee, WI', city: 'Milwaukee, WI',
+    load_in_date: dayISO(-14), event_date: dayISO(-12), strike_date: dayISO(-11),
+    stage: 'delivered', rag: 'go', on_site_poc: 'bsawyer', owner: 'tvigon',
+    default_job_id: 20, scheduler_event_id: null, cabinets: 32,
+    confirmed_at: dayISO(-40) + 'T10:12', confirmed_by: 'tvigon',
+    struck_at: dayISO(-11) + 'T16:40', struck_by: 'bsawyer',
+    scope_kind: 'led', scope_linear_feet: 188, scope_cabinet_count: 32,
+    scope_cabinet_type: 'BP2V2', scope_pitch: 'P3.9', scope_source: 'manual',
+    scope_verified_at: dayISO(-40) + 'T10:14', scope_verified_by: 'tvigon',
+    load_in_time: '08:00', doors_time: '18:00', event_time: '19:00', strike_time: '22:15',
+    milestones: [mkMs('Load-in', -14), mkMs('Show', -12), mkMs('Strike', -11)],
+    summary: 'Two preseason nights, courtside only. Clean build, clean strike. Closeout is the ' +
+             'work that is left: two show reports still outstanding and the client recap is drafted ' +
+             'but not sent.',
+    source: 'closeout',
+    steps: [
+      mkStep('client', 'Scope confirmed', 'done', 'tvigon', -30),
+      mkStep('venue', 'Load-in window + floor protection', 'done', 'bsawyer', -16),
+      mkStep('crew', 'Assign install + show crew', 'done', 'tvigon', -18),
+      mkStep('gear', 'Pull + prep courtside kit', 'done', 'dvargas', -15),
+      mkStep('logistics', 'Truck to venue', 'done', 'bsawyer', -15),
+      mkStep('deliverables', 'Post-event client recap', 'in_progress', 'tvigon', 2)
+    ],
+    files: [], bookings: [], proofs: [], expenses: [],
+    chain: { content: [1, 2, 0, -30, 'tandres'], cabling: [1, 1, 2, -28, 'tandres'],
+             power: [1, 1, 1, -28, 'tandres'], pull: [1, 1, 1, -20, 'dvargas'] },
+    gear: { linked: true, pulled: true, elementId: 'a220432c-bucks' },
+    activity: [
+      mkAct('tvigon', 'confirmed the show', 'client committed — scheduler push unlocked', -40, '10:12', true),
+      mkAct('bsawyer', 'marked the show struck', '4 show reports now owed', -11, '16:40', true),
+      mkAct('aramos', 'filed their show report', 'document in the folder', -10, '09:20'),
+      mkAct('bsawyer', 'filed their show report', 'document in the folder', -9, '18:05')
+    ]
+  }]
+};
+
+/* ---- 8 · Brewers Concourse Wraps — the ARCHIVED folder --------------------
+   F6 demo. Everything closed out 75 days ago: recap sent, every report filed,
+   no money outstanding. Sixty days later the sweep archived it, which is why
+   it does NOT appear in the portfolio, the calendar, Files or My Tasks — and
+   why the Archive filter is the only way to see it. Season rollups and search
+   still reach it, and an admin can put it back with one click. */
+var P_BREWERS = {
+  id: 8, slug: 'brewers-concourse-wraps', name: 'Brewers Concourse Wraps',
+  client: 'Milwaukee Brewers', type: 'print', stage: 'archived', owner: 'lfarkos',
+  description: 'Concourse wrap package, opening series. Closed out and archived.',
+  archived_at: dayISO(-15) + 'T03:00', archived_by: 'system',
+  jobs: [{ id: 21, project_id: 8, qb_job_number: '26-1012', client: 'Milwaukee Brewers',
+           deal_type: 'sale', description: 'Concourse wraps — opening series',
+           contract_value: 28750 }],
+  shows: [{
+    id: 13, project_id: 8, slug: 'brewers-concourse-wraps', name: 'Brewers Concourse Wraps',
+    venue: 'American Family Field — Milwaukee, WI', city: 'Milwaukee, WI',
+    load_in_date: dayISO(-97), event_date: dayISO(-95), strike_date: dayISO(-95),
+    stage: 'archived', rag: 'go', on_site_poc: 'lfarkos', owner: 'lfarkos',
+    default_job_id: 21, scheduler_event_id: null, cabinets: 0,
+    confirmed_at: dayISO(-140) + 'T14:00', confirmed_by: 'lfarkos',
+    struck_at: dayISO(-95) + 'T15:00', struck_by: 'lfarkos',
+    closeout_complete_at: dayISO(-75) + 'T11:30',
+    archived_at: dayISO(-15) + 'T03:00', archived_by: 'system',
+    scope_kind: 'print', scope_print_pieces: 34, scope_print_sqft: 4120,
+    scope_source: 'manual', scope_verified_at: dayISO(-140) + 'T14:02',
+    scope_verified_by: 'lfarkos',
+    load_in_time: '06:00', event_time: '12:00',
+    milestones: [mkMs('Install', -97), mkMs('Opening series', -95)],
+    summary: 'Thirty-four concourse pieces, installed over two mornings. Closed out cleanly ' +
+             'and archived automatically sixty days later.',
+    source: 'closeout',
+    steps: [
+      mkStep('design', 'Artwork to venue dielines', 'done', 'jhawk', -30),
+      mkStep('approval', 'Client approval', 'done', 'lfarkos', -20),
+      mkStep('production', 'Release to print floor', 'done', 'lfarkos', -14),
+      mkStep('install', 'Install + client walk', 'done', 'aramos', -2)
+    ],
+    files: [], bookings: [], proofs: [], expenses: [],
+    chain: {}, gear: { linked: false, pulled: false, elementId: null },
+    activity: [
+      mkAct('lfarkos', 'confirmed the show', 'client committed', -140, '14:00', true),
+      mkAct('lfarkos', 'recap sent to Milwaukee Brewers', 'marked sent by hand', -76, '16:20', true),
+      mkAct('system', 'closeout complete', 'recap sent · 2/2 reports filed · finance clear', -75, '11:30', true),
+      mkAct('system', 'archived the show', 'auto-archived — closeout completed more than 60 days ago', -15, '03:00', true)
+    ]
+  }]
+};
+
+var PROJECTS = [P_AVCA, P_MARLINS, P_LOVB, P_NW, P_STL, P_NRL, P_BUCKS, P_BREWERS];
 
 /* ============================================================================
    FINANCE SEED — budgets · expenses · financial docs  (accounting pass)
@@ -1018,6 +1230,123 @@ function _chainNode(seed) {
   ALL_JOBS.forEach(function (j) {
     j.budget_total = (BUDGET_BY_JOB[j.id] || []).reduce(function (a, b) { return a + b.allotted; }, 0);
   });
+})();
+
+/* ============================================================================
+   F4 · SCOPE SEED + the SPEC the scope is verified against
+   ----------------------------------------------------------------------------
+   Every show gets the seven scope_* fields so no renderer ever branches on
+   hasOwnProperty; the ones that have actually been scoped get numbers.
+
+   SPEC_SCOPE stands in for what lib/speccheck.js scopeFromDocs() derives from a
+   bound .e360 / .nsf / .pcfg on the server: a STACK-AWARE cabinet count and a
+   cabinet type, and nothing else — a spec records neither linear feet (the
+   field dimensions are the playing surface, not the run of LED) nor pixel pitch
+   (it lives in nobody's file). Those two stay hand-entered on both sides.
+
+   Madison is seeded to DISAGREE with its bound spec on purpose: 40 sold, 44
+   stack-aware in the .nsf. That is not an error and nothing is overwritten —
+   it surfaces as a checker-style QUESTION, exactly like the chain checker's
+   findings, because two correct documents can legitimately disagree.
+   ========================================================================== */
+var SCOPE_SEED = {
+  1:  { kind: 'led',   linear_feet: 340,  cabinet_count: 48, cabinet_type: 'BP2V2', pitch: 'P3.9', source: 'spec',   by: 'tvigon',  off: -21 },
+  2:  { kind: 'print', print_pieces: 18,  print_sqft: 2140,                                        source: 'manual', by: 'lfarkos', off: -24 },
+  3:  { kind: 'led',   linear_feet: 220,  cabinet_count: 40, cabinet_type: 'BP2V2', pitch: 'P10',  source: 'manual', by: 'bsawyer', off: -9 },
+  4:  { kind: 'led',   linear_feet: 220,  cabinet_count: 40,                        pitch: 'P10',  source: 'manual', by: 'bsawyer', off: -9 },
+  9:  { kind: 'led',   linear_feet: 1180, cabinet_count: 96, cabinet_type: 'BP2V2', pitch: 'P3.9', source: 'spec',   by: 'tandres', off: -30 },
+  10: { kind: 'led',   linear_feet: 900,  cabinet_count: 72,                        pitch: 'P10',  source: 'manual', by: 'tvigon',  off: -18 },
+  11: { kind: 'both',  linear_feet: 560,  cabinet_count: 64,                        pitch: 'P6',
+        print_pieces: 12, print_sqft: 1650, source: 'manual', by: 'tvigon', off: -5 }
+};
+/* what a bound spec would answer for — modeled per show. Absent = nothing
+   bound that can speak to the scope, which is the normal early state. */
+var SPEC_SCOPE = {
+  1:  { available: true, cabinet_count: 48, cabinet_type: 'BP2V2', count_source: 'nsf',  stack_aware: true,  bound: ['e360', 'nsf', 'pcfg'] },
+  3:  { available: true, cabinet_count: 44, cabinet_type: 'BP2V2', count_source: 'nsf',  stack_aware: true,  bound: ['e360', 'nsf'] },
+  9:  { available: true, cabinet_count: 96, cabinet_type: 'BP2V2', count_source: 'e360', stack_aware: false, bound: ['e360'] },
+  12: { available: true, cabinet_count: 32, cabinet_type: 'BP2V2', count_source: 'nsf',  stack_aware: true,  bound: ['e360', 'nsf', 'pcfg'] }
+};
+function specScopeFor(showId) {
+  return SPEC_SCOPE[Number(showId)] ||
+    { available: false, cabinet_count: null, cabinet_type: null, count_source: null,
+      stack_aware: false, bound: [] };
+}
+/* divergence -> a QUESTION, never an error. Mirrors lib/speccheck scopeQuestions(). */
+function scopeQuestionsFor(show) {
+  var derived = specScopeFor(show && show.id);
+  var out = [];
+  if (!derived.available || !show) return out;
+  var sc = scopeOf(show);
+  var n = _scopeNum(sc.cabinet_count);
+  if (n !== null && derived.cabinet_count !== null && n !== derived.cabinet_count) {
+    out.push({ id: 'scope.cabinets', kind: 'question',
+      ask: 'The scope line says ' + n + ' cabinets and the bound ' + derived.count_source +
+           ' spec ' + (derived.stack_aware ? 'counts (stack-aware)' : 'counts') + ' ' +
+           derived.cabinet_count + '. Which is what we delivered?',
+      detail: 'Stacking is recorded differently at every node of the chain, so a gap here is often ' +
+              'the spec catching up with a change rather than either number being wrong. Nothing ' +
+              'has been overwritten.',
+      values: { scope: n, spec: derived.cabinet_count, source: derived.count_source,
+                stackAware: derived.stack_aware } });
+  }
+  var t = String(sc.cabinet_type || '').trim();
+  if (t && derived.cabinet_type && t.toLowerCase() !== derived.cabinet_type.toLowerCase()) {
+    out.push({ id: 'scope.cabtype', kind: 'question',
+      ask: 'The scope line says "' + t + '" and the bound spec says "' + derived.cabinet_type +
+           '". Which cabinet went on the wall?',
+      detail: 'The cabinet model drives pitch, power and the client-facing scope line, so the two ' +
+              'should agree before a recap quotes either.',
+      values: { scope: t, spec: derived.cabinet_type } });
+  }
+  return out;
+}
+
+(function seedScopeAndLifecycle() {
+  var SCOPE_FIELDS = ['scope_kind', 'scope_linear_feet', 'scope_cabinet_count',
+                      'scope_cabinet_type', 'scope_pitch', 'scope_print_pieces',
+                      'scope_print_sqft'];
+  ALL_SHOWS.forEach(function (s) {
+    SCOPE_FIELDS.forEach(function (k) { if (s[k] === undefined) s[k] = null; });
+    if (s.scope_source === undefined) s.scope_source = 'manual';
+    if (s.scope_verified_at === undefined) s.scope_verified_at = null;
+    if (s.scope_verified_by === undefined) s.scope_verified_by = null;
+    /* F5/F6 — every show carries the lifecycle columns, mostly null. A null
+       confirmed_at on a legacy stage is the honest state: confirmed by
+       POSITION, with no datestamp to show for it. */
+    ['confirmed_at', 'confirmed_by', 'struck_at', 'struck_by',
+     'closeout_complete_at', 'archived_at', 'archived_by'].forEach(function (k) {
+      if (s[k] === undefined) s[k] = null;
+    });
+    var seed = SCOPE_SEED[s.id];
+    if (seed) {
+      s.scope_kind = seed.kind || null;
+      s.scope_linear_feet = seed.linear_feet == null ? null : seed.linear_feet;
+      s.scope_cabinet_count = seed.cabinet_count == null ? null : seed.cabinet_count;
+      s.scope_cabinet_type = seed.cabinet_type || null;
+      s.scope_pitch = seed.pitch || null;
+      s.scope_print_pieces = seed.print_pieces == null ? null : seed.print_pieces;
+      s.scope_print_sqft = seed.print_sqft == null ? null : seed.print_sqft;
+      s.scope_source = seed.source || 'manual';
+      s.scope_verified_at = dayISO(seed.off == null ? -1 : seed.off) + 'T11:00';
+      s.scope_verified_by = seed.by || s.owner;
+    }
+  });
+  PROJECTS.forEach(function (p) {
+    if (p.archived_at === undefined) p.archived_at = null;
+    if (p.archived_by === undefined) p.archived_by = null;
+  });
+  /* Madison is the one show where the deal is recorded on the NEW vocabulary
+     with a real datestamp — every other pre-existing show keeps its legacy
+     stage and reads as confirmed-by-position. That contrast IS the F5 demo. */
+  var S_MAD = SHOWS_BY_ID[3];
+  if (S_MAD) {
+    S_MAD.stage = 'confirmed';
+    S_MAD.confirmed_at = dayISO(-16) + 'T15:40';
+    S_MAD.confirmed_by = 'bsawyer';
+    S_MAD.activity.unshift(mkAct('bsawyer', 'confirmed the show',
+      'client committed — scheduler push unlocked · job still on a TEMP number', -16, '15:40', true));
+  }
 })();
 
 /* ============================================================================
@@ -2171,6 +2500,25 @@ function schedDayTag(show, day) {
   mkCrew(S_MAD, { name: 'Mike Deroche', phone: '(608) 555-0144' }, 'Local stagehand', '07:30', null);
   mkCrew(S_MAD, { name: 'Sam Okafor', phone: '(608) 555-0171' }, 'Local stagehand · forklift cert', '07:30', null);
 
+  /* ---- Bucks (12) · the crew who now owe show reports (F2) ---------------
+     Four logins and one local hand. The local hand has NO login, so nobody can
+     ask him for a report and none is created — which is exactly the difference
+     the show owner needs to see between "five on the crew" and "four owe". */
+  var S_BUCK = SHOWS_BY_ID[12];
+  if (S_BUCK) {
+    mkCrew(S_BUCK, 'bsawyer', 'Show lead · on-site POC', '08:00', null);
+    mkCrew(S_BUCK, 'aramos', 'LED tech', '08:00', null);
+    mkCrew(S_BUCK, 'tandres', 'Systems', '09:00', null);
+    mkCrew(S_BUCK, 'dvargas', 'Gear · truck + prep', '07:00', null);
+    mkCrew(S_BUCK, { name: 'Curtis Vale', phone: '(414) 555-0182' }, 'Local hand', '08:00', null);
+  }
+  /* ---- Brewers (13) · the archived show's crew --------------------------- */
+  var S_BREW = SHOWS_BY_ID[13];
+  if (S_BREW) {
+    mkCrew(S_BREW, 'lfarkos', 'PM · client walk', '06:00', null);
+    mkCrew(S_BREW, 'aramos', 'Install lead', '06:00', null);
+  }
+
   /* every other show: fields exist (null) so renderers never branch on
      hasOwnProperty — and the Schedule tab shows its empty state. */
   ALL_SHOWS.forEach(function (s) {
@@ -2482,15 +2830,39 @@ function recapStripPhotos(showId, cap) {
 /* the closed list of fields recapFacts() may read — the firewall's layer A.
    Adding a field here is the deliberate act of widening the client surface. */
 var RECAP_SOURCES = {
+  /* F4 WIDENS THIS ROW, DELIBERATELY (mirrors lib/firewall.js). The seven
+     scope_* fields describe what the client bought — linear feet, cabinet
+     count, cabinet type, pitch, print pieces, square footage. Client-safe by
+     the only test that matters: none can be turned into a cost, a rate or a
+     margin, and the client already has them in the proposal they signed.
+     scope_verified_by / scope_verified_at are NOT here — who checked our
+     numbers internally is nobody's business but ours. */
   show:            ['name', 'venue', 'city', 'type', 'owner', 'on_site_poc', 'cabinets',
                     'event_date', 'load_in_date', 'strike_date',
-                    'load_in_time', 'doors_time', 'event_time', 'strike_time', 'client_poc'],
+                    'load_in_time', 'doors_time', 'event_time', 'strike_time', 'client_poc',
+                    'scope_kind', 'scope_linear_feet', 'scope_cabinet_count',
+                    'scope_cabinet_type', 'scope_pitch', 'scope_print_pieces',
+                    'scope_print_sqft'],
   project:         ['name', 'client', 'type'],
   step:            ['lane', 'status'],              /* structure only — never title/notes */
   schedule_item:   ['day', 'kind'],                 /* structure only — never title/detail */
   crew_assignment: [],                              /* COUNT only — no names, travel or phones */
   photo:           ['id', 'caption', 'taken_at', 'recap_pick', 'status']
 };
+
+/* ── LAYER A′ · THE TABLE GUARD (F2) ────────────────────────────────────────
+   RECAP_SOURCES says which FIELDS the generator may read; this says which
+   COLLECTIONS it may not touch at all. The tech show report is why it exists:
+   reports are internal, blunt and often unflattering, and TEAM_FEEDBACK is
+   explicit that "the recap content firewall must never read report bodies".
+
+   In demo mode there is no SQL to intercept, so the enforcement is structural
+   and asserted: TECH_REPORTS is a separate store that recapFacts() does not
+   name, and the harness proves it by planting a poisoned report body and
+   checking it reaches no recap. The server-side twin (lib/firewall.js
+   guardRecapQuery) throws on any SQL that so much as names one of these. */
+var RECAP_FORBIDDEN_STORES = ['TECH_REPORTS', 'NOTIF_OUTBOX', 'ALL_EXPENSES', 'ALL_POS',
+                              'BUDGET_LINES', 'ALL_NOTES', 'ALL_JOBS'];
 
 /* the vocabulary gate — the firewall's layer B */
 var RECAP_FORBIDDEN = [
@@ -2709,6 +3081,8 @@ function recapFacts(show) {
     loadInTime: show.load_in_time || null, doorsTime: show.doors_time || null,
     showTime: show.event_time || null, strikeTime: show.strike_time || null,
     cabinets: Number(show.cabinets) || 0,
+    /* F4 — the scope line, client-safe by the RECAP_SOURCES.show whitelist */
+    scope: scopeOf(show), scopeLine: scopeLine(show),
     crewSize: (show.crew_assignments || []).length,
     daysOnSite: days.length || _rcSpanDays(show),
     hasDoors: !!kinds.show, hasStrike: !!kinds.strike,
@@ -2802,10 +3176,20 @@ function buildRecapDraft(show) {
   /* ---- stats: client-safe fields ONLY. No money value is even readable
          from here — recapFacts() never returned one. -------------------------- */
   var stats = [];
-  if (f.eventDate) stats.push({ label: isPrint ? 'Install date' : 'Show date', value: _rcDateLong(f.eventDate) });
-  if (f.cabinets) stats.push({ label: 'LED cabinets', value: String(f.cabinets) });
-  if (f.crewSize) stats.push({ label: 'Crew on site', value: String(f.crewSize) });
-  if (f.daysOnSite) stats.push({ label: 'Days on site', value: String(f.daysOnSite) });
+  if (f.eventDate) stats.push({ key: 'date', label: isPrint ? 'Install date' : 'Show date', value: _rcDateLong(f.eventDate) });
+  /* F4 — the scope line leads when one exists: it is the single most client-
+     legible fact about the job, and it is exactly what the client bought. The
+     individual numbers follow, each under its own client-safe key. */
+  var sc = f.scope || {};
+  if (f.scopeLine) stats.push({ key: 'scope', label: 'Scope', value: f.scopeLine });
+  if (_scopeNum(sc.linear_feet) !== null) stats.push({ key: 'linear_feet', label: 'Linear feet of LED', value: String(_scopeNum(sc.linear_feet)) });
+  if (_scopeNum(sc.cabinet_count) !== null) stats.push({ key: 'cabinet_count', label: 'LED cabinets', value: String(_scopeNum(sc.cabinet_count)) });
+  else if (f.cabinets) stats.push({ key: 'cabinets', label: 'LED cabinets', value: String(f.cabinets) });
+  if (sc.pitch) stats.push({ key: 'pitch', label: 'Pixel pitch', value: String(sc.pitch) });
+  if (_scopeNum(sc.print_pieces) !== null) stats.push({ key: 'print_pieces', label: 'Printed pieces', value: String(_scopeNum(sc.print_pieces)) });
+  if (_scopeNum(sc.print_sqft) !== null) stats.push({ key: 'print_sqft', label: 'Square feet printed', value: String(_scopeNum(sc.print_sqft)) });
+  if (f.crewSize) stats.push({ key: 'crew', label: 'Crew on site', value: String(f.crewSize) });
+  if (f.daysOnSite) stats.push({ key: 'days', label: 'Days on site', value: String(f.daysOnSite) });
 
   return {
     headline: recapSafe(f.showName + ' — ' + (isPrint ? 'install' : 'show') + ' recap · ' + _rcDateLong(f.eventDate)) ||
@@ -2884,4 +3268,559 @@ function buildRecapDraft(show) {
     'headline, narrative, highlights + attendance', -2, '23:05'));
   S_AVCA.activity.unshift(mkAct('tvigon', 'approved the client recap',
     'locked for send — a human sends it, never the agent', -1, '08:20', true));
+})();
+
+
+/* ============================================================================
+   F2 · TECH SHOW REPORTS
+   ----------------------------------------------------------------------------
+   A DEDICATED STORE, not a deliverables kind — the same call the backend makes,
+   and for the same three reasons:
+
+     1. THE FIREWALL. recapFacts() must never be able to read a report body
+        (TEAM_FEEDBACK is explicit). Keeping reports out of ALL_DELIVERABLES
+        makes that structural rather than a promise, and the harness proves it
+        by planting a poisoned body and checking no recap can reach it.
+     2. SHAPE. A report is per-PERSON and REQUIRED. Deliverables have no
+        username and a draft/approved/sent lifecycle that is wrong here —
+        sign-off is NOT required.
+     3. NAGGING. "Who still owes theirs" is a join against the crew list, keyed
+        on (show, person), which a shared kind-discriminated array cannot hold.
+
+   Only crew with a LOGIN owe one: a local hire recorded by name has nobody to
+   ask. Filing is what completes the obligation; 'reviewed' is optional pm
+   bookkeeping and closeout never waits for it.
+   ========================================================================== */
+var TECH_REPORT_STATUSES = ['owed', 'filed', 'reviewed'];
+var TECH_REPORT_STATUS = {
+  owed:     { label: 'Owed',     short: 'owed',     pill: 'warn' },
+  filed:    { label: 'Filed',    short: 'filed',    pill: 'go' },
+  reviewed: { label: 'Reviewed', short: 'reviewed', pill: 'idle' }
+};
+/* pm+ sees every report on a show and may mark one reviewed; a tech sees their
+   own and never anyone else's. Mirrors lib/reports.js exactly. */
+var REPORT_VIEW_ALL_ROLES = { admin: 1, manager: 1, pm: 1 };
+function canViewAllReports(user) {
+  var u = user || CURRENT_USER;
+  return !!u && !!REPORT_VIEW_ALL_ROLES[u.role];
+}
+function canReviewReports(user) { return canViewAllReports(user); }
+function ownsReport(rep, user) {
+  var u = user || CURRENT_USER;
+  return !!rep && !!u && String(rep.username).toLowerCase() === String(u.username).toLowerCase();
+}
+function canReadReport(rep, user) { return canViewAllReports(user) || ownsReport(rep, user); }
+
+var _reportSeq = 0;
+var TECH_REPORTS = [], REPORTS_BY_ID = {};
+function mkReport(show, username, roleOnSite, x) {
+  x = x || {};
+  var crew = (show.crew_assignments || []).filter(function (c) { return c.username === username; })[0];
+  var r = { id: ++_reportSeq, show_id: show.id, project_id: show.project_id,
+            username: username, crew_assignment_id: crew ? crew.id : null,
+            role_on_site: roleOnSite || (crew ? crew.role_on_site : ''),
+            status: x.status || 'owed', body: x.body || '', file_id: x.file_id || null,
+            due_date: dayISO(x.dueOff == null ? -8 : x.dueOff),
+            requested_at: dayISO(x.reqOff == null ? -11 : x.reqOff) + 'T16:40',
+            filed_at: x.filedOff == null ? null : dayISO(x.filedOff) + 'T' + (x.filedTime || '09:20'),
+            reviewed_by: x.reviewed_by || null,
+            reviewed_at: x.reviewedOff == null ? null : dayISO(x.reviewedOff) + 'T10:00',
+            last_nagged_at: x.naggedOff == null ? null : dayISO(x.naggedOff) + 'T07:00',
+            nag_count: x.nag == null ? 1 : x.nag };
+  TECH_REPORTS.push(r); REPORTS_BY_ID[r.id] = r;
+  return r;
+}
+function reportsForShow(showId) {
+  return TECH_REPORTS.filter(function (r) { return r.show_id === Number(showId); })
+    .sort(function (a, b) { return a.username < b.username ? -1 : a.username > b.username ? 1 : 0; });
+}
+function reportFor(showId, username) {
+  var hit = null;
+  TECH_REPORTS.forEach(function (r) {
+    if (r.show_id === Number(showId) && r.username === username) hit = r;
+  });
+  return hit;
+}
+/* what a person still owes, across every show — the My Tasks nag */
+function reportsOwedBy(username, includeFiled) {
+  return TECH_REPORTS.filter(function (r) {
+    return r.username === username && (includeFiled || r.status === 'owed');
+  }).sort(function (a, b) { return (a.due_date || '9999').localeCompare(b.due_date || '9999'); });
+}
+/* the show owner's "waiting on" line */
+function reportSummary(showId) {
+  var rows = reportsForShow(showId);
+  var owed = rows.filter(function (r) { return r.status === 'owed'; });
+  return { total: rows.length, filed: rows.length - owed.length, owed: owed.length,
+           waiting_on: owed.map(function (r) { return r.username; }),
+           complete: rows.length > 0 && owed.length === 0 };
+}
+/* the crew who owe nothing because they have no login to ask */
+function reportlessCrew(showId) {
+  var s = SHOWS_BY_ID[Number(showId)];
+  return ((s && s.crew_assignments) || []).filter(function (c) { return !c.username; });
+}
+
+(function seedTechReports() {
+  var S_BUCK = SHOWS_BY_ID[12], S_BREW = SHOWS_BY_ID[13];
+  if (S_BUCK) {
+    /* two in, two out — and one of the two out is TOM's, so the demo user's own
+       My Tasks and bell carry a live nag from the moment the app opens. */
+    mkReport(S_BUCK, 'aramos', 'LED tech', {
+      status: 'filed', filedOff: -10, filedTime: '09:20',
+      body: 'Clean two nights. One cabinet in the north run came up with a dead quadrant on ' +
+            'first power — swapped it from the spare pack before doors, no show impact. The ' +
+            'courtside dolly wheels are getting rough, worth replacing before the next arena job. ' +
+            'Venue power was where they said it would be for once. 14 hours across both days.' });
+    mkReport(S_BUCK, 'bsawyer', 'Show lead · on-site POC', {
+      status: 'reviewed', filedOff: -9, filedTime: '18:05',
+      reviewed_by: 'tvigon', reviewedOff: -8,
+      body: 'Build ran an hour ahead. House AV gave us the feed early which is why. Only real ' +
+            'note: the load-in dock was double-booked with catering at 08:00 and we lost twenty ' +
+            'minutes waiting. Worth writing into the advance for next time. Strike was clean, ' +
+            'everything back on the truck by 22:40.' });
+    mkReport(S_BUCK, 'tandres', 'Systems', { status: 'owed', naggedOff: -2, nag: 3 });
+    mkReport(S_BUCK, 'dvargas', 'Gear · truck + prep', { status: 'owed', naggedOff: -2, nag: 3 });
+  }
+  if (S_BREW) {
+    mkReport(S_BREW, 'lfarkos', 'PM · client walk', {
+      status: 'reviewed', reqOff: -95, dueOff: -92, filedOff: -93, reviewedOff: -90,
+      reviewed_by: 'tvigon',
+      body: 'Two mornings, thirty-four pieces, no rework. Client walked it before first pitch ' +
+            'and signed off on the spot.' });
+    mkReport(S_BREW, 'aramos', 'Install lead', {
+      status: 'filed', reqOff: -95, dueOff: -92, filedOff: -94,
+      body: 'Adhesive behaved once the concourse warmed up. Two panels needed a second pass on ' +
+            'the seam. Nothing outstanding.' });
+  }
+})();
+
+/* ============================================================================
+   F3 · THE NOTIFICATION OUTBOX + per-user delivery preference
+   ----------------------------------------------------------------------------
+   The bell is unchanged and stays primary; this is the SECOND channel. Every
+   real delivery (assignment, mention, a notify-picker pick, a report nag) ALSO
+   queues here, subject to the recipient's own preference.
+
+   PREFS store DEVIATIONS ONLY — a person who never opens Settings has no row
+   and gets Tom's defaults: assignments + mentions immediately, the rest
+   digested. 'off' silences the EMAIL, never the bell.
+
+   The 'log' driver is the default and is not a stub: it records the delivery in
+   the activity trail. 'graph' is the Microsoft Graph skeleton — unconfigured it
+   answers a 501-shaped "mail not configured" and THE ITEM STAYS QUEUED, so the
+   day the mailbox exists the backlog delivers instead of having been discarded.
+   ========================================================================== */
+var NOTIFY_KINDS = ['assignment', 'mention', 'notify', 'report_nag', 'digest'];
+var NOTIFY_MODES = ['immediate', 'digest', 'off'];
+var NOTIFY_DEFAULT_MODE = { assignment: 'immediate', mention: 'immediate',
+                            notify: 'digest', report_nag: 'digest', digest: 'digest' };
+var NOTIFY_KIND_LABEL = {
+  assignment: 'Work assigned to me', mention: '@mentions of me',
+  notify: 'Someone chose to notify me', report_nag: 'Show reports I still owe'
+};
+var NOTIFY_MODE_LABEL = { immediate: 'Right away', digest: 'In a digest', off: 'Bell only' };
+var NOTIFY_STATUS_META = {
+  queued:  { label: 'Queued',  pill: 'warn' },
+  sent:    { label: 'Sent',    pill: 'go' },
+  skipped: { label: 'Skipped', pill: 'idle' },
+  failed:  { label: 'Failed',  pill: 'crit' }
+};
+/* the demo's delivery driver. 'log' matches the server default; nothing in the
+   demo can reach a mail server, and it says so rather than implying otherwise. */
+var MAIL_DRIVER = 'log';
+var MAIL_CONFIGURED = true;
+
+var NOTIF_PREFS = {};                    /* username -> { kind: mode } deviations */
+var _notifSeq = 0;
+var NOTIF_OUTBOX = [], NOTIF_BY_ID = {};
+
+function notifyModeFor(username, kind) {
+  var p = NOTIF_PREFS[username];
+  if (p && p[kind] && NOTIFY_MODES.indexOf(p[kind]) >= 0) return p[kind];
+  return NOTIFY_DEFAULT_MODE[kind] || 'digest';
+}
+function notifyPrefsFor(username) {
+  var out = {};
+  NOTIFY_KINDS.forEach(function (k) { out[k] = notifyModeFor(username, k); });
+  return out;
+}
+function setNotifyPref(username, kind, mode) {
+  if (NOTIFY_KINDS.indexOf(kind) < 0 || NOTIFY_MODES.indexOf(mode) < 0) return null;
+  var deflt = NOTIFY_DEFAULT_MODE[kind] || 'digest';
+  var p = NOTIF_PREFS[username] = NOTIF_PREFS[username] || {};
+  /* writing the house default REMOVES the row, so the table stays a deviation
+     list and a later change to the defaults reaches everyone with no opinion */
+  if (mode === deflt) delete p[kind]; else p[kind] = mode;
+  return mode;
+}
+function nowHM() {
+  var d = new Date();
+  return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+}
+function mkNotif(username, kind, subject, x) {
+  x = x || {};
+  var mode = x.mode || notifyModeFor(username, kind);
+  var n = { id: ++_notifSeq, username: username, kind: kind,
+            mode: mode === 'off' ? 'immediate' : mode,
+            status: x.status || (mode === 'off' ? 'skipped' : 'queued'),
+            subject: subject, body: x.body || '', link: x.link || '',
+            note_id: x.note_id || null, project_id: x.project_id || null,
+            show_id: x.show_id || null, actor: x.actor || '',
+            driver: x.driver || null, attempts: x.attempts || 0,
+            last_error: x.last_error || null,
+            skipped_reason: x.skipped_reason || (mode === 'off' ? 'preference off' : null),
+            queued_at: dayISO(x.off == null ? 0 : x.off) + 'T' + (x.time || '09:00'),
+            sent_at: x.sentOff == null ? null : dayISO(x.sentOff) + 'T' + (x.sentTime || '09:01') };
+  NOTIF_OUTBOX.push(n); NOTIF_BY_ID[n.id] = n;
+  if (n.mode === 'digest' && n.status === 'queued' && n.kind !== 'digest') refreshDigestRow(username);
+  return n;
+}
+/* "a queued digest row per user that a future scheduler flushes" — literally
+   one open row per person, whose subject counts what is waiting behind it.
+   HONEST TODO: nothing in this app runs on a timer. Immediate rows flush on the
+   sweep; digest rows flush only when someone asks for them explicitly. A real
+   daily digest needs a scheduler this app does not have and will not fake. */
+function refreshDigestRow(username) {
+  var n = NOTIF_OUTBOX.filter(function (o) {
+    return o.username === username && o.mode === 'digest' && o.status === 'queued' && o.kind !== 'digest';
+  }).length;
+  var subject = 'Showrunner digest — ' + n + ' update' + (n === 1 ? '' : 's') + ' waiting';
+  var row = null;
+  NOTIF_OUTBOX.forEach(function (o) {
+    if (o.username === username && o.kind === 'digest' && o.status === 'queued') row = row || o;
+  });
+  if (row) { row.subject = subject; return row; }
+  return mkNotif(username, 'digest', subject, {
+    mode: 'digest',
+    body: 'The updates you asked to receive as a digest rather than one at a time.' });
+}
+function notificationsFor(username, status) {
+  return NOTIF_OUTBOX.filter(function (n) {
+    return n.username === username && (!status || n.status === status);
+  }).slice().reverse();
+}
+function notifyQueuedCount(username) {
+  return NOTIF_OUTBOX.filter(function (n) {
+    return n.username === username && n.status === 'queued' && n.kind !== 'digest';
+  }).length;
+}
+/* flush the immediate queue. Two rules, in order:
+     1. SKIP IF READ IN-APP — a row carrying a note the person already read is
+        marked skipped, not mailed. That rule lives in exactly one place.
+     2. the driver — 'log' records the delivery and marks it sent. */
+function flushNotifications(opts) {
+  opts = opts || {};
+  var counts = { considered: 0, sent: 0, skipped: 0, queued: 0, failed: 0,
+                 driver: MAIL_DRIVER, configured: MAIL_CONFIGURED };
+  NOTIF_OUTBOX.forEach(function (n) {
+    if (n.status !== 'queued') return;
+    if (!opts.digest && n.mode !== 'immediate') return;
+    if (opts.username && n.username !== opts.username) return;
+    counts.considered++;
+    if (n.note_id && noteIsRead(n.username, n.note_id)) {
+      n.status = 'skipped'; n.skipped_reason = 'read in-app';
+      n.sent_at = TODAY_ISO + 'T' + nowHM(); counts.skipped++; return;
+    }
+    var u = ROSTER[n.username];
+    if (!u || !u.email) {
+      n.status = 'skipped'; n.skipped_reason = 'no email address on file';
+      n.attempts++; n.sent_at = TODAY_ISO + 'T' + nowHM(); counts.skipped++; return;
+    }
+    if (!MAIL_CONFIGURED) { n.attempts++; n.last_error = 'mail not configured'; counts.queued++; return; }
+    n.status = 'sent'; n.driver = MAIL_DRIVER; n.attempts++;
+    n.sent_at = TODAY_ISO + 'T' + nowHM();
+    counts.sent++;
+  });
+  if (opts.digest) {
+    NOTIF_OUTBOX.forEach(function (n) {
+      if (n.kind !== 'digest' || n.status !== 'queued') return;
+      var left = NOTIF_OUTBOX.filter(function (o) {
+        return o.username === n.username && o.kind !== 'digest' && o.status === 'queued';
+      }).length;
+      if (!left) { n.status = 'skipped'; n.skipped_reason = 'digest empty'; n.sent_at = TODAY_ISO + 'T' + nowHM(); }
+    });
+  }
+  return counts;
+}
+
+(function seedNotifications() {
+  /* every roster member gets an address so the outbox has somewhere to point.
+     555-01xx phones are already the reserved fictional range; .test is the
+     matching reserved TLD for mail. */
+  USERS.forEach(function (u) { if (!u.email) u.email = u.username + '@e360sport.test'; });
+  /* Devin runs quiet — a real deviation row, so the Settings card has something
+     to show that is not the default. */
+  setNotifyPref('dvargas', 'notify', 'off');
+  setNotifyPref('dvargas', 'report_nag', 'immediate');
+
+  var S_BUCK = SHOWS_BY_ID[12];
+  if (S_BUCK) {
+    mkNotif('tandres', 'report_nag', 'Show report required — Bucks Preseason Courtside', {
+      off: -2, time: '07:00', show_id: 12, project_id: 7, actor: 'system',
+      body: 'Your post-show report for Bucks Preseason Courtside has not been filed yet. ' +
+            'Write it in Showrunner or upload the document you already have.',
+      link: '/#show/12' });
+    mkNotif('dvargas', 'report_nag', 'Show report required — Bucks Preseason Courtside', {
+      off: -2, time: '07:00', show_id: 12, project_id: 7, actor: 'system',
+      mode: 'immediate', status: 'sent', driver: 'log', attempts: 1,
+      sentOff: -2, sentTime: '07:01',
+      body: 'Your post-show report for Bucks Preseason Courtside has not been filed yet.',
+      link: '/#show/12' });
+  }
+  mkNotif('bsawyer', 'assignment', 'Assigned to you — Confirm load-in window around Terraflex floor', {
+    off: -6, time: '11:20', show_id: 1, project_id: 1, actor: 'tvigon',
+    mode: 'immediate', status: 'sent', driver: 'log', attempts: 1, sentOff: -6, sentTime: '11:21',
+    body: 'tvigon assigned you "Confirm load-in window around Terraflex floor" on AVCA First Serve.',
+    link: '/#show/1' });
+  mkNotif('candice', 'mention', 'tandres mentioned you on LOVB Madison — Match 1', {
+    off: -3, time: '14:05', show_id: 3, project_id: 3, actor: 'tandres',
+    mode: 'immediate', status: 'skipped', skipped_reason: 'read in-app', sentOff: -3, sentTime: '14:40',
+    body: '@candice this one is still on a TEMP number — can you cut the QB job?',
+    link: '/#show/3' });
+  mkNotif('lfarkos', 'notify', 'Josh set the scope to Print · 18 pcs · 2,140 sq ft', {
+    off: -4, time: '16:30', show_id: 2, project_id: 2, actor: 'jhawk',
+    body: 'jhawk set the scope to Print · 18 pcs · 2,140 sq ft — @lfarkos',
+    link: '/#show/2' });
+})();
+
+/* ============================================================================
+   F6 · CLOSEOUT — machine-checked, three conditions, no flag to forget
+   ----------------------------------------------------------------------------
+   recap sent · every tech report filed · no OPEN money exception on this show.
+
+   The third is deliberately the SHOW-SCOPED subset of financeExceptions():
+   that scan also reports show-less rows (a PO with no show, a job still on a
+   TEMP number), and a folder-wide accounting problem must not hold one city's
+   show hostage.
+   ========================================================================== */
+var ARCHIVE_AFTER_DAYS = 60;
+
+function showFinanceExceptions(showId) {
+  return financeExceptions().filter(function (x) {
+    return x.show && Number(x.show.id) === Number(showId);
+  });
+}
+function closeoutStatus(showId) {
+  var s = SHOWS_BY_ID[Number(showId)];
+  var rec = recapForShow(showId);
+  var rep = reportSummary(showId);
+  var fin = showFinanceExceptions(showId);
+  var recapSent = !!(rec && rec.status === 'sent');
+  return {
+    show_id: Number(showId),
+    recap_sent: recapSent, recap_status: rec ? rec.status : null,
+    reports_total: rep.total, reports_filed: rep.filed, reports_owed: rep.owed,
+    /* a show with NO crew owes nothing and passes trivially — "nobody is still
+       out", not "somebody filed something" */
+    reports_complete: rep.owed === 0, waiting_on: rep.waiting_on,
+    finance_exceptions: fin.length, finance_clear: fin.length === 0, exceptions: fin,
+    complete: recapSent && rep.owed === 0 && fin.length === 0,
+    closeout_complete_at: s ? s.closeout_complete_at : null,
+    archived_at: s ? s.archived_at : null,
+    archive_after_days: ARCHIVE_AFTER_DAYS
+  };
+}
+/* stamp or CLEAR the marker. It clears again if the state regresses — reopening
+   a recap or adding a late expense un-completes a closeout, and the 60-day
+   clock should not keep running against paperwork that came undone. */
+function syncCloseout(showId) {
+  var s = SHOWS_BY_ID[Number(showId)];
+  var st = closeoutStatus(showId);
+  if (!s) return st;
+  if (st.complete && !s.closeout_complete_at) {
+    s.closeout_complete_at = TODAY_ISO + 'T' + nowHM();
+    st.closeout_complete_at = s.closeout_complete_at;
+    s.activity.unshift(mkAct('system', 'closeout complete',
+      'recap sent · ' + st.reports_filed + '/' + st.reports_total + ' reports filed · finance clear' +
+      ' — auto-archives in ' + ARCHIVE_AFTER_DAYS + ' days', 0, nowHM(), true));
+  } else if (!st.complete && s.closeout_complete_at) {
+    s.closeout_complete_at = null;
+    st.closeout_complete_at = null;
+  }
+  return st;
+}
+
+/* ---- F5 · who may CONFIRM -------------------------------------------------
+   "admin/PM only" (Tom), and for a pm only on a show they are responsible for.
+   manager+ clears it on rank — the same cover pattern canApproveRecapFor uses;
+   a pm must own the SHOW or its FOLDER. A tech or viewer never clears it.
+
+   Deliberately a SEPARATE decision from canEditFolderOf(): confirming records
+   that a client committed money, which is not the same act as editing a venue
+   string, and the two should be able to diverge later without surprising
+   anyone. Mirrors lib/lifecycle.js canConfirm(). */
+function canConfirmShow(show, user) {
+  var u = user || CURRENT_USER;
+  if (!u) return false;
+  if (u.role === 'admin' || u.role === 'manager') return true;
+  if (u.role !== 'pm') return false;
+  if (!show) return true;                     /* no show in hand -> rank alone */
+  var p = PROJECTS_BY_ID[show.project_id];
+  return show.owner === u.username || !!(p && p.owner === u.username);
+}
+
+/* ---- F4 · the ONE scope writer, shared by every demo mutation -------------
+   Mirrors routes/core.js applyScope(): the same field list, the same
+   non-negative-number rule, the same "undefined leaves it alone / null clears
+   it" semantics, so the demo and the API cannot drift on what a patch means. */
+function _applyScopeLocal(show, patch) {
+  var p = patch || {};
+  var pick = function (k) {
+    return p[k] !== undefined ? p[k] : (p['scope_' + k] !== undefined ? p['scope_' + k] : undefined);
+  };
+  var numF = function (k, cur, isInt) {
+    var v = pick(k);
+    if (v === undefined) return cur;
+    if (v === null || v === '') return null;
+    var n = isInt ? parseInt(v, 10) : Number(v);
+    if (!isFinite(n) || n < 0) return cur;
+    return n;
+  };
+  var txtF = function (k, cur) {
+    var v = pick(k);
+    if (v === undefined) return cur;
+    var t = String(v == null ? '' : v).trim().slice(0, 60);
+    return t || null;
+  };
+  var kindIn = pick('kind');
+  if (kindIn !== undefined) {
+    show.scope_kind = (kindIn === null || kindIn === '') ? null
+      : (SCOPE_KINDS.indexOf(String(kindIn)) >= 0 ? String(kindIn) : show.scope_kind);
+  }
+  show.scope_linear_feet = numF('linear_feet', show.scope_linear_feet, false);
+  show.scope_cabinet_count = numF('cabinet_count', show.scope_cabinet_count, true);
+  show.scope_cabinet_type = txtF('cabinet_type', show.scope_cabinet_type);
+  show.scope_pitch = txtF('pitch', show.scope_pitch);
+  show.scope_print_pieces = numF('print_pieces', show.scope_print_pieces, true);
+  show.scope_print_sqft = numF('print_sqft', show.scope_print_sqft, false);
+  var src = pick('source');
+  show.scope_source = (src === 'spec' || src === 'manual') ? src : (show.scope_source || 'manual');
+  show.scope_verified_at = TODAY_ISO + 'T' + nowHM();
+  show.scope_verified_by = ME;
+  return show;
+}
+
+/* ---- archive / unarchive -------------------------------------------------- */
+var ARCHIVE_ROLES = { admin: 1 };
+function canArchive(user) {
+  var u = user || CURRENT_USER;
+  return !!u && !!ARCHIVE_ROLES[u.role];
+}
+function isArchivedShow(s) { return !!(s && s.archived_at); }
+function isArchivedProject(p) { return !!(p && p.archived_at); }
+/* the WORKING SET — what every default list and dashboard reads */
+function activeProjects() { return PROJECTS.filter(function (p) { return !p.archived_at; }); }
+function activeShows() { return ALL_SHOWS.filter(function (s) { return !s.archived_at; }); }
+function archivedProjects() { return PROJECTS.filter(function (p) { return !!p.archived_at; }); }
+function archivedShows() { return ALL_SHOWS.filter(function (s) { return !!s.archived_at; }); }
+
+function archiveShowLocal(show, actor, reason) {
+  if (!show || show.archived_at) return false;
+  show.archived_at = TODAY_ISO + 'T' + nowHM();
+  show.archived_by = actor || ME;
+  if (show.stage !== 'archived') show.stage = 'archived';
+  show.activity.unshift(mkAct(actor || ME, 'archived the show',
+    reason === 'auto'
+      ? 'auto-archived — closeout completed more than ' + ARCHIVE_AFTER_DAYS + ' days ago'
+      : 'archived by hand', 0, nowHM(), true));
+  maybeArchiveProjectLocal(show.project_id, actor);
+  return true;
+}
+function unarchiveShowLocal(show, actor) {
+  if (!show || !show.archived_at) return false;
+  show.archived_at = null; show.archived_by = null;
+  if (show.stage === 'archived') show.stage = 'closed';
+  var p = PROJECTS_BY_ID[show.project_id];
+  if (p) { p.archived_at = null; p.archived_by = null; }
+  show.activity.unshift(mkAct(actor || ME, 'unarchived the show',
+    'back in the working set', 0, nowHM(), true));
+  return true;
+}
+/* a FOLDER archives when every show inside it is archived. An EMPTY folder is
+   never auto-archived — there is no evidence it is finished, only that it never
+   started; an admin may archive it by hand. */
+function maybeArchiveProjectLocal(projectId, actor) {
+  var p = PROJECTS_BY_ID[Number(projectId)];
+  if (!p || p.archived_at || !p.shows.length) return false;
+  if (!p.shows.every(function (s) { return !!s.archived_at; })) return false;
+  p.archived_at = TODAY_ISO + 'T' + nowHM();
+  p.archived_by = actor || ME;
+  return true;
+}
+
+/* one nag = one anchored note mentioning the tech (which IS the bell) plus one
+   outbox row of kind 'report_nag' — so the recipient's preference for NAGS is
+   the one that applies, not their preference for mentions. */
+function nagReportLocal(show, rep, actor) {
+  var label = _noteShowLabel(show);
+  var n = mkNote('show', show.id, 'system',
+    '@' + rep.username + ' your show report for ' + label + ' is required — write it in the app ' +
+    'or upload a doc' + (rep.due_date ? ' (due ' + rep.due_date + ')' : ''), 0, nowHM());
+  mkNotif(rep.username, 'report_nag', 'Show report required — ' + label, {
+    off: 0, time: nowHM(), show_id: show.id, project_id: show.project_id, actor: 'system',
+    note_id: n.id, link: '/#show/' + show.id,
+    body: 'Your post-show report for ' + label + ' has not been filed yet.' +
+          (rep.due_date ? ' It was due ' + rep.due_date + '.' : '') +
+          ' Write it in Showrunner or upload the document you already have.' });
+  rep.last_nagged_at = TODAY_ISO + 'T' + nowHM();
+  rep.nag_count = (rep.nag_count || 0) + 1;
+  return n;
+}
+
+/* ---- THE SWEEP (demo twin of lib/lifecycle.js sweep) ----------------------
+   Idempotent: strike overdue shows, create + re-nag the reports their crews
+   owe, re-check every closeout, auto-archive what is ripe, flush the immediate
+   notification queue. NO CRON — it runs on demand, exactly like the server's. */
+function sweepLocal(actor) {
+  var out = { struck: 0, reports_created: 0, nagged: 0, closeout_complete: 0,
+              archived: 0, projects_archived: 0, notifications: null, at: TODAY_ISO };
+  ALL_SHOWS.forEach(function (s) {
+    if (s.archived_at) return;
+    var end = s.strike_date || s.event_date;
+    if (!end || end > TODAY_ISO) return;
+    if (!s.struck_at) { s.struck_at = TODAY_ISO + 'T' + nowHM(); s.struck_by = actor || 'system'; out.struck++; }
+    (s.crew_assignments || []).forEach(function (c) {
+      if (!c.username || reportFor(s.id, c.username)) return;
+      var rep = mkReport(s, c.username, c.role_on_site, { status: 'owed', reqOff: 0, dueOff: 3, nag: 0 });
+      out.reports_created++;
+      nagReportLocal(s, rep, actor);
+      out.nagged++;
+    });
+    if (syncCloseout(s.id).complete) out.closeout_complete++;
+  });
+  ALL_SHOWS.forEach(function (s) {
+    if (s.archived_at || !s.closeout_complete_at) return;
+    var age = dayAge(String(s.closeout_complete_at).slice(0, 10));
+    if (age != null && age >= ARCHIVE_AFTER_DAYS) {
+      var pWas = isArchivedProject(PROJECTS_BY_ID[s.project_id]);
+      if (archiveShowLocal(s, actor || 'system', 'auto')) out.archived++;
+      if (!pWas && isArchivedProject(PROJECTS_BY_ID[s.project_id])) out.projects_archived++;
+    }
+  });
+  out.notifications = flushNotifications({});
+  return out;
+}
+
+/* ---- the Brewers' SENT recap: the last of the three closeout conditions --- */
+(function seedArchivedRecap() {
+  var S_BREW = SHOWS_BY_ID[13];
+  if (!S_BREW) return;
+  var body = buildRecapDraft(S_BREW);
+  body.headline = 'Thirty-four wraps, two mornings — Brewers concourse package';
+  var rec = mkDeliverable(S_BREW, body, { off: -80, time: '10:10' });
+  rec.status = 'sent';
+  rec.approved_by = 'lfarkos'; rec.approved_at = dayISO(-78) + 'T09:00';
+  rec.sent_at = dayISO(-76) + 'T16:20'; rec.sent_to = 'Milwaukee Brewers';
+})();
+
+/* ---- the nag notes the seeded owed reports already produced --------------- */
+(function seedReportNagNotes() {
+  var S_BUCK = SHOWS_BY_ID[12];
+  if (!S_BUCK) return;
+  ['tandres', 'dvargas'].forEach(function (u) {
+    mkNote('show', 12, 'system',
+      '@' + u + ' your show report for Bucks Preseason Courtside is required — write it in the ' +
+      'app or upload a doc (due ' + dayISO(-8) + ')', -2, '07:00');
+  });
 })();

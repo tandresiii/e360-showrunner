@@ -2,6 +2,14 @@
 
 Running log of requirements gathered from the team's responses to the "first look + your wishes" intro emails (management version + employee version, Aug 2026). Fold these into the build.
 
+> **BUILT in the first post-deploy release (2026-08-27):** *Notification control*
+> (its email-delivery and event-creation bullets included) · *Tech show reports* ·
+> *Scope line + lifecycle + archiving*. Schema, routes and env vars are in
+> `SCHEMA.md`; the one honest gap is that **nothing runs on a timer** — digests
+> and the auto-archive sweep run on boot and on demand until a real scheduler
+> exists, and the Graph `sendMail` driver is skeletoned pending the `showrunner@`
+> mailbox + app registration. Everything else on this page is still open.
+
 ## Accounting / Finance — CONFIRMED requirement (from Accounting, 2026-08-21)
 Accounting doesn't need the PM tool itself, but needs the **financial/accounting workflow to flow to them from every project** — orders, bookings, reservations, scheduling, invoices, receipts, confirmations — so they can stay ahead instead of finding out after the fact ("a lot of stuff isn't communicated to me until after the fact").
 
@@ -75,5 +83,16 @@ Every tech on a show's crew must file a **post-show report**: log in, write the 
 - Techs CAN write/submit their own report; they can NEVER approve/sign off show reports — **sign-off = admins and/or project managers only** (Tom's rule, confirmed 8/27; matches the hardening fix).
 - Report lands in the event folder (internal doc — NOT client-facing; the recap content firewall must never read report bodies).
 - Freeform first (editor + upload); a structured template (issues / gear damage / venue notes / hours) can come later.
+
+## Scope line + lifecycle + archiving (Tom, 2026-08-27 — CONFIRMED spec)
+**1. Scope line — "what we're delivering," structured per show.** Typed fields per event type (LED: linear feet / cabinet count / cabinet type+pitch; Print: pieces / sqft; Both: both), rendered compact everywhere: `LED · 800′ · 144× P10`. **Auto-filled/verified from the bound spec** when one exists (stack-aware count via speccheck), hand-entered before that; divergence from a later-bound spec surfaces as a checker question. Client-safe → feeds recap stats. Display: show header, season rows, projects table, call-sheet header.
+**2. Commercial lifecycle.** quoted → **confirmed** → in progress → delivered → closed → archived. **Confirm = explicit action, admin/PM only, means the client committed (signed/PO'd)** — datestamped + logged (confirmed_by/at). Confirming is the natural trigger moment for: temp job number → real QB number (Candice), and scheduler-push unlock.
+**3. Archiving.** Auto-archive **60 days after closeout complete** (closeout = recap sent + all tech show reports filed + financials reconciled — machine-checkable); manual archive/unarchive for admins. Archived shows: hidden from default views ("we don't want 300 in our normal area in a year"), fully searchable/browsable via an Archive filter/view, season rollups unaffected.
+
+## "One event, everywhere" — Flex event-folder creation + entity sync (Tom, 2026-08-27)
+Core principle, Tom's words: "Why do I have to make an event folder in multiple places?" Creating an event in Showrunner should propagate everywhere it needs to exist — scheduler (DONE, live push), **Flex event folder (build)**, NAS folder skeleton (comes with storage wiring), calendar facets.
+- **The Flex dependency chain:** Flex event folders reference clients/venues that must exist in Flex's contact directory first. Solution: the **contact rolodex is the Rosetta stone** — each Showrunner contact/venue record carries external refs (`flex_contact_id`, staffing ids). On "create in Flex": if the client/venue lacks a flex ref, create it there first (or match an existing one by name, human-confirmed on ambiguity), store the ref, then create the event folder. Port the existing Flex address book INTO the rolodex on first sync so most entities pre-match.
+- Probes must confirm: Flex contact/venue creation endpoints + the event-folder create path (the existing staffing flexCreate flow is the proven base; the survey's probe plan covers the rest).
+- Propagation is explicit and per-facet (a button/action per target with status chips: "In scheduler ✓ · In Flex ✓ · NAS ✓"), not silent — same file-don't-fire posture, human sees what exists where.
 
 ## (more team wishes to be added here as responses come in)

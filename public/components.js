@@ -128,7 +128,12 @@ function icon(n) {
     menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
     phone: '<path d="M6.5 3h3L11 7.5 9 9a13 13 0 0 0 6 6l1.5-2 4.5 1.5v3a2.5 2.5 0 0 1-2.5 2.5A15.5 15.5 0 0 1 4 5.5 2.5 2.5 0 0 1 6.5 3Z"/>',
     cam: '<path d="M4 8h3.2L9 5.5h6L16.8 8H20a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 20 20H4a1.5 1.5 0 0 1-1.5-1.5v-9A1.5 1.5 0 0 1 4 8Z"/><circle cx="12" cy="13.5" r="3.4"/>',
-    star: '<path d="m12 3.8 2.4 5 5.4.7-4 3.8 1 5.4L12 16l-4.8 2.7 1-5.4-4-3.8 5.4-.7Z"/>'
+    star: '<path d="m12 3.8 2.4 5 5.4.7-4 3.8 1 5.4L12 16l-4.8 2.7 1-5.4-4-3.8 5.4-.7Z"/>',
+    /* F4 — the scope line's mark. A rule with tick marks: what we measured out
+       and are delivering, which is exactly what a scope line says. */
+    ruler: '<rect x="2.5" y="8.5" width="19" height="7" rx="1.5"/><path d="M7 8.5v3M11 8.5v4M15 8.5v3M19 8.5v4"/>',
+    /* F2 — a filed report. A page with lines on it. */
+    doc: '<path d="M6 3h7l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M13 3v5h5M8.5 13h7M8.5 17h5"/>'
   }[n] || '';
   return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + p + '</svg>';
 }
@@ -148,6 +153,93 @@ function typeTag(t) { return '<span class="tag ' + esc(typeDef(t).tag) + '">' + 
 function rolePill(role) { var r = roleDefOf(role); return '<span class="pill ' + esc(r.cls) + '"><span class="dot"></span>' + esc(r.name) + '</span>'; }
 function ragPill(r) { var a = RAG[r] || RAG.idle; return '<span class="pill ' + esc(a[0]) + '"><span class="dot"></span>' + esc(a[1]) + '</span>'; }
 function stagePill(s) { return '<span class="pill idle">' + esc(stageLabel(s)) + '</span>'; }
+
+/* ============================================================================
+   F5 · THE LIFECYCLE CHIP + TIMELINE
+   ----------------------------------------------------------------------------
+   quoted → confirmed → in_progress → delivered → closed → archived.
+
+   The chip prints the row's OWN stage label — a legacy 'planning' row still
+   says "Planning", because nothing was rewritten — and the timeline places it
+   by its canonical POSITION. When the two differ the chip says so in its
+   tooltip rather than quietly relabelling somebody's data.
+   ========================================================================== */
+var STAGE_PILL_CLASS = {
+  quoted: 'idle', confirmed: 'info', in_progress: 'acc', delivered: 'go',
+  closed: 'go', archived: 'idle'
+};
+function lifecycleChip(row) {
+  if (!row) return '';
+  var stored = String(row.stage || '');
+  var canon = canonicalStage(stored);
+  var mapped = LIFECYCLE_STAGES.indexOf(stored) < 0;
+  var tip = mapped
+    ? 'Stored stage “' + stageLabel(stored) + '” — shown at the “' + stageLabel(canon) +
+      '” position on the lifecycle. Nothing was rewritten.'
+    : 'Lifecycle stage';
+  return '<span class="pill ' + esc(STAGE_PILL_CLASS[canon] || 'idle') + '" title="' + esc(tip) + '">' +
+    '<span class="dot"></span>' + esc(stageLabel(stored)) + (mapped ? '<i class="sg-map">→ ' + esc(stageLabel(canon)) + '</i>' : '') + '</span>';
+}
+/* the confirm FACT, rendered honestly: an explicit datestamp, or confirmed by
+   position with nothing to date-stamp (which is every pre-existing row). */
+function confirmChip(show) {
+  if (!show) return '';
+  if (show.confirmed_at) {
+    return '<span class="pill go" title="' +
+      esc('Client committed — confirmed by ' + (userName(show.confirmed_by) || show.confirmed_by || 'someone') +
+          ' on ' + fmtDate(String(show.confirmed_at).slice(0, 10))) + '">' +
+      inlineIcon('checkC') + 'Confirmed</span>';
+  }
+  if (isConfirmed(show)) {
+    return '<span class="pill info" title="Confirmed by stage position — this show predates the ' +
+      'explicit Confirm action, so there is no datestamp to show. Nothing was invented.">' +
+      inlineIcon('checkC') + 'Confirmed <i class="sg-map">legacy</i></span>';
+  }
+  return '<span class="pill warn" title="Not confirmed — the client has not committed, so a ' +
+    'scheduler push is refused.">' + inlineIcon('alert') + 'Not confirmed</span>';
+}
+function stageTimeline(row) {
+  var here = stageIndex(row && row.stage);
+  return '<div class="stage-tl" role="list">' + LIFECYCLE_STAGES.map(function (k, i) {
+    var cls = i < here ? 'done' : i === here ? 'on' : '';
+    return '<span class="st-node ' + cls + '" role="listitem" title="' + esc(stageLabel(k)) + '">' +
+      '<b></b>' + esc(stageLabel(k)) + '</span>';
+  }).join('') + '</div>';
+}
+
+/* ============================================================================
+   F4 · THE SCOPE CHIP — "what we're delivering", one compact line
+   ----------------------------------------------------------------------------
+   ONE renderer for every surface (show header · season row · projects table ·
+   call-sheet header) so they cannot drift. Empty when there is nothing to say:
+   a scope kind with no numbers behind it is a label, not a scope.
+   ========================================================================== */
+function scopeChip(show, opts) {
+  opts = opts || {};
+  var line = scopeLine(show);
+  if (!line) {
+    return opts.empty
+      ? '<span class="scope-chip none" title="No scope entered yet — a pm can add one on the show ' +
+        'header, or fill it from a bound spec.">' + inlineIcon('ruler') + 'Scope not set</span>'
+      : '';
+  }
+  var src = show.scope_source === 'spec' ? ' · from the bound spec' : '';
+  var q = (typeof scopeQuestionsFor === 'function') ? scopeQuestionsFor(show).length : 0;
+  return '<span class="scope-chip' + (q ? ' q' : '') + '" title="' +
+    esc('What we are delivering' + src + (q ? ' · ' + q + ' open question about it' + (q === 1 ? '' : 's') : '')) +
+    '">' + inlineIcon('ruler') + esc(line) +
+    (q ? '<b class="sc-q" title="The bound spec disagrees — a question, not an error">?</b>' : '') +
+    '</span>';
+}
+/* the archived marker — quiet, and it never hides the thing it labels */
+function archivedChip(row) {
+  if (!row || !row.archived_at) return '';
+  return '<span class="pill idle arch" title="' +
+    esc('Archived ' + fmtDate(String(row.archived_at).slice(0, 10)) +
+        (row.archived_by ? ' by ' + (userName(row.archived_by) || row.archived_by) : '') +
+        ' — out of the working set, still fully searchable.') + '">' +
+    inlineIcon('box') + 'Archived</span>';
+}
 function statusPill(s) { var a = STATUS[normStatus(s)]; return '<span class="pill ' + esc(a.pill) + '"><span class="dot"></span>' + esc(a.label) + '</span>'; }
 function psPill(s) { var a = PS[s] || PS.sent; return '<span class="pill ' + esc(a[0]) + '"><span class="dot"></span>' + esc(a[1]) + '</span>'; }
 function segColor(step) { if (step.risk && normStatus(step.status) !== 'done') return 'var(--warn)'; return STATUS[normStatus(step.status)].bar; }
@@ -356,7 +448,13 @@ function actorName(actor) {
     var u = actor.slice(6);
     return (ROSTER[u] ? firstName(u) : u) + '’s agent';
   }
-  return firstName(actor);
+  /* F2 gives the app a THIRD kind of author: itself. A report nag, a closeout
+     stamp and an auto-archive are written by 'system', which is on nobody's
+     roster — and firstName() answers '' for anything it does not recognise,
+     which rendered a nameless note. Name it, and fall back to the raw actor
+     string for anything else off-roster rather than to blank. */
+  if (String(actor) === 'system') return 'Showrunner';
+  return firstName(actor) || String(actor || '');
 }
 /* the display name a show goes by (single-show folders collapse to the folder) */
 function showLabel(s) {
@@ -758,6 +856,9 @@ function callSheetSheet(show) {
     '<div class="sh-body"><div class="sh-kick">Call sheet · ' + esc(range) + '</div>' +
     '<h2>' + esc(title) + '</h2>' +
     '<div class="sh-bound">' + esc(show.venue) + (show.venue_address ? ' · ' + esc(show.venue_address) : '') + '</div>' +
+    /* F4 — the scope line on the printed header. This sheet goes in a pocket at
+       6am; "what are we putting up" should not require a phone. */
+    (hasScope(show) ? '<div class="sh-scope">' + esc(scopeLine(show)) + '</div>' : '') +
     '<div class="cs-times">' + times + '</div>' + factLine + '<hr>' +
     dayBlocks + crewBlock + pocBlock +
     '<div class="sh-cap">Questions on site → ' + esc(poc ? poc.name + ' ' + (poc.phone || '') : 'production office') + ' · generated from the event folder</div>' +

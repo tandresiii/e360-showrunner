@@ -1203,6 +1203,132 @@ table.tbl td.money,table.tbl th.money{text-align:right}
 .bind-confirm p{margin:0 0 10px; color:var(--text-2); font-size:12.5px; line-height:1.6}
 .bind-confirm .bc-btns{display:flex; gap:9px; margin-top:14px}
 
+/* ---------- F4 · the scope line (post-deploy pass) ----------
+   "What we're delivering", rendered compact and identically on the show
+   header, season rows, the projects table and the call sheet. Quiet by
+   default — it is a fact, not an alert — and it only grows a colour when the
+   bound spec disagrees with it, which is a question rather than an error. */
+.scope-chip{display:inline-flex; align-items:center; gap:6px; background:var(--surface-2); border:1px solid var(--border); border-radius:20px; padding:3px 11px; font-size:11.5px; font-weight:600; color:var(--text-2); font-family:var(--font-mono); white-space:nowrap; max-width:100%; overflow:hidden; text-overflow:ellipsis}
+.scope-chip svg{color:var(--muted); flex:none}
+.scope-chip.none{border-style:dashed; color:var(--muted); font-family:var(--font-body); font-weight:600}
+.scope-chip.q{border-color:color-mix(in srgb,var(--warn) 42%,transparent); color:var(--text)}
+.scope-chip .sc-q{display:inline-grid; place-items:center; width:14px; height:14px; border-radius:50%; background:var(--warn-ghost); color:var(--warn); font-size:10px; font-weight:800; font-family:var(--font-body)}
+.ef-scope{display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin:8px 0 2px}
+.sched-scope svg{color:var(--muted)}
+/* a plain text link that behaves like a button — used where a full .btn would
+   shout (inside a hint, beside a chip) */
+.lnk-btn{background:none; border:0; padding:0; color:var(--accent); font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:5px}
+.lnk-btn:hover{text-decoration:underline}
+/* the divergence question, in the scope editor */
+.scope-q{display:flex; gap:9px; align-items:flex-start; background:var(--warn-ghost); border:1px solid color-mix(in srgb,var(--warn) 34%,transparent); border-radius:var(--r); padding:11px 13px; margin-bottom:12px}
+.scope-q svg{color:var(--warn); flex:none; margin-top:2px}
+.scope-q b{display:block; font-size:12.5px; font-weight:600; line-height:1.45}
+.scope-q span{display:block; color:var(--text-2); font-size:11.5px; line-height:1.55; margin-top:4px}
+/* the scope block on the New Event form */
+.ne-scope{border:1px solid var(--border); border-radius:var(--r); padding:12px 13px 4px; margin-bottom:10px; background:var(--surface-2)}
+.ne-sh{display:flex; align-items:center; gap:7px; font-size:11px; text-transform:uppercase; letter-spacing:.08em; font-weight:700; color:var(--muted); margin-bottom:10px}
+.ne-sh i{font-style:normal; text-transform:none; letter-spacing:0; font-weight:500; color:var(--muted)}
+.ne-sh svg{color:var(--muted)}
+
+/* ---------- F5 · the commercial lifecycle ----------
+   quoted → confirmed → in_progress → delivered → closed → archived.
+   A legacy stage keeps its own label and shows where it MAPS to, so nothing
+   reads as though somebody's data was rewritten. */
+.sg-map{font-style:normal; opacity:.62; font-weight:500; margin-left:5px; font-size:10px}
+.stage-tl{display:flex; align-items:center; gap:0; flex-wrap:wrap; margin:12px 0 2px; padding-top:12px; border-top:1px solid var(--border)}
+.st-node{display:inline-flex; align-items:center; gap:7px; font-size:11px; font-weight:600; color:var(--muted); padding-right:14px; position:relative; white-space:nowrap}
+.st-node b{width:9px; height:9px; border-radius:50%; background:var(--surface-3); border:1px solid var(--border-strong); flex:none}
+.st-node:not(:last-child):after{content:""; position:absolute; right:5px; top:50%; width:6px; height:1px; background:var(--border-strong)}
+.st-node.done{color:var(--text-2)}
+.st-node.done b{background:var(--accent-2); border-color:var(--accent-2)}
+.st-node.on{color:var(--text)}
+.st-node.on b{background:var(--accent); border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-ghost)}
+
+/* ---------- F6 · archiving ----------
+   Out of the working set, never out of the app. The banner explains itself and
+   offers the way back; the row treatment is a dimming, never a strikethrough. */
+.arch-banner{display:flex; align-items:center; gap:12px; background:var(--surface-2); border:1px solid var(--border-strong); border-left:3px solid var(--muted); border-radius:var(--r); padding:12px 15px; margin-bottom:14px}
+.arch-banner svg{color:var(--muted); flex:none}
+.arch-banner b{display:block; font-size:13px}
+.arch-banner span{display:block; color:var(--text-2); font-size:12px; line-height:1.5; margin-top:2px}
+.arch-banner .btn{margin-left:auto; flex:none}
+.pill.arch{opacity:.85}
+tr.archived td{opacity:.66}
+tr.archived:hover td{opacity:1}
+
+/* ---------- F6 · the closeout panel ----------
+   Three machine-checked conditions, each with a live answer. Never a checklist
+   anyone ticks — that is the entire point of it being machine-checked. */
+.panel.closeout .co-line{display:flex; gap:10px; align-items:flex-start; padding:9px 0; border-bottom:1px solid var(--border)}
+.panel.closeout .co-line:last-of-type{border-bottom:0}
+.panel.closeout .co-line svg{flex:none; margin-top:3px}
+.panel.closeout .co-line.ok svg{color:var(--go)}
+.panel.closeout .co-line.out svg{color:var(--warn)}
+.panel.closeout .co-line b{display:block; font-size:12.5px; font-weight:600}
+.panel.closeout .co-line span{display:block; color:var(--text-2); font-size:11.5px; margin-top:2px; line-height:1.5}
+.panel.closeout .co-foot{margin-top:10px; padding-top:10px; border-top:1px solid var(--border); color:var(--text-2); font-size:12px; line-height:1.55}
+
+/* ---------- F2 · tech show reports ----------
+   Two audiences on one tab: a tech sees their own and writes it; a pm sees the
+   "waiting on" list and reads them. Nothing here writes somebody else's. */
+.waiting-on{display:flex; align-items:center; gap:11px; background:var(--warn-ghost); border:1px solid color-mix(in srgb,var(--warn) 32%,transparent); border-radius:var(--r); padding:11px 14px; margin-bottom:14px}
+.waiting-on svg{color:var(--warn); flex:none}
+.waiting-on.ok{background:var(--go-ghost); border-color:color-mix(in srgb,var(--go) 30%,transparent)}
+.waiting-on.ok svg{color:var(--go)}
+.waiting-on b{display:block; font-size:12.5px}
+.waiting-on span{display:block; color:var(--text-2); font-size:11.5px; margin-top:2px}
+.waiting-on .btn{margin-left:auto; flex:none}
+.rep-list{display:flex; flex-direction:column; gap:11px}
+.rep-card{border:1px solid var(--border); border-radius:var(--r); padding:12px 14px; background:var(--surface-2)}
+.rep-card.mine{border-color:var(--border-strong); background:var(--surface)}
+.rep-card.owed{border-left:3px solid var(--warn)}
+.rep-card.filed{border-left:3px solid var(--go)}
+.rep-card.reviewed{border-left:3px solid var(--border-strong)}
+.rep-h{display:flex; align-items:center; gap:10px; margin-bottom:9px}
+.rep-who{flex:1; min-width:0}
+.rep-who b{display:block; font-size:13px; font-weight:600}
+.rep-who span{display:block; color:var(--muted); font-size:11px; margin-top:1px; overflow:hidden; text-overflow:ellipsis}
+.rep-body{white-space:pre-wrap; color:var(--text-2); font-size:12.5px; line-height:1.65; background:var(--bg); border:1px solid var(--border); border-radius:var(--r-sm); padding:11px 13px}
+.rep-empty{color:var(--muted); font-size:12.5px; font-style:italic; padding:4px 0 2px}
+.rep-acts{display:flex; gap:12px; flex-wrap:wrap; margin-top:9px}
+.rep-editor .rep-in{width:100%; background:var(--bg); border:1px solid var(--border-strong); border-radius:var(--r-sm); color:var(--text); font-family:inherit; font-size:12.5px; line-height:1.6; padding:11px 13px; resize:vertical}
+.rep-editor .rep-in:focus{outline:none; border-color:var(--accent)}
+.rep-erow{display:flex; align-items:center; gap:9px; margin-top:9px}
+.rep-hint{flex:1; color:var(--muted); font-size:11px; display:inline-flex; align-items:center; gap:6px}
+.rep-hint svg{color:var(--muted)}
+/* the My Tasks nag — required work, so it reads warmer than an assigned step */
+.panel.report-nag{border-color:color-mix(in srgb,var(--warn) 30%,transparent)}
+.panel.report-nag h3 svg{color:var(--warn)}
+.panel.report-nag .next-item .btn{flex:none}
+
+/* ---------- F3 · notification preferences ----------
+   The bell is deliberately absent from this card: the actor already chose to
+   notify you and you always see it in the app. These control the SECOND
+   channel only, which is why "off" is labelled "Bell only". */
+.notif-row .seg.sm{padding:2px}
+.notif-row .seg.sm button{padding:4px 9px; font-size:11.5px}
+.set-row.notif-row{align-items:center}
+@media(max-width:760px){
+  /* the three-way segment is the widest thing on the settings card at 390px */
+  .set-row.notif-row{flex-direction:column; align-items:flex-start; gap:7px}
+  .notif-row .seg.sm{width:100%}
+  .notif-row .seg.sm button{flex:1; justify-content:center; padding:6px 4px}
+  .ef-scope{gap:7px}
+  .scope-chip{font-size:11px; padding:3px 9px}
+  .stage-tl{gap:2px}
+  .st-node{font-size:10px; padding-right:10px}
+  .st-node:not(:last-child):after{right:3px; width:4px}
+  .arch-banner{flex-wrap:wrap}
+  .arch-banner .btn{margin-left:0; width:100%; justify-content:center}
+  .waiting-on{flex-wrap:wrap}
+  .waiting-on .btn{margin-left:0; width:100%; justify-content:center}
+  .rep-acts{gap:9px}
+}
+
+/* the scope line on the printed CALL SHEET — hardcoded light like the rest of
+   the sheet, because a print artifact does not follow the app's theme */
+.cs-sheet .sh-scope{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11.5px; letter-spacing:.02em; color:#3B4A44; background:#F2F5F3; border:1px solid #DDE4E0; border-radius:6px; padding:5px 10px; display:inline-block; margin:8px 0 2px}
+
 /* ---------- print ---------- */
 #printArea{display:none}
 @media print{

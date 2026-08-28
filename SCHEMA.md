@@ -1,7 +1,10 @@
 # E360 Showrunner — Schema, API surface & scheduler mapping
 
 **Regenerated 2026-08-27 from the running database** at the end of the wiring
-pass. This file is the reference again: every table, column, index, enum and
+pass; **extended by the first post-deploy release** (F1 event creation ·
+F2 tech show reports · F3 the notification outbox + mail layer · F4 the scope
+line · F5 the confirm lifecycle · F6 closeout + archiving), whose additions are
+marked **F1-F6** throughout. This file is the reference again: every table, column, index, enum and
 route below was read back out of a live Postgres after `initDB()` + `seedAll()`,
 not transcribed from intent.
 
@@ -24,30 +27,36 @@ with **Jobs** (the commercial dimension) alongside the shows in the folder.
 
 | File | Lines | What it owns |
 |---|---:|---|
-| `server.js` | 204 | app setup, CORS allowlist, body caps, mount order, SPA + deep-link fallback, boot, housekeeping |
-| `lib/enums.js` | 176 | every whitelist + pure helpers |
-| `lib/db.js` | 815 | pool, `withTx`, `initDB`, the three manual cascades, config get/set |
-| `lib/auth.js` | 292 | bcrypt, durable sessions, api keys, role/scope/capability gates, rate limits |
-| `lib/mappers.js` | 439 | row → API record (snake_case human surface, camelCase agent surface) |
+| `server.js` | 315 | app setup, CORS allowlist, body caps, mount order, SPA + deep-link fallback, boot, housekeeping |
+| `lib/enums.js` | 372 | every whitelist + pure helpers |
+| `lib/db.js` | 1030 | pool, `withTx`, `initDB`, the three manual cascades, config get/set |
+| `lib/auth.js` | 320 | bcrypt, durable sessions, api keys, role/scope/capability gates, rate limits |
+| `lib/mappers.js` | 547 | row → API record (snake_case human surface, camelCase agent surface) |
 | `lib/seed.js` | 261 | lanes, event types, recap stat keys, config, admin, opt-in roster, **templates.json loader** |
 | `lib/activity.js` | 37 | the one `logActivity` writer |
-| `lib/agent.js` | 333 | matcher, confidence bands, provenance, idempotency ledger, proposals |
+| `lib/agent.js` | 342 | matcher, confidence bands, provenance, idempotency ledger, proposals |
 | `lib/storage.js` | 155 | NAS abstraction — local driver now, SMB/WebDAV stubbed |
-| `lib/firewall.js` | 268 | `recapFacts` / `recapUnsafe` / `buildRecapDraft` — the client-content firewall |
+| `lib/firewall.js` | 344 | `recapFacts` / `recapUnsafe` / `buildRecapDraft` — the client-content firewall |
 | `lib/http.js` | 67 | `asyncH`, throwable HTTP errors, paging helpers |
-| `lib/mentions.js` | 80 | @mention parsing, the notify principle |
+| `lib/mentions.js` | 171 | @mention parsing, the notify principle |
+| `lib/notify.js` | 284 | **F3** — the notification outbox: preferences, enqueue, the digest row, skip-if-read, flush |
+| `lib/mail.js` | 165 | **F3** — the two delivery drivers (`log` default · `graph` skeleton) |
+| `lib/reports.js` | 170 | **F2** — tech show reports: the obligation, the nag, the two gates |
+| `lib/lifecycle.js` | 284 | **F5/F6** — the confirm gate, the machine-checked closeout, archiving, the sweep |
 | `routes/auth.js` | 248 | login, roster, **api keys (human-only)** |
-| `routes/core.js` | 797 | projects, shows, steps, templates, milestones, activity, push-to-scheduler |
-| `routes/files.js` | 495 | files + financial docs, spec chain, Flex state, bookings, proofs |
-| `routes/finance.js` | 552 | jobs, budget lines, expenses, the money views |
-| `routes/purchasing.js` | 876 | purchase orders, lines, the approval gate |
-| `routes/notes.js` | 361 | anchored notes, mentions, the personal inbox |
-| `routes/schedule.js` | 710 | run of show, crew, call-sheet header |
-| `routes/photos.js` | 605 | photo curation, picks, the thumbnailer contract |
-| `routes/deliverables.js` | 596 | the client recap lifecycle |
-| `routes/proposals.js` | 365 | **confirm / reject — session only** |
-| `routes/agent.js` | 611 | the whole `/api/agent/*` surface |
-| `scripts/smoke.js` | 590 | 154-assertion end-to-end smoke (see `SMOKE.md`) |
+| `routes/core.js` | 1361 | projects, shows, steps, templates, milestones, activity, push-to-scheduler |
+| `routes/files.js` | 737 | files + financial docs, spec chain, Flex state, bookings, proofs |
+| `routes/finance.js` | 616 | jobs, budget lines, expenses, the money views |
+| `routes/purchasing.js` | 920 | purchase orders, lines, the approval gate |
+| `routes/notes.js` | 387 | anchored notes, mentions, the personal inbox |
+| `routes/schedule.js` | 824 | run of show, crew, call-sheet header |
+| `routes/photos.js` | 601 | photo curation, picks, the thumbnailer contract |
+| `routes/deliverables.js` | 624 | the client recap lifecycle |
+| `routes/proposals.js` | 406 | **confirm / reject — session only** |
+| `routes/agent.js` | 660 | the whole `/api/agent/*` surface |
+| `routes/reports.js` | 322 | **F2** — the tech-show-report human surface (deliberately absent from `/api/agent/*`) |
+| `routes/notifications.js` | 179 | **F3/F6** — outbox + preferences + mail status + the admin sweep |
+| `scripts/smoke.js` | 2357 | 465-assertion end-to-end smoke (see `SMOKE.md`) |
 
 ---
 
@@ -56,13 +65,13 @@ with **Jobs** (the commercial dimension) alongside the shows in the folder.
 | Enum | Values |
 |---|---|
 | project/show `type`, template `event_type` | `led` · `print` · `both` |
-| `stage` (project + show) | `lead` · `planning` · `ready` · `scheduled` · `closed` — **five, confirmed.** `in_production` is a *print lane*, never a stage |
+| `stage` (project + show) | **F5 — a UNION, never a replacement.** The legacy five (`lead` · `planning` · `ready` · `scheduled` · `closed`) stay legal values and **no stored row is ever rewritten**; the commercial lifecycle joins them: `quoted` -> `confirmed` -> `in_progress` -> `delivered` -> `closed` -> `archived`. `in_production` is still a *print lane*, never a stage. See **F5 · the commercial lifecycle** below for the display/ordering map |
 | show `rag` | `go` · `warn` · `crit` · `idle` |
 | step `lane` | **not an enum** — see *Lanes are config* below |
 | step `status` | `todo` · `in_progress` · `done` · `blocked` · `na` |
 | step `evidence_type` | `flex_element` · `doc_link` · `booking` · `file` · `none` |
 | step `auto_source` | `spec_gen` · `novaspec` · `powerspec` · `flex` · `travel` · `none` |
-| file `kind` | `spec` · `proof` · `contract` · `confirmation` · `recording` · `other` **· `receipt` · `invoice` · `po` · `transcript` · `photo`** |
+| file `kind` | `spec` · `proof` · `contract` · `confirmation` · `recording` · `other` **· `receipt` · `invoice` · `po` · `transcript` · `photo` · `report`** (F2 — a filed tech show report lands in the folder's Files) |
 | financial file kinds | `receipt` · `invoice` · `po` · `confirmation` |
 | file `artifact` | `pullsheet` · `manifest` · `image` · `document` |
 | file `status` | `filed` · `proposed` · `rejected` · `superseded` — writable by a client: `filed` · `proposed` · `rejected` only. `superseded` is a **server act** (binding a new spec rev retires the file the previous rev pointed at), so it is not on the create whitelist. `rejected` and `superseded` are **history, not inventory**: `GET /files` excludes both by default and returns them only when asked for by name (`?status=superseded`) |
@@ -76,7 +85,13 @@ with **Jobs** (the commercial dimension) alongside the shows in the folder.
 | note `anchor_type` | `project` · `show` · `step` · `file` · `job` · `expense` · `po` |
 | schedule `kind` | `travel` · `work` · `show` · `meal` · `strike` |
 | deliverable `kind` / `status` | `recap` · `call_sheet` · `photo_set` / `draft` · `approved` · `sent` |
-| recap stat keys | `cabinets` · `panels` · `crew` · `days` · `attendance` · `date` |
+| recap stat keys | `cabinets` · `panels` · `crew` · `days` · `attendance` · `date` **· F4, widened deliberately: `scope` · `linear_feet` · `cabinet_count` · `cabinet_type` · `pitch` · `print_pieces` · `print_sqft`** — physical facts about what the client bought, none of which is derivable into a cost, a rate or a margin |
+| **F4** scope `kind` / `source` | `led` · `print` · `both` / `manual` · `spec` |
+| **F2** tech report `status` | `owed` -> `filed` -> `reviewed`. **Filing completes the obligation**; `reviewed` is optional pm bookkeeping and closeout counts *filed*, never *reviewed* |
+| **F3** notification `kind` | `assignment` · `mention` · `notify` · `report_nag` · `digest` |
+| **F3** notification `mode` | `immediate` · `digest` · `off` — the per-(user, kind) preference. **`off` silences the EMAIL, never the bell** |
+| **F3** notification `status` | `queued` · `sent` · `skipped` · `failed`. `skipped` is a deliberate outcome with a reason (`read in-app` · `preference off` · `no email address on file`), not a failure |
+| **F3** mail driver | `log` (default) · `graph` |
 | provenance `source_kind` | `email` · `meeting` · `chat` · `manual` · **`camera_roll`** · **`closeout`** |
 | `matched_by` tokens | `explicit_id` · `client_name` · `venue` · `date_window` · `participant` · `vendor_history` · `thread_ref` · `job_number` · `keyword` · `show_record` |
 | agent scopes | `agent:read` · `agent:file` · `agent:propose` |
@@ -101,16 +116,27 @@ Adding "Motion Graphics" with three new lanes is two rows, not a deploy.
 
 ---
 
-## Tables (34)
+## Tables (37)
 
 ### Core hierarchy
 
 **`projects`** — the Event Folder
 `id · name · slug · client · type · stage · owner · description · summary · source · provenance JSONB · source_ref · created_at · updated_at`
+**F6:** `· archived_at · archived_by` *(idx: `archived_at`)*
 `summary`/`source` drive the AI-summary panel and its provenance line.
+A folder archives when **every show inside it** is archived (or by hand, for an
+empty one). Archived folders drop out of `GET /api/projects`; the folder itself
+still resolves by id, so a deep link and a search hit both still open.
 
 **`shows`** — one show ≈ one staffing event *(idx: `project_id`, `default_job_id`)*
 `id · project_id · name · slug · venue · city · load_in_date · event_date · strike_date · stage · rag · rag_override · on_site_poc · owner · default_job_id · cabinets · scheduler_event_id · summary · source · load_in_time · doors_time · event_time · strike_time · venue_address · parking_notes · radio_channel · dress_code · venue_poc JSONB · client_poc JSONB · provenance JSONB · source_ref · created_at · updated_at`
+**F4 (the scope line):** `· scope_kind · scope_linear_feet NUMERIC(10,2) · scope_cabinet_count INT · scope_cabinet_type · scope_pitch · scope_print_pieces INT · scope_print_sqft NUMERIC(12,2) · scope_source · scope_verified_at · scope_verified_by`
+**F5 (the confirm fact):** `· confirmed_at · confirmed_by`
+**F2 (strike):** `· struck_at · struck_by`
+**F6 (closeout + archive):** `· closeout_complete_at · archived_at · archived_by` *(idx: `archived_at`, `closeout_complete_at`)*
+Every one of these defaults to `NULL`, so an existing show simply has no scope
+line, no confirm datestamp and no archive state until someone creates one — **no
+row is rewritten and nothing renders differently until it is.**
 
 > **RAG resolution:** `rag_override` (a manager's explicit call) **wins**;
 > otherwise the value is **derived** from the show's steps (blocked or overdue →
@@ -283,6 +309,55 @@ agent-authored note is **immutable to humans**.
 **`recap_stat_keys`** — `key · label · sort_order`. Stats carry a client-safe
 key **by FK, not by regex**.
 
+**`tech_reports`** (F2) *(unique `(show_id, username)`; idx: `(username, status)`, `show_id`)*
+`id · show_id · project_id · username · crew_assignment_id · role_on_site · status · body TEXT · file_id · due_date · requested_at · filed_at · reviewed_by · reviewed_at · last_nagged_at · nag_count · created_at · updated_at`
+
+> **Why a dedicated table rather than a `deliverables` kind.** Three reasons, and
+> the first is the important one:
+>
+> 1. **The firewall.** A recap is the one artifact that leaves the building, and
+>    TEAM_FEEDBACK is explicit that its generator must never read a report body.
+>    Inside `deliverables` that would be a promise a future `SELECT` could break;
+>    in its own table it is a **topology fact** — the same argument this codebase
+>    already makes for `/api/agent/*` — and `lib/firewall.js guardRecapQuery()`
+>    now enforces it at runtime by throwing on any SQL that names the table.
+> 2. **Shape.** A report is per-PERSON and REQUIRED. `deliverables` has no
+>    username column and carries a draft/approved/sent lifecycle that is wrong
+>    here: **sign-off is NOT required** (Tom, 2026-08-27).
+> 3. **Nagging.** "Who still owes theirs" is a join against `crew_assignments`
+>    keyed on `(show, person)` — a UNIQUE INDEX here, unenforceable in a shared
+>    kind-discriminated table.
+>
+> Only crew with a **login** owe one: a local hire recorded by name has nobody to
+> ask, which is exactly the gap between the crew count and the report count.
+> An uploaded doc is a `files` row of kind `report`; an in-app write becomes one
+> too, so both forms land in the event folder's Files.
+
+**`notification_outbox`** (F3) *(idx: `(username, status)`, `(status, mode)`, `note_id`, `show_id`)*
+`id · username · kind · mode · status · subject · body · link · note_id · project_id · show_id · actor · driver · attempts · last_error · skipped_reason · queued_at · sent_at`
+
+> The **bell is unchanged and stays primary**; this is the SECOND channel, and
+> nothing here can suppress a bell notification. `note_id` is what makes
+> **skip-if-read-in-app** possible: the flush joins `note_reads` and marks the
+> row `skipped` rather than mailing somebody about a thing they already read.
+> A **retryable** driver refusal (the unconfigured `graph` driver) leaves the row
+> `queued` — the difference between "not yet" and "never".
+>
+> **The digest** is literally one open `kind='digest'` row per person, whose
+> subject counts what is waiting behind it. **HONEST TODO: nothing in this app
+> runs on a timer.** Immediate rows flush on the boot/admin sweep; digest rows
+> flush only when a caller asks explicitly (`POST /api/admin/notifications/flush`
+> with `{digest:true}`). A real daily digest needs Railway cron or the per-user
+> agents of `ARCHITECTURE.md`, and this app will not fake one with `setInterval`
+> and hope the dyno stays up.
+
+**`notification_prefs`** (F3) *(unique `(username, kind)`)* — `id · username · kind · mode · updated_at`
+
+> **Deviations only.** A user who never opens Settings has no row here and gets
+> the house default: assignments and @mentions immediately, everything else
+> digested (Tom's rule). Writing the house default **removes** the row, so a
+> later change to the defaults reaches everyone who never expressed an opinion.
+
 > **Nothing sends anything.** `POST /api/recaps/:id/sent` records that a *human*
 > sent it. There is no outbound path in this app, for people or agents.
 
@@ -321,21 +396,86 @@ lets the feed render *"filed by Tom's agent from email 'Re: LOVB invoices' —
 
 ---
 
+## F5 · the commercial lifecycle (additive, and provably so)
+
+Tom-confirmed 2026-08-27:
+`quoted -> confirmed -> in_progress -> delivered -> closed -> archived`.
+
+**Nothing migrates.** `STAGES` is the legacy five PLUS the six lifecycle values,
+so every stage string already in the database is still a legal value and no row
+is ever rewritten. `STAGE_ALIAS` maps a legacy value onto its lifecycle POSITION
+so a chip, a timeline and the push gate can *order* an old row without touching
+it — a display/ordering concern and nothing more:
+
+| stored | reads as | position |
+|---|---|---|
+| `lead` | "Sales" | `quoted` |
+| `planning` | "Planning" | `confirmed` |
+| `ready` | "Ready" | `confirmed` |
+| `scheduled` | "Scheduled" | `in_progress` |
+| `closed` | "Closed" | `closed` |
+
+An unknown string degrades to `quoted` — the least-committed position — rather
+than throwing out of a renderer.
+
+**The CONFIRM FACT is `shows.confirmed_at`, never the stage string.** A legacy
+row therefore reads as *confirmed by position, with no datestamp*, which is the
+truth about it; only the explicit Confirm action writes a datestamp.
+`isConfirmed(row)` = an explicit `confirmed_at` **OR** a stage at/after
+`confirmed` — and that second clause is exactly what keeps every pre-existing
+`planning`/`ready`/`scheduled`/`closed` show pushable with no migration.
+
+**The push gate** sits on the LIVE path only. A dry run sends nothing and its
+whole job is to tell you what is wrong before you commit, so it still runs and
+reports "not confirmed" among its `problems`; the live push is the one that
+answers 409.
+
+---
+
+## F6 · closeout + archiving
+
+`closeoutStatus(showId)` answers three questions with SQL, never with a flag
+somebody remembered to tick:
+
+1. **recap sent** — a `deliverables` row of kind `recap` at status `sent`
+2. **every tech report filed** — no `tech_reports` row still `owed` (a show with
+   no crew owes nothing and passes trivially)
+3. **no open money exception ON THIS SHOW** — the SHOW-SCOPED subset of
+   `financeExceptions()`. That scan also reports show-less rows (a PO with no
+   show, a job still on a TEMP number), and a folder-wide accounting problem must
+   not hold one city's show hostage.
+
+`closeout_complete_at` is stamped the first time all three hold, and **CLEARED
+again if the state regresses** — a late expense un-completes a closeout, and the
+60-day clock should not keep running against paperwork that came undone.
+
+`ARCHIVE_AFTER_DAYS` (60) after that stamp, the sweep archives the show; a folder
+archives when every show inside it is. **Archived is out of the working set, not
+out of the app**: list routes exclude it by default, `GET /api/{shows,projects}/:id`
+always resolves (deep links and search still open it), and a folder's own show
+list keeps every show it ever had — which is what leaves season rollups unaffected.
+
+**No cron.** `sweep()` runs once on boot and on `POST /api/admin/sweep`. It is
+idempotent, so both paths are safe to repeat. A real daily job needs Railway cron
+or the per-user agents of `ARCHITECTURE.md`; this app does not fake one.
+
+---
+
 ## Delete cascades (manual, transaction-wrapped, `lib/db.js`)
 
 | Entry point | Reaches |
 |---|---|
 | `deletePoCascade(poId)` | po-anchored `notes` (+ their reads/mentions), `po_lines`, `activity`, nulls `expenses.po_id`, the PO |
-| `deleteShowCascade(showId)` | notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, `proposals`, `activity`, nulls `po_lines.show_id`, the show |
-| `deleteProjectCascade(projectId)` | every show (via the show cascade), every PO (via the PO cascade), job- and project-anchored notes, `budget_lines`, `jobs`, project-level `steps`/`files`/`expenses`/`milestones`/`deliverables`/`proposals`, `activity`, the project |
+| `deleteShowCascade(showId)` | notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, `proposals`, **`tech_reports`**, **`notification_outbox`**, `activity`, nulls `po_lines.show_id`, the show |
+| `deleteProjectCascade(projectId)` | every show (via the show cascade), every PO (via the PO cascade), job- and project-anchored notes, `budget_lines`, `jobs`, project-level `steps`/`files`/`expenses`/`milestones`/`deliverables`/`proposals`/**`tech_reports`**/**`notification_outbox`**, `activity`, the project |
 | `DELETE /api/files/:id` (single file, `routes/files.js`) | file-anchored `notes` (+ reads/mentions), **`spec_renders` by `file_id`**, nulls `expenses.file_id` / `bookings.file_id` / `purchase_orders.quote_file_id` / `.invoice_file_id`, the file. The NAS bytes are left on disk deliberately. `spec_renders` was added in the 2026-08-27 hardening pass: `spec_renders.file_id` is `NOT NULL`, so a render cannot be orphaned the way a nullable FK can — it goes with the file or it is a dangling row |
 
 The smoke test builds a folder carrying a child of **every** one of these tables,
-deletes it, and asserts **zero orphans** in all 24.
+deletes it, and asserts **zero orphans** in all 26.
 
 ---
 
-## API surface (160 routes)
+## API surface (192 routes)
 
 Human routes return **snake_case** records matching `public/data.js`; agent
 routes speak **camelCase** per `AGENT_API.md`. Request bodies accept **both**
@@ -390,7 +530,45 @@ Deliverabl. GET /api/shows/:id/deliverables · GET /api/shows/:id/recap
 Proposals   GET /api/proposals[/:id] · GET /api/files/:id/proposal
             POST /api/proposals/:id/confirm · /reject                (session only)
 Activity    GET /api/activity
-Push        POST /api/shows/:id/push-to-scheduler        (dry run; live = 501)
+Push        POST /api/shows/:id/push-to-scheduler        (dry run; live = 501,
+            and REFUSED with 409 pre-confirm — the dry run still runs and says why)
+
+── the first post-deploy release ────────────────────────────────────────────
+Events      POST /api/events                             (F1 · pm+ · folder + job
+            + show + lanes + ONE notify, in one transaction)
+Stages      GET  /api/stages                             (F5 · the vocabulary +
+            the legacy alias map, so the SPA hardcodes neither)
+Scope       GET  /api/shows/:id/scope                    (F4 · + the bound spec
+            and any divergence QUESTIONS)
+            PUT  /api/shows/:id/scope                    (pm+ on the folder)
+            POST /api/shows/:id/scope/from-spec          (auto-fill, stack-aware)
+Lifecycle   POST /api/shows/:id/confirm                  (F5 · admin/manager, or
+            the pm who owns the show or its folder. 409 if already confirmed)
+            POST /api/shows/:id/struck                   (F2 · pm+ · creates the
+            reports the crew owes and nags them)
+Closeout    GET  /api/shows/:id/closeout                 (F6 · machine-checked;
+            reading it SYNCS the marker, so the number and the clock agree)
+Archive     POST /api/shows/:id/{archive,unarchive}      (F6 · ADMIN only)
+            POST /api/projects/:id/{archive,unarchive}   (F6 · ADMIN only)
+            GET  /api/projects?archived=1                (the Archive view)
+            GET  /api/{projects,shows}?include_archived=1
+Reports     GET  /api/shows/:id/tech-reports             (F2 · pm+ sees all +
+            the waiting-on names; a tech sees only their own row)
+            GET  /api/tech-reports/:id                   (own, or pm+)
+            GET  /api/me/reports                         (the My Tasks nag)
+            POST /api/shows/:id/tech-report              (file MINE)
+            PUT  /api/tech-reports/:id                   (revise MINE — a pm
+            may read, nag and review, but never WRITE somebody else's)
+            POST /api/tech-reports/:id/{review,reopen}   (pm+ · OPTIONAL)
+            POST /api/shows/:id/tech-reports/nag         (pm+ on the folder)
+Notify      GET  /api/notification-kinds
+            GET/PUT /api/me/notification-prefs           (F3 · your own only)
+            GET  /api/me/notifications                   (your own queue)
+            GET  /api/admin/notification-outbox          (admin)
+            GET  /api/admin/mail-status                  (admin)
+            POST /api/admin/notifications/flush          (admin; {digest:true})
+            POST /api/admin/sweep                        (admin · F2+F6, and the
+            honest answer to "no cron": boot + on demand, idempotent)
 
 Agent       GET  /api/agent/whoami
             POST /api/agent/match
@@ -444,6 +622,18 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | `getDeliverables` / `getRecap` / `generateRecap` / `updateRecap` | `GET /api/shows/:id/deliverables` · `/recap` · `POST /api/shows/:id/recap` · `PUT /api/shows/:id/recap` |
 | `approveRecap` / `reopenRecap` / `markSent` | `POST /api/shows/:id/recap/{approve,reopen,sent}` |
 | `reorderRecapPhoto` / `removeRecapPhoto` / `addRecapPhoto` | *stay client-side* — they compose `updateRecap({photo_ids})` |
+| **F1** `createEvent(payload)` | `POST /api/events` — one call, one transaction, one notify |
+| **F4** `getScope` / `setScope` / `scopeFromSpec` | `GET`/`PUT /api/shows/:id/scope` · `POST /api/shows/:id/scope/from-spec` |
+| **F5** `confirmShow(sid)` | `POST /api/shows/:id/confirm` |
+| **F2** `markStruck(sid)` | `POST /api/shows/:id/struck` |
+| **F2** `listTechReports` / `getTechReport` / `myReports` | `GET /api/shows/:id/tech-reports` · `GET /api/tech-reports/:id` · `GET /api/me/reports` |
+| **F2** `fileTechReport` / `reviewTechReport` / `reopenTechReport` / `nagTechReports` | `POST /api/shows/:id/tech-report` · `POST /api/tech-reports/:id/{review,reopen}` · `POST /api/shows/:id/tech-reports/nag` |
+| **F3** `notificationPrefs` / `setNotificationPrefs` | `GET`/`PUT /api/me/notification-prefs` |
+| **F3** `myNotifications` / `mailStatus` / `flushNotifications` | `GET /api/me/notifications` · `GET /api/admin/mail-status` · `POST /api/admin/notifications/flush` |
+| **F6** `getCloseout(sid)` | `GET /api/shows/:id/closeout` |
+| **F6** `archiveShow` / `unarchiveShow` / `archiveProject` / `unarchiveProject` | `POST /api/{shows,projects}/:id/{archive,unarchive}` |
+| **F6** `listArchivedProjects()` | `GET /api/projects?archived=1` |
+| **F6** `sweep()` | `POST /api/admin/sweep` |
 
 **Two signature deviations worth knowing:**
 1. `confirmDoc(fileId)` / `rejectDoc(fileId)` take a **file id** in the mock; the
@@ -451,6 +641,14 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
    precisely for that hop, so the swap is two lines rather than a refactor.
 2. `getTemplate(type)` keys by event type; the REST route accepts a type **or**
    a numeric id.
+3. **F2/F3 read-through cache.** `tech_reports` and `notification_outbox` rows
+   are absorbed into `TECH_REPORTS` / `NOTIF_OUTBOX` by `SR.absorb.report` and
+   `SR.absorb.notification`, because the Reports tab, its badge and the
+   "waiting on" line all read those flat stores **synchronously** — exactly the
+   way every other renderer reads `SHOWS_BY_ID`. A server row has to land where
+   a demo row does, or the tab renders an empty state against a populated
+   server. Both stores are cleared by `resetStore()` on login, or the demo
+   fixture would leak into a real session.
 
 ### Route topology is the guardrail
 
@@ -784,6 +982,43 @@ surfaces the one real operator edit (field width 225 vs 222).
 | `TOOLS_ORIGINS` | *(unset)* | **REQUIRED to use spec-bind.** Comma-separated allowlist of origins that may `postMessage` a spec bundle into the `?bind-spec=1` popup; served at `GET /api/config` as `toolsOrigins`. **Unset fails CLOSED** — the allowlist is `[]` and the popup accepts nothing but its own origin. Since the hardening pass it also fails **audibly**: `GET /api/config` reports `features.specBind: false` and the popup says "Spec binding is not configured on this server" the moment it opens, instead of waiting 30s and looking like the tool broke. A deployment that expects e360-tools to bind specs MUST set it. |
 | `FLEX_BASE_URL` / `FLEX_API_KEY` | *(unset)* | **Unset = every `lib/flex.js` function throws a 501 naming the missing var** — never a silent empty result |
 | `FLEX_TIMEOUT_MS` · `FLEX_TREE_MAX_DEPTH` · `FLEX_TREE_MAX_NODES` · `FLEX_IDENTITY_BATCH` · `FLEX_USER_CACHE_MS` | `20000` · `4` · `200` · `5` · `1800000` | guards on the Event Folder tree walk (one `/identity` call per node against a BETA API) and a TTL on the current-user cache |
+
+### Mail — F3, the notification outbox's delivery layer (`lib/mail.js`)
+
+Every real delivery (assignment · @mention · a notify-picker pick · a tech-report
+nag) is queued into `notification_outbox` and flushed by a **driver**. Nothing in
+the app reaches a mail server except through `lib/mail.js send()`, so "how a
+notification is delivered" has exactly one call site.
+
+| Var | Default | Notes |
+|---|---|---|
+| `MAIL_DRIVER` | `log` | `log` · `graph`. **`log` is the default and is not a stub**: it records the delivery in the activity trail (`notification.sent`) and marks the row sent. On a box with no mailbox that is the honest behaviour — the notification is recorded, addressed and auditable; it simply travelled zero metres. |
+| `MAIL_FROM` | *(unset)* | the sending mailbox — the dedicated `showrunner@` account (TEAM_FEEDBACK, Tom 2026-08-27). Required by `graph`. |
+| `MAIL_TENANT_ID` | *(unset)* | Entra tenant GUID. Required by `graph`. |
+| `MAIL_CLIENT_ID` | *(unset)* | app-registration GUID. Required by `graph`. |
+| `MAIL_CLIENT_SECRET` | *(unset)* | client secret. Required by `graph`. |
+| `MAIL_REPLY_TO` | *(unset)* | optional `Reply-To`. |
+| `APP_BASE_URL` | *(unset)* | used to make the deep link in a message body absolute. Unset leaves the link relative — still useful, still honest. |
+| `TECH_REPORT_DUE_DAYS` | `3` | how long a tech has to file a show report after strike. |
+| `ARCHIVE_AFTER_DAYS` | `60` | F6 — days after `closeout_complete_at` before the sweep auto-archives. Tom's number. |
+| `SWEEP_ON_BOOT` | *(on)* | `0` disables the boot sweep. |
+| `SWEEP_LOOKBACK_DAYS` | `45` | How far back the sweep reaches to **strike a show it has never seen**. The first boot after this release meets a database full of shows that already happened; unbounded, it would strike all of them and nag every crew member about a job from last year. Older than this is history — a pm can still strike it by hand. A show **already struck** is unaffected, and closeout/archiving have no lookback at all: they are pure re-checks of the record. |
+
+**`graph` is a SKELETON and says so.** The mailbox and app registration are an
+M365-admin task that has not happened (HANDOFF "Open / next"), so the wire call
+is deliberately not written — there is nothing to authenticate against and a
+half-written client would be untestable fiction. What IS built is everything up
+to the wire: config detection, the token + `sendMail` URLs, the exact JSON body
+(`graphTokenUrl()` / `graphSendMailUrl()` / `graphSendMailBody()`), and the
+failure contract. Selected but unconfigured, it answers a **501-shaped
+"mail not configured"** naming the missing vars, and **the item stays queued** —
+so turning the env vars on later delivers the backlog rather than discovering it
+was thrown away. `GET /api/admin/mail-status` reports exactly this.
+
+**System mail is not agent outbound.** "File-don't-fire" (`AGENT_API.md` §9) is
+about an agent sending mail *as a person*. This is the app telling a person that
+something of theirs changed, from its own mailbox, on that person's stated
+preference. Nothing here reads a mailbox, signs as a user, or replies to a thread.
 
 Agent-key limits are fixed at **120 writes/hour and 600 reads/hour per key**
 (`AGENT_API.md` §9).

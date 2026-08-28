@@ -31,6 +31,7 @@ const { requireAuth, canApproveRecap } = require('../lib/auth');
 const { asyncH, badRequest, forbidden, notFound, idParam, limitOf } = require('../lib/http');
 const { logActivity, actorUser, isAgentActor } = require('../lib/activity');
 const { parseMentions, resolveUsernames, recordMentions, markRead } = require('../lib/mentions');
+const notify = require('../lib/notify');
 const { pick, has, dbToNote } = require('../lib/mappers');
 const { NOTE_ANCHORS, intOrNull } = require('../lib/enums');
 
@@ -201,6 +202,18 @@ async function createNote(c, {
     await logActivity(c, { projectId: anchor.projectId, actor: author, action: 'note.add.project',
       detail: anchor.label || '' });
   }
+  // F3. An @mention is a REAL delivery, so it mirrors into the outbox — same
+  // transaction, immediate by default (Tom's rule). The BODY travels because a
+  // mention without its sentence is useless; note that this is the person's own
+  // mail, not the audit trail, which still carries only the mention list (36).
+  await notify.enqueueMany(c, merged.filter((u) => u.toLowerCase() !== actorUser(author).toLowerCase()), {
+    kind: 'mention', actor: author,
+    subject: `${actorUser(author)} mentioned you on ${anchor.label || anchorType}`,
+    body: text, noteId: note.id,
+    projectId: anchor.projectId || null, showId: anchor.showId || null,
+    link: anchor.showId ? '/#show/' + anchor.showId
+      : (anchor.projectId ? '/#folder/' + anchor.projectId : '')
+  });
   return note;
 }
 

@@ -136,8 +136,21 @@ app.get('/api/config', (req, res) => {
       // lets it say "not configured on this server" the moment it opens, which
       // is a different problem with a different fix (an env var, not a retry).
       // Fail closed, but say so. TOOLS_ORIGINS is REQUIRED in prod — SCHEMA.md.
-      specBind: TOOLS_ORIGINS.length > 0
-    }
+      specBind: TOOLS_ORIGINS.length > 0,
+      // F3. Same argument as specBind above: the Settings card must be able to
+      // say "your preference is recorded, but nothing can leave the building
+      // yet" instead of implying mail that will never arrive. Public and
+      // secret-free — a driver NAME and a boolean, never a credential.
+      mail: require('./lib/mail').mailConfigured(),
+      mailDriver: require('./lib/mail').driverName()
+    },
+    // F5. The stage vocabulary, published so the SPA never hardcodes it.
+    stages: {
+      lifecycle: require('./lib/enums').LIFECYCLE_STAGES,
+      labels: require('./lib/enums').STAGE_LABELS,
+      alias: require('./lib/enums').STAGE_ALIAS
+    },
+    archiveAfterDays: require('./lib/lifecycle').ARCHIVE_AFTER_DAYS
   });
 });
 app.get('/api/health', async (req, res) => {
@@ -185,6 +198,11 @@ app.use('/api', require('./routes/purchasing'));
 app.use('/api', require('./routes/notes'));
 app.use('/api', require('./routes/schedule'));
 app.use('/api', require('./routes/deliverables'));
+// F2 tech show reports · F3 the notification outbox + F6 the admin sweep. Both
+// are session-only (router-level requireAuth, which 403s an x-agent-key), so
+// they belong in the fourth group with everything else that needs a person.
+app.use('/api', require('./routes/reports'));
+app.use('/api', require('./routes/notifications'));
 
 app.use('/api', (req, res) => {
   res.status(404).json({ error: `No route ${req.method} /api${req.path}` });
@@ -231,6 +249,39 @@ async function housekeeping() {
   }
 }
 
+// ── F2/F6. THE SWEEP, on boot ───────────────────────────────────────────────
+// Strike overdue shows, create the tech reports their crews owe, re-nag whoever
+// is still out, re-check every closeout, auto-archive what is ripe, then flush
+// the immediate notification queue.
+//
+// HONEST TODO, and the reason this is here at all: THIS APP HAS NO SCHEDULER.
+// There is no cron, no worker and no timer pretending to be one. The sweep runs
+// (a) once on boot — which on Railway means every redeploy and every restart —
+// and (b) on POST /api/admin/sweep, which is what a future scheduler would
+// call. It is fully idempotent, so both paths are safe to repeat. Making it a
+// real daily job needs Railway cron or the per-user agents of ARCHITECTURE.md;
+// until one of those exists this app will not fake it with setInterval and
+// hope the dyno stays up.
+async function bootSweep() {
+  if (process.env.SWEEP_ON_BOOT === '0') return;
+  try {
+    const { sweep } = require('./lib/lifecycle');
+    const r = await sweep({ actor: 'system' });
+    if (r.struck || r.reports_created || r.nagged || r.archived || r.closeout_complete) {
+      console.log(`[sweep] struck:${r.struck} reports:${r.reports_created} nagged:${r.nagged} ` +
+        `closeout:${r.closeout_complete} archived:${r.archived} folders:${r.projects_archived}`);
+    }
+    if (r.notifications && r.notifications.considered) {
+      console.log(`[sweep] notifications considered:${r.notifications.considered} ` +
+        `sent:${r.notifications.sent || 0} skipped:${r.notifications.skipped || 0} ` +
+        `queued:${r.notifications.queued || 0} driver:${r.notifications.driver}`);
+    }
+  } catch (e) {
+    // A sweep failure must never stop the app booting — it is housekeeping.
+    console.error('[sweep]', e.message);
+  }
+}
+
 // ── BOOT ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3100;
 
@@ -244,6 +295,7 @@ async function boot() {
   await seedAll();
   await housekeeping();
   setInterval(housekeeping, 6 * 60 * 60 * 1000).unref();
+  await bootSweep();
 
   return new Promise((resolve) => {
     const server = app.listen(PORT, () => {

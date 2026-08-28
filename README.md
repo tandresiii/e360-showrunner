@@ -17,6 +17,17 @@ agent can file documents, propose expenses and draft work — under a hard rule:
 
 `APP_VERSION` is at the top of `server.js` and is served at `GET /api/version`.
 
+> **First post-deploy release (2026-08-27).** Six Tom-confirmed features landed
+> on top of the deployed build, every migration strictly additive:
+> **F1** real event creation (the last mock button in the app) carrying the
+> notify picker · **F2** required tech show reports with their own table, their
+> own two gates and a runtime firewall assertion · **F3** a notification outbox
+> with per-user preferences and a delivery driver (`log` now, Graph `sendMail`
+> skeletoned) · **F4** a structured scope line, spec-verified and client-safe ·
+> **F5** the commercial lifecycle with an explicit Confirm · **F6** a
+> machine-checked closeout and archiving. See `SCHEMA.md` for the schema, the
+> routes and the env vars.
+
 ---
 
 ## What it actually is
@@ -174,7 +185,9 @@ behaviour rather than tuning it:
 
 | Integration | Status |
 |---|---|
-| **Push to scheduler** | **Proven locally.** Dry run is the default and returns the exact payloads it would send. The live path is real — not commented out — and is gated on `SCHEDULER_BASE_URL`; unset, it is a 501 that names the variable. Verified end-to-end against a real local staffing app (65 assertions), including idempotent re-push and a clean 502 when the scheduler is unreachable. Not yet pointed at production staffing. |
+| **Push to scheduler** | **Proven locally.** Dry run is the default and returns the exact payloads it would send. The live path is real — not commented out — and is gated on `SCHEDULER_BASE_URL`; unset, it is a 501 that names the variable. Verified end-to-end against a real local staffing app (72 assertions), including idempotent re-push and a clean 502 when the scheduler is unreachable. **Since F5 it also refuses a show the client has not confirmed** — 409 on the live path, while the dry run still runs and explains the refusal. Not yet pointed at production staffing. |
+| **Email notifications (F3)** | **Queued, not sent.** Every real delivery lands in `notification_outbox` under the recipient's own preference, and the default `log` driver records it in the activity trail — auditable, addressed, and it travelled zero metres. The `graph` driver is a **skeleton**: config detection, the token + `sendMail` URLs and the exact JSON body are written, the wire call is not, because the `showrunner@` mailbox and app registration are still an M365-admin task. Unconfigured it answers a 501 and **the items stay queued**, so turning the env vars on delivers the backlog. |
+| **The sweep (F2/F6)** | **No scheduler.** Strike detection, report nags, the closeout re-check and auto-archiving run once **on boot** and on `POST /api/admin/sweep`. Idempotent, so both are safe to repeat. A real daily job needs Railway cron or the per-user agents; the app does not fake one with `setInterval`. |
 | **Flex** | **Client ready, probes pending a key.** `lib/flex.js` is written and covered by 67 offline tests against recorded shapes. Nothing in `routes/` calls it yet — the per-show gear state is read/written directly, and the UI labels itself *modeled*. The API is BETA, so none of the recorded shapes are confirmed until `scripts/flex-probe.js` runs with a real key. |
 | **Spec bind** (`?bind-spec=1`) | **Verified both sides.** The popup carries the operator's session so the three spec tools never hold a credential; every inbound message is origin-checked against server-served `TOOLS_ORIGINS` (fail-closed). `bind-complete` carries the `stale` node list and `bind-cancelled` fires when the operator closes the popup — both are implemented in `bind.js` **and** handled in all three tools in `C:\code\e360-tools`. |
 | **NAS** | **Stubbed, pending Tailscale.** The path convention, metadata and cached render bundles are all real, and the `local` driver works. Byte-serving from the E360 NAS is not wired: `smb` and `webdav` are explicit stubs that throw a 501 telling you what to finish. The viewer renders the cached bundle or thumbnail, so nothing in the UI depends on NAS reachability at view time. |

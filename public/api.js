@@ -237,9 +237,14 @@ var SR = (function () {
     [PROJECTS_BY_ID, SHOWS_BY_ID, STEPS_BY_ID, FILES_BY_ID, BOOKINGS_BY_ID, JOBS_BY_ID,
      EXPENSES_BY_ID, BUDGET_BY_JOB, BUDGET_BY_ID, POS_BY_ID, PO_LINES_BY_PO, PO_LINES_BY_ID,
      NOTES_BY_ID, SCHEDULE_BY_ID, CREW_BY_ID, DELIVERABLES_BY_ID, ROSTER, USERS_BY_ID,
+     /* F2/F3 — a new store that is not cleared here is a store that leaks the
+        DEMO fixture into a real session on login. */
+     REPORTS_BY_ID, NOTIF_BY_ID,
      NOTE_READS].forEach(clearMap);
     [PROJECTS, ALL_SHOWS, ALL_JOBS, ALL_EXPENSES, ALL_POS, PO_LINES, ALL_NOTES,
-     ALL_DELIVERABLES, USERS, BUDGET_LINES].forEach(function (a) { a.length = 0; });
+     ALL_DELIVERABLES, USERS, BUDGET_LINES,
+     TECH_REPORTS, NOTIF_OUTBOX].forEach(function (a) { a.length = 0; });
+    NOTIF_PREFS = {};
     /* mentionLookup() memoizes name->username off USERS on first use. USERS is
        emptied above, but the cache is not derived state the maps own — so
        without this it survives the swap and @mentions keep resolving against
@@ -376,6 +381,27 @@ var SR = (function () {
       });
       BUDGET_BY_JOB[jobId] = out;
       return out;
+    },
+    /* F2 — tech show reports. The Reports TAB, the tab BADGE and the "waiting
+       on" line all read the flat store synchronously (reportsForShow /
+       reportFor / reportSummary), exactly the way every other renderer in this
+       app reads SHOWS_BY_ID. So a server row has to land in the same place a
+       demo row does, or the tab renders an empty state against a populated
+       server — which is precisely the class of bug the read-through cache
+       exists to prevent. */
+    report: function (r) {
+      if (!r) return r;
+      var rec = keep(REPORTS_BY_ID, r);
+      push1(TECH_REPORTS, rec);
+      return rec;
+    },
+    /* F3 — outbox rows. The Settings card's queue count reads the flat store
+       the same way. */
+    notification: function (n) {
+      if (!n) return n;
+      var rec = keep(NOTIF_BY_ID, n);
+      push1(NOTIF_OUTBOX, rec);
+      return rec;
     },
     list: function (fn) { return function (rows) { return (rows || []).map(fn); }; }
   };
@@ -754,8 +780,13 @@ var api = (function () {
     /* The projects dashboard rolls every step under every show up into one RAG
        (components.js projectRollup), so the list read carries the steps too —
        one extra GET for the whole board rather than N per-show fetches. */
+    /* F6 — the DEFAULT list is the WORKING SET: archived folders are excluded
+       ("we don't want 300 in our normal area in a year"). The Archive view asks
+       for them by name through listArchivedProjects(). Season rollups are
+       unaffected: getProject()/resolveFolder() still return every show a folder
+       holds, archived included, because you navigated there deliberately. */
     listProjects: function () {
-      if (!API()) return ok(PROJECTS.map(hydrateProject));
+      if (!API()) return ok(activeProjects().map(hydrateProject));
       return Promise.all([SR.get('/api/projects'), SR.get('/api/steps')]).then(function (r) {
         var byShow = {};
         (r[1] || []).forEach(function (s) { A.step(s); (byShow[s.show_id] = byShow[s.show_id] || []).push(s); });
@@ -777,7 +808,10 @@ var api = (function () {
     /* ---- shows --------------------------------------------------------- */
     listShows: function (projectId) {
       if (!API()) {
-        if (projectId == null) return ok(ALL_SHOWS.map(hydrateShow));
+        /* F6 — global lists (Calendar, Files, Team) read the working set; a
+           FOLDER's own show list keeps everything, so the season rollup and
+           the archived-show drill-in both still work. */
+        if (projectId == null) return ok(activeShows().map(hydrateShow));
         var p = PROJECTS_BY_ID[Number(projectId)];
         return p ? ok(p.shows.map(hydrateShow)) : fail('project ' + projectId + ' not found');
       }
@@ -865,6 +899,18 @@ var api = (function () {
         var st = STEPS_BY_ID[Number(id)];
         if (!st) return fail('step ' + id + ' not found');
         st.owner = username || null;
+        /* F3 — being given work is the archetypal real delivery, and Tom's
+           default for it is immediate. Unassigning notifies nobody: there is
+           no one to tell. */
+        if (username && username !== ME) {
+          var s2 = SHOWS_BY_ID[st.show_id];
+          mkNotif(username, 'assignment', 'Assigned to you — ' + st.title, {
+            body: ME + ' assigned you “' + st.title + '” on ' +
+              (s2 ? showLabel(s2) : 'Showrunner') + (st.due_date ? ', due ' + st.due_date + '.' : '.'),
+            actor: ME, show_id: st.show_id || null,
+            project_id: s2 ? s2.project_id : null,
+            link: st.show_id ? '/#show/' + st.show_id : '' });
+        }
         return ok(st);
       }
       return SR.put('/api/steps/' + Number(id) + '/assign', { owner: username || '' }).then(A.step);
@@ -872,7 +918,9 @@ var api = (function () {
     myOpenSteps: function (username) {
       if (!API()) {
         var who = username || ME, out = [];
-        ALL_SHOWS.forEach(function (s) {
+        /* F6 — an archived show is out of the working set, so its open steps
+           stop nagging. The server's /my-steps applies the same filter. */
+        activeShows().forEach(function (s) {
           s.steps.forEach(function (st) {
             if (st.owner === who && normStatus(st.status) !== 'done' && normStatus(st.status) !== 'na') {
               out.push({ show: hydrateShow(s), step: st });
@@ -1532,6 +1580,11 @@ var api = (function () {
           a.show.activity.unshift(mkAct(n.author, lbl, detail, 0, _nowHM()));
         }
         /* job / project anchors have no activity surface yet — see report */
+        /* F3 — an @mention is a REAL delivery, so it mirrors into the outbox.
+           The bell already has it; this is the second channel, on each
+           recipient's own preference. The note id rides along, which is what
+           makes skip-if-read-in-app possible at flush time. */
+        _queueMentions(n, a);
         return ok(n);
       }
       return SR.post('/api/notes', { anchor_type: t, anchor_id: id, body: text,
@@ -1642,6 +1695,17 @@ var api = (function () {
       if (!text) return fail('a notification needs text');
       if (!API()) {
         var n = mkNote(t, id, ME, text, 0, _nowHM(), { kind: 'notify', mentions: to });
+        /* F3 — a notify-picker pick is a real delivery too, under its own kind
+           so the recipient's preference for THESE (digest by default, per
+           Tom's "assignments+mentions immediate, rest digested") applies. */
+        var a2 = noteAnchor(n);
+        to.forEach(function (u) {
+          mkNotif(u, 'notify', text.replace(/\s*@\S+/g, '').trim() || 'An update on Showrunner', {
+            body: text, note_id: n.id, actor: ME,
+            show_id: a2 && a2.show ? a2.show.id : null,
+            project_id: a2 && a2.show ? a2.show.project_id : null,
+            link: a2 && a2.show ? '/#show/' + a2.show.id : '' });
+        });
         return ok({ ok: true, delivered: to.length, note: n });
       }
       var withHandles = text + ' ' + to.map(function (u) { return '@' + u; }).join(' ');
@@ -2075,6 +2139,472 @@ var api = (function () {
                      { sent_to: sentTo ? String(sentTo).trim() : undefined }).then(unwrapRecap);
     },
 
+
+    /* ══════════════════════════════════════════════════════════════════════
+       F1 · NEW EVENT — folder + job + show + lanes, in one act
+       ──────────────────────────────────────────────────────────────────────
+       "New Event" was the last mock button in the app. It is a COMPOSITE over
+       routes that already exist, not a second implementation of any of them,
+       and it is ONE call so that one act produces one transaction, one ping
+       and one line in the activity feed (see routes/core.js POST /api/events
+       for why that matters). The notify-picker row on the modal rides it. */
+    createEvent: function (payload) {
+      var b = payload || {};
+      var name = String(b.name || '').trim();
+      if (!name) return fail('name required');
+      var type = EVENT_TYPES[b.type] ? b.type : 'led';
+      if (!API()) {
+        if (!ROLE_ORDER.slice(0, 3).some(function (r) { return r === CURRENT_USER.role; })) {
+          return fail('creating an event requires pm, manager or admin');
+        }
+        var owner = (CURRENT_USER.role === 'admin' || CURRENT_USER.role === 'manager') && b.owner
+          ? b.owner : ME;
+        var pid = 1, sid = 1, jid = 1;
+        PROJECTS.forEach(function (p) { if (p.id >= pid) pid = p.id + 1; });
+        ALL_SHOWS.forEach(function (s) { if (s.id >= sid) sid = s.id + 1; });
+        ALL_JOBS.forEach(function (j) { if (j.id >= jid) jid = j.id + 1; });
+        /* the job opens on a TEMP placeholder — nobody has a QuickBooks number
+           the moment a folder is opened, and Confirm is when Candice cuts one */
+        var yy = String(new Date().getFullYear() % 100);
+        var seq = 1;
+        ALL_JOBS.forEach(function (j) {
+          var m = /^TEMP-(\d{2})-(\d{3,})$/.exec(String(j.qb_job_number || ''));
+          if (m && m[1] === yy) seq = Math.max(seq, parseInt(m[2], 10) + 1);
+        });
+        var temp = 'TEMP-' + yy + '-' + ('00' + seq).slice(-3);
+        var job = { id: jid, project_id: pid, qb_job_number: temp, qb_number_status: 'temp',
+                    client: String(b.client || ''), deal_type: b.deal_type === 'sale' ? 'sale' : 'rental',
+                    description: '', contract_value: 0, budget_total: 0 };
+        var proj = { id: pid, slug: String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''),
+                     name: name, client: String(b.client || ''), type: type,
+                     stage: 'quoted', owner: owner, description: String(b.description || ''),
+                     jobs: [job], shows: [], milestones: [], summary: null, source: null,
+                     archived_at: null, archived_by: null };
+        var showName = String(b.show_name || name).trim();
+        var show = {
+          id: sid, project_id: pid, slug: proj.slug, name: showName,
+          venue: String(b.venue || ''), city: String(b.city || ''),
+          load_in_date: b.load_in_date || '', event_date: b.event_date || '',
+          strike_date: b.strike_date || '',
+          stage: 'quoted', rag: 'idle', on_site_poc: b.on_site_poc || '', owner: owner,
+          default_job_id: jid, scheduler_event_id: null, cabinets: Number(b.cabinets) || 0,
+          type: type, milestones: [], summary: null, source: null,
+          steps: [], files: [], bookings: [], proofs: [], expenses: [], activity: [],
+          schedule_items: [], crew_assignments: [],
+          chain: { content: _chainNode([0]), cabling: _chainNode([0]),
+                   power: _chainNode([0]), pull: _chainNode([0]) },
+          gear: { linked: false, pulled: false, elementId: null, kit: buildKit(Number(b.cabinets) || 72),
+                  view: 'pull-sheet', gearListId: null, gearListType: 'pull-sheet', docNumber: '—' },
+          load_in_time: null, doors_time: null, event_time: null, strike_time: null,
+          venue_address: null, parking_notes: null, radio_channel: null, dress_code: null,
+          venue_poc: null, client_poc: null,
+          scope_kind: null, scope_linear_feet: null, scope_cabinet_count: null,
+          scope_cabinet_type: null, scope_pitch: null, scope_print_pieces: null,
+          scope_print_sqft: null, scope_source: 'manual', scope_verified_at: null,
+          scope_verified_by: null,
+          confirmed_at: null, confirmed_by: null, struck_at: null, struck_by: null,
+          closeout_complete_at: null, archived_at: null, archived_by: null
+        };
+        proj.shows.push(show);
+        PROJECTS.push(proj); PROJECTS_BY_ID[pid] = proj;
+        ALL_SHOWS.push(show); SHOWS_BY_ID[sid] = show;
+        ALL_JOBS.push(job); JOBS_BY_ID[jid] = job;
+
+        /* the event TYPE's template supplies the lane set + the T-minus pipeline */
+        var instantiated = 0;
+        if (b.seed_template !== false) {
+          var tpl = TEMPLATE_STEPS[type] || {};
+          var evt = show.event_date ? new Date(show.event_date + 'T00:00:00') : null;
+          typeDef(type).lanes.forEach(function (lane) {
+            (tpl[lane.key] || []).forEach(function (t) {
+              var st = mkStep(lane.key, t.name, 'todo', null, -Math.abs(t.off));
+              st.show_id = sid; st.sort_order = show.steps.length;
+              st.due_date = evt ? isoDate(addDays(evt, st.due_offset_days)) : '';
+              delete st._dep_title;
+              show.steps.push(st); STEPS_BY_ID[st.id] = st;
+              instantiated++;
+            });
+          });
+        }
+        if (b.scope && b.scope.kind) _applyScopeLocal(show, b.scope);
+        show.activity.unshift(mkAct(ME, 'opened the event',
+          name + ' · ' + type + (show.venue ? ' · ' + show.venue : '') +
+          ' · job ' + temp + (instantiated ? ' · +' + instantiated + ' steps' : ''), 0, _nowHM(), true));
+        return ok({ ok: true, project: proj, job: job, show: show,
+                    instantiated_steps: instantiated, notified: [] });
+      }
+      return SR.post('/api/events', b, { notifyOk: true }).then(function (r) {
+        if (r.project) A.project(r.project);
+        if (r.job) A.job(r.job);
+        if (r.show) A.show(r.show);
+        return r;
+      });
+    },
+
+    /* ══════════════════════════════════════════════════════════════════════
+       F4 · SCOPE LINE
+       ────────────────────────────────────────────────────────────────────── */
+    getScope: function (showId) {
+      var sid = Number(showId);
+      if (!API()) {
+        var s = SHOWS_BY_ID[sid];
+        if (!s) return fail('show ' + showId + ' not found');
+        return ok({ show_id: sid, scope: scopeOf(s), scope_line: scopeLine(s),
+                    source: s.scope_source || 'manual',
+                    verified_at: s.scope_verified_at, verified_by: s.scope_verified_by,
+                    spec: specScopeFor(sid), questions: scopeQuestionsFor(s) });
+      }
+      return SR.get('/api/shows/' + sid + '/scope');
+    },
+    setScope: function (showId, patch) {
+      var sid = Number(showId);
+      if (!API()) {
+        var s = SHOWS_BY_ID[sid];
+        if (!s) return fail('show ' + showId + ' not found');
+        if (!canEditFolderOf(s) || !RECAP_EDIT_ROLES[CURRENT_USER.role]) {
+          return fail('editing the scope requires pm, manager or admin on this folder');
+        }
+        _applyScopeLocal(s, patch || {});
+        s.activity.unshift(mkAct(ME, 'set the scope', scopeLine(s) || 'scope cleared', 0, _nowHM(), true));
+        return ok(s);
+      }
+      return SR.put('/api/shows/' + sid + '/scope', patch || {}, { notifyOk: true }).then(A.show);
+    },
+    /* Auto-fill from the bound spec — a SEPARATE act from reading it. A spec
+       bind never silently rewrites a number a human typed; somebody asks. */
+    scopeFromSpec: function (showId) {
+      var sid = Number(showId);
+      if (!API()) {
+        var s = SHOWS_BY_ID[sid];
+        if (!s) return fail('show ' + showId + ' not found');
+        var d = specScopeFor(sid);
+        if (!d.available) {
+          return fail('No bound spec on this show can answer for the scope yet — bind a .e360, ' +
+                      '.nsf or .pcfg first, or enter the numbers by hand.');
+        }
+        var patch = { source: 'spec' };
+        if (d.cabinet_count != null) patch.cabinet_count = d.cabinet_count;
+        if (d.cabinet_type) patch.cabinet_type = d.cabinet_type;
+        if (!s.scope_kind) patch.kind = s.type === 'print' ? 'print' : 'led';
+        _applyScopeLocal(s, patch);
+        s.activity.unshift(mkAct(ME, 'filled the scope from the bound spec',
+          scopeLine(s) + ' · ' + d.count_source + (d.stack_aware ? ' (stack-aware)' : ''), 0, _nowHM(), true));
+        return ok(s);
+      }
+      return SR.post('/api/shows/' + sid + '/scope/from-spec', {}).then(A.show);
+    },
+
+    /* ══════════════════════════════════════════════════════════════════════
+       F5 · CONFIRM — the explicit act that records the client committed
+       ────────────────────────────────────────────────────────────────────── */
+    confirmShow: function (showId) {
+      var sid = Number(showId);
+      if (!API()) {
+        var s = SHOWS_BY_ID[sid];
+        if (!s) return fail('show ' + showId + ' not found');
+        if (!canConfirmShow(s)) return fail('confirming a show requires manager, admin — or the pm who owns it');
+        if (s.confirmed_at) return fail('This show was already confirmed by ' + (s.confirmed_by || 'someone'));
+        s.confirmed_at = TODAY_ISO + 'T' + _nowHM();
+        s.confirmed_by = ME;
+        if (!stageAtLeast(s.stage, 'confirmed')) s.stage = 'confirmed';
+        var job = s.default_job_id ? JOBS_BY_ID[s.default_job_id] : null;
+        var tempJob = job && job.qb_number_status === 'temp' ? job : null;
+        s.activity.unshift(mkAct(ME, 'confirmed the show',
+          'client committed — confirmed by ' + ME +
+          (tempJob ? ' · job still on ' + tempJob.qb_job_number : ''), 0, _nowHM(), true));
+        return ok({ ok: true, show: s, scheduler_unlocked: true,
+          qb_prompt: tempJob ? { job_id: tempJob.id, qb_job_number: tempJob.qb_job_number,
+            message: 'This job is still on the placeholder ' + tempJob.qb_job_number +
+              '. Now that the client has committed, Candice can cut the real QuickBooks number.' } : null });
+      }
+      return SR.post('/api/shows/' + sid + '/confirm', {}, { notifyOk: true }).then(function (r) {
+        if (r && r.show) A.show(r.show);
+        return r;
+      });
+    },
+
+    /* ══════════════════════════════════════════════════════════════════════
+       F2 · TECH SHOW REPORTS
+       ────────────────────────────────────────────────────────────────────── */
+    markStruck: function (showId) {
+      var sid = Number(showId);
+      if (!API()) {
+        var s = SHOWS_BY_ID[sid];
+        if (!s) return fail('show ' + showId + ' not found');
+        if (!canEditFolderOf(s) || !RECAP_EDIT_ROLES[CURRENT_USER.role]) {
+          return fail('marking a show struck requires pm, manager or admin on this folder');
+        }
+        if (!s.struck_at) { s.struck_at = TODAY_ISO + 'T' + _nowHM(); s.struck_by = ME; }
+        var created = 0;
+        (s.crew_assignments || []).forEach(function (c) {
+          if (!c.username || reportFor(sid, c.username)) return;
+          var rep = mkReport(s, c.username, c.role_on_site, { status: 'owed', reqOff: 0, dueOff: 3, nag: 0 });
+          nagReportLocal(s, rep, ME);
+          created++;
+        });
+        s.activity.unshift(mkAct(ME, 'marked the show struck',
+          created + ' show report' + (created === 1 ? '' : 's') + ' now owed', 0, _nowHM(), true));
+        return ok({ ok: true, show: s, created: created, renagged: 0, summary: reportSummary(sid) });
+      }
+      return SR.post('/api/shows/' + sid + '/struck', {}).then(function (r) {
+        if (r && r.show) A.show(r.show);
+        /* the tab reads the flat store, so pull the fresh rows in behind it */
+        return api.listTechReports(sid).then(function () { return r; }, function () { return r; });
+      });
+    },
+    listTechReports: function (showId) {
+      var sid = Number(showId);
+      if (!API()) {
+        var all = reportsForShow(sid), viewAll = canViewAllReports();
+        var rows = viewAll ? all : all.filter(function (r) { return ownsReport(r); });
+        var sum = reportSummary(sid);
+        return ok({ show_id: sid, can_view_all: viewAll, can_review: canReviewReports(),
+          reports: rows.slice(),
+          /* a tech gets the headcount but NOT the names: who is late is a
+             management view, not a team-wide one */
+          summary: viewAll ? sum
+            : { total: sum.total, filed: sum.filed, owed: sum.owed, complete: sum.complete } });
+      }
+      return SR.get('/api/shows/' + sid + '/tech-reports').then(function (r) {
+        (r.reports || []).forEach(A.report);       /* into the flat store the tab reads */
+        return r;
+      });
+    },
+    getTechReport: function (id) {
+      if (!API()) {
+        var r = REPORTS_BY_ID[Number(id)];
+        if (!r) return fail('report not found');
+        if (!canReadReport(r)) return fail('a show report is readable by the tech who wrote it, and by pms and admins');
+        return ok(r);
+      }
+      return SR.get('/api/tech-reports/' + Number(id)).then(A.report);
+    },
+    myReports: function (all) {
+      if (!API()) return ok(reportsOwedBy(ME, !!all).map(function (r) {
+        var s = SHOWS_BY_ID[r.show_id];
+        return _withShow(r, s);
+      }));
+      return SR.get('/api/me/reports' + SR.qs({ all: all ? 1 : null })).then(function (rows) {
+        (rows || []).forEach(A.report);
+        return rows || [];
+      });
+    },
+    /* file MINE. Two forms, one obligation: write it in-app, or point at the
+       doc you already uploaded. Written text lands in the folder's Files too. */
+    fileTechReport: function (showId, payload) {
+      var sid = Number(showId), b = payload || {};
+      if (!API()) {
+        var s = SHOWS_BY_ID[sid];
+        if (!s) return fail('show ' + showId + ' not found');
+        var rep = reportFor(sid, ME);
+        if (!rep) {
+          var mine = (s.crew_assignments || []).filter(function (c) { return c.username === ME; })[0];
+          if (!mine) return fail('you are not on this show’s crew, so no show report is owed from you');
+          rep = mkReport(s, ME, mine.role_on_site, { status: 'owed', reqOff: 0, dueOff: 3, nag: 0 });
+        }
+        if (!ownsReport(rep)) return fail('a show report is written by the person it belongs to');
+        if (rep.status === 'reviewed') return fail('this report has been reviewed — ask a pm to reopen it before rewriting');
+        var body = b.body === undefined ? rep.body : String(b.body || '').trim();
+        var fileId = b.file_id === undefined ? rep.file_id : (Number(b.file_id) || null);
+        if (!body && !fileId) return fail('write the report or attach the document — an empty report is not filed');
+        var doc = null;
+        if (body) {
+          var existing = rep.file_id ? FILES_BY_ID[rep.file_id] : null;
+          if (existing && existing.kind === 'report') {
+            existing.size = body.length; doc = existing;
+          } else {
+            doc = mkFile({ name: 'Show report — ' + ME, ext: 'txt', kind: 'report',
+                           artifact: 'document', size: body.length, by: ME,
+                           meta: 'tech show report' });
+            doc.show_id = sid; doc.project_id = s.project_id;
+            FILES_BY_ID[doc.id] = doc; s.files.push(doc);
+          }
+          fileId = doc.id;
+        }
+        rep.body = body; rep.file_id = fileId || null;
+        rep.status = 'filed'; rep.filed_at = TODAY_ISO + 'T' + _nowHM();
+        s.activity.unshift(mkAct(ME, 'filed their show report',
+          doc ? 'document in the folder' : 'attached the document', 0, _nowHM(), true));
+        var closeout = syncCloseout(sid);
+        return ok({ ok: true, report: rep, file: doc, summary: reportSummary(sid), closeout: closeout });
+      }
+      return SR.post('/api/shows/' + sid + '/tech-report', b).then(function (r) {
+        if (r && r.file) A.file(r.file);
+        if (r && r.report) A.report(r.report);
+        return r;
+      });
+    },
+    reviewTechReport: function (id) {
+      if (!API()) {
+        var r = REPORTS_BY_ID[Number(id)];
+        if (!r) return fail('report not found');
+        if (!canReviewReports()) {
+          return fail('marking a show report reviewed requires pm, manager or admin — ' +
+                      'techs file their own reports but never sign one off');
+        }
+        if (r.status === 'owed') return fail('nothing to review — this report has not been filed yet');
+        r.status = 'reviewed'; r.reviewed_by = ME; r.reviewed_at = TODAY_ISO + 'T' + _nowHM();
+        var s = SHOWS_BY_ID[r.show_id];
+        if (s) s.activity.unshift(mkAct(ME, 'reviewed a show report', r.username + '’s report', 0, _nowHM()));
+        return ok(r);
+      }
+      return SR.post('/api/tech-reports/' + Number(id) + '/review', {}).then(A.report);
+    },
+    reopenTechReport: function (id) {
+      if (!API()) {
+        var r = REPORTS_BY_ID[Number(id)];
+        if (!r) return fail('report not found');
+        if (!canReviewReports()) return fail('reopening a show report requires pm, manager or admin');
+        if (r.status !== 'reviewed') return fail('this report is not marked reviewed');
+        r.status = 'filed'; r.reviewed_by = null; r.reviewed_at = null;
+        return ok(r);
+      }
+      return SR.post('/api/tech-reports/' + Number(id) + '/reopen', {}).then(A.report);
+    },
+    nagTechReports: function (showId, username) {
+      var sid = Number(showId);
+      if (!API()) {
+        var s = SHOWS_BY_ID[sid];
+        if (!s) return fail('show ' + showId + ' not found');
+        if (!canReviewReports() || !canEditFolderOf(s)) {
+          return fail('nagging for show reports is the pm’s job on their own folder');
+        }
+        var n = 0;
+        reportsForShow(sid).forEach(function (r) {
+          if (r.status !== 'owed') return;
+          if (username && r.username !== username) return;
+          nagReportLocal(s, r, ME); n++;
+        });
+        return ok({ ok: true, nagged: n, summary: reportSummary(sid) });
+      }
+      return SR.post('/api/shows/' + sid + '/tech-reports/nag',
+                     username ? { username: username } : {})
+        .then(function (r) {
+          return api.listTechReports(sid).then(function () { return r; }, function () { return r; });
+        });
+    },
+
+    /* ══════════════════════════════════════════════════════════════════════
+       F3 · NOTIFICATION OUTBOX + preferences
+       ────────────────────────────────────────────────────────────────────── */
+    notificationPrefs: function () {
+      if (!API()) {
+        return ok({ username: ME, prefs: notifyPrefsFor(ME), defaults: NOTIFY_DEFAULT_MODE,
+                    driver: MAIL_DRIVER, configured: MAIL_CONFIGURED });
+      }
+      return SR.get('/api/me/notification-prefs');
+    },
+    setNotificationPrefs: function (patch) {
+      var p = patch || {};
+      if (!API()) {
+        var keys = Object.keys(p).filter(function (k) { return NOTIFY_KINDS.indexOf(k) >= 0 && k !== 'digest'; });
+        if (!keys.length) return fail('send at least one notification kind');
+        var bad = keys.filter(function (k) { return NOTIFY_MODES.indexOf(p[k]) < 0; });
+        if (bad.length) return fail('"' + p[bad[0]] + '" is not a delivery mode');
+        keys.forEach(function (k) { setNotifyPref(ME, k, p[k]); });
+        return ok({ username: ME, prefs: notifyPrefsFor(ME), defaults: NOTIFY_DEFAULT_MODE });
+      }
+      return SR.put('/api/me/notification-prefs', p);
+    },
+    myNotifications: function (status) {
+      if (!API()) return ok(notificationsFor(ME, status || null));
+      return SR.get('/api/me/notifications' + SR.qs({ status: status || null }))
+        .then(function (rows) { (rows || []).forEach(A.notification); return rows || []; });
+    },
+    mailStatus: function () {
+      if (!API()) {
+        return ok({ driver: MAIL_DRIVER, configured: MAIL_CONFIGURED, missing: [],
+          queued: NOTIF_OUTBOX.filter(function (n) { return n.status === 'queued'; }).length,
+          note: 'The log driver records every delivery in the activity trail. Nothing leaves the building.' });
+      }
+      return SR.get('/api/admin/mail-status');
+    },
+    flushNotifications: function (opts) {
+      var o = opts || {};
+      if (!API()) return ok(flushNotifications({ digest: !!o.digest, username: o.username || null }));
+      return SR.post('/api/admin/notifications/flush', o);
+    },
+
+    /* ══════════════════════════════════════════════════════════════════════
+       F6 · CLOSEOUT · ARCHIVING · THE SWEEP
+       ────────────────────────────────────────────────────────────────────── */
+    getCloseout: function (showId) {
+      var sid = Number(showId);
+      if (!API()) {
+        if (!SHOWS_BY_ID[sid]) return fail('show ' + showId + ' not found');
+        return ok(syncCloseout(sid));
+      }
+      return SR.get('/api/shows/' + sid + '/closeout');
+    },
+    archiveShow: function (showId) {
+      var sid = Number(showId);
+      if (!API()) {
+        var s = SHOWS_BY_ID[sid];
+        if (!s) return fail('show ' + showId + ' not found');
+        if (!canArchive()) return fail('archiving is an admin act — ask Tom, Tony or Jim');
+        var already = !archiveShowLocal(s, ME, 'manual');
+        return ok({ ok: true, already: already, show: s });
+      }
+      return SR.post('/api/shows/' + sid + '/archive', {}).then(function (r) {
+        if (r && r.show) A.show(r.show);
+        return r;
+      });
+    },
+    unarchiveShow: function (showId) {
+      var sid = Number(showId);
+      if (!API()) {
+        var s = SHOWS_BY_ID[sid];
+        if (!s) return fail('show ' + showId + ' not found');
+        if (!canArchive()) return fail('unarchiving is an admin act — ask Tom, Tony or Jim');
+        var already = !unarchiveShowLocal(s, ME);
+        return ok({ ok: true, already: already, show: s });
+      }
+      return SR.post('/api/shows/' + sid + '/unarchive', {}).then(function (r) {
+        if (r && r.show) A.show(r.show);
+        return r;
+      });
+    },
+    archiveProject: function (projectId) {
+      var pid = Number(projectId);
+      if (!API()) {
+        var p = PROJECTS_BY_ID[pid];
+        if (!p) return fail('project ' + projectId + ' not found');
+        if (!canArchive()) return fail('archiving is an admin act — ask Tom, Tony or Jim');
+        p.shows.forEach(function (s) { archiveShowLocal(s, ME, 'manual'); });
+        if (!p.archived_at) { p.archived_at = TODAY_ISO + 'T' + _nowHM(); p.archived_by = ME; }
+        return ok(p);
+      }
+      return SR.post('/api/projects/' + pid + '/archive', {}).then(A.project);
+    },
+    unarchiveProject: function (projectId) {
+      var pid = Number(projectId);
+      if (!API()) {
+        var p = PROJECTS_BY_ID[pid];
+        if (!p) return fail('project ' + projectId + ' not found');
+        if (!canArchive()) return fail('unarchiving is an admin act — ask Tom, Tony or Jim');
+        p.archived_at = null; p.archived_by = null;
+        p.shows.forEach(function (s) { unarchiveShowLocal(s, ME); });
+        return ok(p);
+      }
+      return SR.post('/api/projects/' + pid + '/unarchive', {}).then(A.project);
+    },
+    /* the Archive VIEW — the only place archived folders are listed */
+    listArchivedProjects: function () {
+      if (!API()) return ok(archivedProjects().map(hydrateProject));
+      return SR.get('/api/projects?archived=1').then(function (rows) {
+        return (rows || []).map(A.project);
+      });
+    },
+    /* the sweep: strike, nag, re-check closeout, auto-archive, flush.
+       Idempotent, and NOT a scheduled job — see lib/lifecycle.js sweep(). */
+    sweep: function () {
+      if (!API()) {
+        if (CURRENT_USER.role !== 'admin') return fail('the sweep is an admin act');
+        return ok(sweepLocal(ME));
+      }
+      return SR.post('/api/admin/sweep', {});
+    },
+
     /* ================= SPEC BIND (INTEGRATIONS_SPEC §9 · D1/D5) =========
        The ?bind-spec=1 popup posts the tool's render bundle here. Session
        auth only — the tools never hold a credential (§9.3.1). */
@@ -2087,5 +2617,29 @@ var api = (function () {
   function _nowHM() {
     var d = new Date(), h = String(d.getHours()), m = String(d.getMinutes());
     return (h.length < 2 ? '0' + h : h) + ':' + (m.length < 2 ? '0' + m : m);
+  }
+  /* F3 — the demo twin of routes/notes.js createNote()'s outbox hop. An
+     @mention is a real delivery; the bell has it already, and this queues the
+     second channel. One place, so a mention posted through any surface enqueues
+     identically. */
+  function _queueMentions(n, anchor) {
+    (n.mentions || []).forEach(function (u) {
+      if (u === noteAuthorUser(n)) return;      /* never about your own note */
+      mkNotif(u, 'mention', actorName(n.author) + ' mentioned you on ' +
+        ((anchor && anchor.label) || n.anchor_type), {
+        body: n.body, note_id: n.id, actor: n.author,
+        show_id: anchor && anchor.show ? anchor.show.id : null,
+        project_id: anchor && anchor.show ? anchor.show.project_id : null,
+        link: anchor && anchor.show ? '/#show/' + anchor.show.id : '' });
+    });
+  }
+  /* F2 — the shape /api/me/reports returns: the report plus the show stub its
+     My Tasks row renders from. One helper, so both modes agree. */
+  function _withShow(rec, s) {
+    var out = {};
+    Object.keys(rec).forEach(function (k) { out[k] = rec[k]; });
+    out.show = s ? { id: s.id, name: s.name, venue: s.venue, project_id: s.project_id,
+                     event_date: s.event_date, strike_date: s.strike_date } : null;
+    return out;
   }
 })();

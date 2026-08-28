@@ -52,9 +52,48 @@ function viewShow(show, opts) {
   var schedDaysN = (show.schedule_items || []).length ? scheduleDays(show.id).length : 0;
   var schedTab = '<button data-t="schedule">Schedule' + (schedDaysN ? ' <span class="n">' + schedDaysN + 'd</span>' : '') + '</button>';
 
-  return '<div class="ef-head">' +
+  /* F2 — show reports. The badge is the OWED count, because that is the number
+     the show owner is chasing; a show nobody owes anything on shows no badge.
+     A tech with nothing owed still gets the tab: their own filed report is
+     theirs to re-read. */
+  var repSum = reportSummary(show.id);
+  var myRep = reportFor(show.id, ME);
+  var repTab = (repSum.total || myRep)
+    ? '<button data-t="reports">Reports' +
+      (repSum.owed ? ' <span class="n" style="color:var(--warn)">' + repSum.owed + '</span>'
+                   : ' <span class="n">' + repSum.filed + '</span>') + '</button>'
+    : '';
+
+  /* F5 — the explicit Confirm button. It appears only when there is something
+     to confirm AND this person may do it; a dead button that explains itself is
+     still a dead button. */
+  var confirmBtn = (!isConfirmed(show) && canConfirmShow(show))
+    ? '<button class="btn primary" ' + act('confirmShow', show.id) + ' title="' +
+      esc('Record that the client committed — signed or PO\'d. Datestamped and logged, and it ' +
+          'unlocks the scheduler push.') + '">' + icon('checkC') + 'Confirm</button>'
+    : '';
+  /* F6 — archived shows announce themselves and offer the way back */
+  var archBanner = show.archived_at
+    ? '<div class="arch-banner">' + icon('box') +
+      '<div><b>This show is archived.</b><span>Archived ' +
+      esc(fmtDate(String(show.archived_at).slice(0, 10))) +
+      (show.archived_by ? ' by ' + esc(userName(show.archived_by) || show.archived_by) : '') +
+      ' — it is out of the working set but nothing has been deleted, and every tab below still works.</span></div>' +
+      (canArchive() ? '<button class="btn sm ghost" ' + act('unarchiveShow', show.id) + '>' +
+        icon('refresh') + 'Put it back</button>' : '') + '</div>'
+    : '';
+
+  return archBanner + '<div class="ef-head">' +
     '<div class="ef-top"><div>' +
-    '<div class="ef-title"><h1>' + esc(title) + '</h1>' + typeTag(show.type) + jobTag + ragPill(r.rag) + stagePill(show.stage) + '</div>' +
+    '<div class="ef-title"><h1>' + esc(title) + '</h1>' + typeTag(show.type) + jobTag + ragPill(r.rag) +
+      lifecycleChip(show) + archivedChip(show) + '</div>' +
+    /* F4 — the scope line sits directly under the title: "what we're
+       delivering" belongs next to what we're calling it. */
+    '<div class="ef-scope">' + scopeChip(show, { empty: canEditFolderOf(show) }) +
+      (canEditFolderOf(show) && RECAP_EDIT_ROLES[CURRENT_USER.role]
+        ? '<button class="lnk-btn" ' + act('editScope', show.id) + '>' + inlineIcon('pencil') +
+          (hasScope(show) ? 'Edit scope' : 'Set scope') + '</button>' : '') +
+      confirmChip(show) + '</div>' +
     '<div class="ef-sub"><span>' + icon('users') + ' <b>' + esc(show.job ? show.job.client : p.client) + '</b></span>' +
     '<span>' + icon('pin') + ' <b>' + esc(show.venue) + '</b></span>' +
     '<span>Lead <b>' + esc(userName(show.owner)) + '</b></span>' +
@@ -63,8 +102,10 @@ function viewShow(show, opts) {
     '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
     (single ? '' : '<button class="btn ghost" ' + act('openFolder', p.id) + '>' + icon('folder') + 'Back to season</button>') +
     (firstFile != null ? '<button class="btn ghost" ' + act('openViewer', firstFile) + '>' + icon('img') + 'Open in Viewer</button>' : '') +
+    confirmBtn +
     '<button class="btn primary" ' + act('pushSched', show.id) + '>' + icon('send') + 'Push to Scheduler</button>' +
     '</div></div>' +
+    stageTimeline(show) +
     '<div class="ef-meta">' + metas + '</div>' +
     '</div>' +
     '<div class="tabs" id="ftabs">' +
@@ -74,6 +115,7 @@ function viewShow(show, opts) {
     specTab + gearTab +
     '<button data-t="files">Files <span class="n">' + docN + '</span></button>' +
     phTab +
+    repTab +
     recTab +
     finTab +
     thirdTab +
@@ -91,6 +133,7 @@ function drawShowTab(show, t) {
     : t === 'gear' ? tabGear(show)
     : t === 'files' ? tabFiles(show)
     : t === 'photos' ? tabPhotos(show)
+    : t === 'reports' ? tabReports(show)
     : t === 'recap' ? tabRecap(show)
     : t === 'financials' ? tabFinancials(show)
     : t === 'proofs' ? tabProofs(show)
@@ -160,6 +203,11 @@ function tabOverview(show) {
     : '';
   var glance = '<div class="glance">' +
     '<div class="g"><span class="k">Overall</span>' + ragPill(r.rag) + '</div>' +
+    /* F4 — "what we're delivering" belongs in the at-a-glance list, above the
+       process numbers: it is the one line that says what the job IS. */
+    (hasScope(show) ? '<div class="g"><span class="k">Scope</span>' + scopeChip(show) + '</div>' : '') +
+    /* F5 — the commercial fact, next to the operational ones */
+    '<div class="g"><span class="k">Commercial</span>' + confirmChip(show) + '</div>' +
     '<div class="g"><span class="k">Steps done</span><span class="mono">' + r.done + ' / ' + r.total + ' (' + r.pct + '%)</span></div>' +
     '<div class="g"><span class="k">Blocked</span><span class="mono" style="color:' + (r.blocked.length ? 'var(--crit)' : 'var(--text-2)') + '">' + r.blocked.length + '</span></div>' +
     '<div class="g"><span class="k">At risk</span><span class="mono" style="color:' + (r.risk.length ? 'var(--warn)' : 'var(--text-2)') + '">' + r.risk.length + '</span></div>' +
@@ -182,6 +230,7 @@ function tabOverview(show) {
     '<div class="panel summary"><div class="sig">' + icon('bolt') + 'AI summary</div><p>' + esc(summary) + '</p><div class="src">' + esc(source) + '</div></div>' +
     photoStrip(show) +
     recapOverviewLine(show) +
+    closeoutPanel(show) +
     '<div class="panel"><h3>At a glance</h3>' + glance + '</div>' +
     /* the show's conversation layer — anchored notes (notes pass) */
     notesPanel('show', show.id, { collapse: 2 }) +
@@ -287,7 +336,13 @@ function tabSchedule(show) {
     '</div>';
   var venueLine = '<div class="hint" style="margin:-6px 0 14px">' + icon('pin') + '<span><b>' + esc(show.venue) + '</b>' +
     (show.venue_address ? ' — ' + esc(show.venue_address) : '') +
-    (show.parking_notes ? ' · ' + esc(show.parking_notes) : '') + '</span></div>';
+    (show.parking_notes ? ' · ' + esc(show.parking_notes) : '') +
+    /* F4 — the call sheet header carries the scope line: the crew arriving at
+       6am should be able to read what they are putting up without opening
+       another tab. */
+    (hasScope(show) ? '</span></div><div class="hint sched-scope" style="margin:-8px 0 14px">' +
+      icon('ruler') + '<span><b>' + esc(scopeLine(show)) + '</b> — what we are delivering' : '') +
+    '</span></div>';
 
   /* ---- day chips + my-day + actions -------------------------------------- */
   var chips = days.map(function (d) {
@@ -934,4 +989,212 @@ function photoProposalRow(f) {
     '<div class="fbtns"><button class="btn sm primary" ' + act('photoConfirm', f.id) + '>' + icon('check') + 'Confirm</button>' +
     '<button class="btn sm ghost" ' + act('photoReject', f.id) + '>' + icon('x') + 'Reject</button>' +
     '<button class="btn sm ghost" ' + act('openViewer', f.id) + '>' + icon('eye') + 'View</button></div></div></div>';
+}
+
+/* ============================================================ reports ------
+   F2 · TECH SHOW REPORTS — the obligation, and who still owes one.
+   ----------------------------------------------------------------------------
+   TWO AUDIENCES, ONE TAB:
+
+     a TECH sees exactly one thing — their own report, and an editor if they
+     still owe it. Not the roster, not the bodies, not who else is late. Report
+     prose is candid by design ("the venue's power was wrong, we lost an hour")
+     and it is not team-wide reading.
+
+     a PM/ADMIN sees the "waiting on" list, every body, and the three levers
+     they actually have: nag, read, mark reviewed. They CANNOT write one. A
+     report attributed to a person who did not write it is worse than a missing
+     report, so there is no affordance for it anywhere.
+
+   Sign-off is NOT required. Filing completes the obligation and closeout counts
+   FILED, never REVIEWED — requiring a signature would let an inattentive pm
+   block a tech's obligation from ever clearing, which is the opposite of the
+   adoption lever this is meant to be.
+   ========================================================================== */
+var REPORT_UI = { editing: null };   /* report id being written */
+
+function reportStatusPill(r) {
+  var m = TECH_REPORT_STATUS[r.status] || TECH_REPORT_STATUS.owed;
+  return '<span class="pill ' + esc(m.pill) + '"><span class="dot"></span>' + esc(m.label) + '</span>';
+}
+function reportEditor(rep, show) {
+  return '<div class="rep-editor" data-report="' + Number(rep.id) + '">' +
+    '<textarea class="rep-in" id="repIn' + Number(rep.id) + '" rows="7" placeholder="' +
+    esc('What happened on site. Gear that failed or needs attention, venue notes worth writing into ' +
+        'the next advance, hours, anything the next crew should know. Plain words are fine.') +
+    '">' + esc(rep.body || '') + '</textarea>' +
+    '<div class="rep-erow">' +
+    '<span class="rep-hint">' + inlineIcon('lock') +
+      'Internal. This never reaches a client — the recap generator cannot read it.</span>' +
+    (REPORT_UI.editing ? '<button class="btn sm ghost" ' + act('repCancel') + '>Cancel</button>' : '') +
+    '<button class="btn sm primary" ' + act('repSave', rep.id) + '>' + icon('check') +
+      (rep.status === 'owed' ? 'File my report' : 'Save changes') + '</button>' +
+    '</div></div>';
+}
+function reportCard(rep, show, opts) {
+  opts = opts || {};
+  var mine = ownsReport(rep);
+  var u = ROSTER[rep.username];
+  var doc = rep.file_id ? FILES_BY_ID[rep.file_id] : null;
+  var meta = [];
+  if (rep.filed_at) meta.push('filed ' + fmtDate(String(rep.filed_at).slice(0, 10)));
+  else if (rep.due_date) meta.push('due ' + fmtDate(rep.due_date));
+  if (rep.reviewed_at) meta.push('reviewed by ' + (userName(rep.reviewed_by) || rep.reviewed_by));
+  if (rep.status === 'owed' && rep.nag_count) meta.push(rep.nag_count + ' nag' + (rep.nag_count === 1 ? '' : 's'));
+
+  var acts = [];
+  if (mine && rep.status !== 'reviewed' && REPORT_UI.editing !== rep.id) {
+    acts.push('<button class="n-act" ' + act('repEdit', rep.id) + '>' + inlineIcon('pencil') +
+      (rep.status === 'owed' ? 'Write it' : 'Revise') + '</button>');
+  }
+  /* the pm's three levers — never a fourth one that writes */
+  if (canReviewReports() && rep.status === 'filed') {
+    acts.push('<button class="n-act" ' + act('repReview', rep.id) + '>' + inlineIcon('checkC') + 'Mark reviewed</button>');
+  }
+  if (canReviewReports() && rep.status === 'reviewed') {
+    acts.push('<button class="n-act" ' + act('repReopen', rep.id) + '>' + inlineIcon('refresh') + 'Reopen</button>');
+  }
+  if (canReviewReports() && rep.status === 'owed' && canEditFolderOf(show)) {
+    acts.push('<button class="n-act" ' + act('repNag', rep.id) + '>' + inlineIcon('bell') + 'Nag</button>');
+  }
+  if (doc) {
+    acts.push('<button class="n-act" ' + act('openViewer', doc.id) + '>' + inlineIcon('doc') + 'Open the document</button>');
+  }
+
+  var body = '';
+  if (REPORT_UI.editing === rep.id && mine && rep.status !== 'reviewed') {
+    body = reportEditor(rep, show);
+  } else if (rep.status === 'owed') {
+    body = '<div class="rep-empty">' + (mine
+      ? 'You have not filed this yet. It is required — write it here or attach the document you already have.'
+      : 'Not filed yet.') + '</div>';
+  } else if (canReadReport(rep)) {
+    body = '<div class="rep-body">' + esc(rep.body || '(the document is attached instead)') + '</div>';
+  } else {
+    body = '<div class="rep-empty">Filed. The body is readable by ' + esc(firstName(rep.username) || rep.username) +
+      ', and by pms and admins.</div>';
+  }
+
+  return '<div class="rep-card ' + esc(rep.status) + (mine ? ' mine' : '') + '">' +
+    '<div class="rep-h">' + (av(rep.username) || '<span class="avatar" style="background:var(--surface-3)">?</span>') +
+    '<div class="rep-who"><b>' + esc(u ? u.name : rep.username) + (mine ? ' · you' : '') + '</b>' +
+    '<span>' + esc(rep.role_on_site || (u ? u.title : '')) + (meta.length ? ' · ' + esc(meta.join(' · ')) : '') + '</span></div>' +
+    reportStatusPill(rep) + '</div>' + body +
+    (acts.length ? '<div class="rep-acts">' + acts.join('') + '</div>' : '') +
+    '</div>';
+}
+
+function tabReports(show) {
+  var all = reportsForShow(show.id);
+  var viewAll = canViewAllReports();
+  var mine = reportFor(show.id, ME);
+  var sum = reportSummary(show.id);
+  var noLogin = reportlessCrew(show.id);
+
+  /* nothing owed and nothing filed: the show has not struck yet (or nobody on
+     the crew has a login). Say which, and offer the pm the trigger. */
+  if (!all.length) {
+    var canStrike = canEditFolderOf(show) && RECAP_EDIT_ROLES[CURRENT_USER.role];
+    return '<div class="panel"><h3>Show reports</h3>' +
+      '<div class="empty">' + (show.struck_at
+        ? 'This show is struck and nobody on the crew has a login, so no report is owed. ' +
+          (noLogin.length ? noLogin.length + ' local hire' + (noLogin.length === 1 ? '' : 's') + ' on the sheet.' : '')
+        : 'Reports are created for every crew member the moment the show strikes — automatically when ' +
+          'the strike date passes, or now if it is already over.') + '</div>' +
+      (canStrike && !show.struck_at
+        ? '<div style="display:flex;justify-content:center;margin-top:14px">' +
+          '<button class="btn primary" ' + act('markStruck', show.id) + '>' + icon('checkC') +
+          'Mark struck — ask the crew for their reports</button></div>'
+        : '') +
+      '</div>';
+  }
+
+  var waiting = viewAll && sum.owed
+    ? '<div class="waiting-on">' + inlineIcon('alert') + '<div><b>Waiting on ' + sum.owed + ' report' +
+      (sum.owed === 1 ? '' : 's') + '</b><span>' +
+      esc(sum.waiting_on.map(function (u) { return userName(u) || u; }).join(', ')) +
+      '</span></div>' +
+      (canEditFolderOf(show)
+        ? '<button class="btn sm ghost" ' + act('repNagAll', show.id) + '>' + icon('bell') + 'Nag everyone still out</button>'
+        : '') + '</div>'
+    : (sum.complete
+      ? '<div class="waiting-on ok">' + inlineIcon('checkC') + '<div><b>Every report is in.</b>' +
+        '<span>' + sum.filed + ' of ' + sum.total + ' filed — one of the three things closeout waits for.</span></div></div>'
+      : '');
+
+  var rows = (viewAll ? all : all.filter(function (r) { return ownsReport(r); }))
+    .map(function (r) { return reportCard(r, show); }).join('');
+
+  var mineFirst = (!viewAll && !mine)
+    ? '<div class="empty">You are not on this show’s crew, so no report is owed from you.</div>' : '';
+
+  var localNote = viewAll && noLogin.length
+    ? '<div class="perm-note">' + inlineIcon('users') + ' ' + noLogin.length + ' local hire' +
+      (noLogin.length === 1 ? '' : 's') + ' on this crew (' +
+      esc(noLogin.map(function (c) { return c.name; }).join(', ')) +
+      ') — no login, so nobody to ask and no report created. That is the difference between the ' +
+      'crew count and the report count.</div>'
+    : '';
+
+  return '<div class="panel"><h3>Show reports · ' + sum.filed + ' of ' + sum.total + ' filed</h3>' +
+    waiting +
+    '<div class="rep-list">' + rows + mineFirst + '</div>' +
+    localNote +
+    '<div class="perm-note">' + inlineIcon('lock') + ' Required after every show. Techs write their own ' +
+    'and can never sign one off; pms and admins read them all, nag for them and may mark one reviewed. ' +
+    '<b>Filing is what completes the obligation</b> — closeout counts filed, not reviewed. These are ' +
+    'internal: the client-recap generator has no way to read one.</div>' +
+    notesPanel('show', show.id, { title: 'Notes on this show', collapse: 1 }) +
+    '</div>';
+}
+
+/* ============================================================ closeout -----
+   F6 · the machine-checked closeout, rendered as three conditions with a
+   live answer each. It is a READ of the record, never a checklist somebody
+   ticks — which is the whole point of it being machine-checked.
+   ========================================================================== */
+function closeoutPanel(show) {
+  var st = closeoutStatus(show.id);
+  var end = show.strike_date || show.event_date;
+  if (!end || end > TODAY_ISO) return '';        /* nothing to close out yet */
+
+  var line = function (ok2, label, detail) {
+    return '<div class="co-line ' + (ok2 ? 'ok' : 'out') + '">' +
+      inlineIcon(ok2 ? 'checkC' : 'dot') +
+      '<div><b>' + esc(label) + '</b><span>' + esc(detail) + '</span></div></div>';
+  };
+  var days = st.closeout_complete_at
+    ? dayAge(String(st.closeout_complete_at).slice(0, 10)) : null;
+  var foot = st.archived_at
+    ? 'Archived ' + fmtDate(String(st.archived_at).slice(0, 10)) + '.'
+    : st.complete
+      ? 'Closed out' + (days != null ? ' ' + days + ' day' + (days === 1 ? '' : 's') + ' ago' : '') +
+        ' — auto-archives ' + (days != null
+          ? (days >= ARCHIVE_AFTER_DAYS ? 'on the next sweep' : 'in ' + (ARCHIVE_AFTER_DAYS - days) + ' days')
+          : 'after ' + ARCHIVE_AFTER_DAYS + ' days') + '.'
+      : 'Not closed out yet. All three have to hold before the ' + ARCHIVE_AFTER_DAYS + '-day archive clock starts.';
+
+  return '<div class="panel closeout"><h3>Closeout' +
+    (st.complete ? ' <span class="pill go" style="margin-left:6px"><span class="dot"></span>complete</span>' : '') + '</h3>' +
+    line(st.recap_sent, 'Client recap sent',
+      st.recap_status ? 'the recap is ' + st.recap_status : 'no recap drafted yet') +
+    line(st.reports_complete, 'Every show report filed',
+      st.reports_total
+        ? st.reports_filed + ' of ' + st.reports_total + ' in' +
+          (st.reports_owed && canViewAllReports()
+            ? ' — waiting on ' + st.waiting_on.map(function (u) { return firstName(u) || u; }).join(', ')
+            : (st.reports_owed ? ' — ' + st.reports_owed + ' still out' : ''))
+        : 'nobody on the crew owes one') +
+    line(st.finance_clear, 'No money waiting on paperwork',
+      st.finance_exceptions ? st.finance_exceptions + ' item' + (st.finance_exceptions === 1 ? '' : 's') +
+        ' on this show still missing a document' : 'clear') +
+    '<div class="co-foot">' + esc(foot) + '</div>' +
+    (canArchive() && !st.archived_at
+      ? '<div style="display:flex;justify-content:flex-end;margin-top:10px">' +
+        '<button class="btn sm ghost" ' + act('archiveShow', show.id) + '>' + icon('box') + 'Archive it now</button></div>'
+      : '') +
+    '<div class="perm-note">' + inlineIcon('bolt') + ' Machine-checked against the record — there is no ' +
+    'box to tick. Reopening the recap or a late expense landing un-completes it again, and the clock ' +
+    'restarts, because the paperwork really did come undone.</div>' +
+    '</div>';
 }

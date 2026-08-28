@@ -1532,6 +1532,670 @@ const DEL = (p, o) => call('DELETE', p, o);
      { flag: hardCfg.body.features.specBind, origins: hardCfg.body.toolsOrigins });
 
   // ── 6. cascade integrity ──────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // A BARE BLOCK on purpose: `const` is block-scoped, so this section can name
+  // its locals for what they are without colliding with the hundreds main()
+  // has already declared above it.
+  // ════════════════════════════════════════════════════════════════════════
+  {
+  // ══════════════════════════════════════════════════════════════════════════
+  // 15. THE FIRST POST-DEPLOY RELEASE — F1 events · F2 reports · F3 outbox ·
+  //     F4 scope · F5 confirm lifecycle · F6 closeout + archiving
+  // ══════════════════════════════════════════════════════════════════════════
+  section('15. F1–F6 — events, reports, outbox, scope, confirm, archiving');
+
+  // The outbox skips a person with no address on file, which is correct and is
+  // asserted elsewhere — but it would mask every delivery assertion below, so
+  // the run's own identities get one first.
+  await pool.query(
+    `UPDATE users SET email = username || '@e360sport.test' WHERE username LIKE $1 OR username='admin'`,
+    [TAG + '%']);
+
+  // ── F5: the stage vocabulary is a UNION, and it never rewrites a row ──────
+  const stages = await GET('/api/stages', { token: A });
+  ok('F5: /api/stages publishes the lifecycle, so the SPA never hardcodes it',
+     stages.status === 200 &&
+     stages.body.lifecycle.join('>') === 'quoted>confirmed>in_progress>delivered>closed>archived',
+     stages.body.lifecycle);
+  ok('F5: every legacy value is STILL a legal stage — the enum is a union',
+     ['lead', 'planning', 'ready', 'scheduled', 'closed'].every((s) => stages.body.all.includes(s)),
+     stages.body.all);
+  ok('F5: the legacy→lifecycle map is published, not duplicated in the client',
+     stages.body.alias.lead === 'quoted' && stages.body.alias.planning === 'confirmed' &&
+     stages.body.alias.ready === 'confirmed' && stages.body.alias.scheduled === 'in_progress',
+     stages.body.alias);
+
+  // A row written BEFORE this release. Nothing may rewrite it.
+  const legacyShow = await POST('/api/shows', {
+    project_id: P, name: TAG + ' legacy stage', venue: 'Legacy Arena',
+    load_in_date: '2026-11-01', event_date: '2026-11-03', stage: 'planning'
+  }, { token: A });
+  const LS = legacyShow.body.id;
+  const lsRaw = await pool.query('SELECT stage FROM shows WHERE id=$1', [LS]);
+  ok('F5: a legacy stage string is STORED verbatim', lsRaw.rows[0].stage === 'planning', lsRaw.rows[0]);
+  const lsGet = await GET(`/api/shows/${LS}`, { token: A });
+  ok('F5: ...returned verbatim, with the canonical position ALONGSIDE it',
+     lsGet.body.stage === 'planning' && lsGet.body.stage_canonical === 'confirmed' &&
+     lsGet.body.stage_label === 'Planning',
+     { stage: lsGet.body.stage, canon: lsGet.body.stage_canonical, label: lsGet.body.stage_label });
+  ok('F5: ...and reads as confirmed BY POSITION, with no datestamp invented',
+     lsGet.body.confirmed === true && lsGet.body.confirmed_at === null);
+
+  // ── F5: the confirm gate — mutation-tested with discriminating identities ─
+  const quoted = await POST('/api/shows', {
+    project_id: P, name: TAG + ' unconfirmed', venue: 'TBD',
+    load_in_date: '2026-12-01', event_date: '2026-12-03', stage: 'quoted'
+  }, { token: A });
+  const QS = quoted.body.id;
+  ok('F5: a new show can be opened at "quoted"', quoted.body.stage === 'quoted' &&
+     quoted.body.confirmed === false, quoted.body.stage);
+
+  const techConfirm = await POST(`/api/shows/${QS}/confirm`, {}, { token: TECHT });
+  ok('F5 GATE: a TECH cannot confirm', techConfirm.status === 403, techConfirm.body);
+  // pm2User owns NOTHING — the discriminating pm. The smoke folder is owned by
+  // pmUser, so pm2 fails the ownership term while clearing the rank one.
+  const pm2Confirm = await POST(`/api/shows/${QS}/confirm`, {}, { token: PM2T });
+  ok('F5 GATE: a pm who owns neither the show nor its folder cannot confirm',
+     pm2Confirm.status === 403, pm2Confirm.body);
+  const stillQuoted = await pool.query('SELECT confirmed_at, stage FROM shows WHERE id=$1', [QS]);
+  ok('F5 GATE: ...and both refusals wrote nothing',
+     stillQuoted.rows[0].confirmed_at === null && stillQuoted.rows[0].stage === 'quoted',
+     stillQuoted.rows[0]);
+  // the OWNING pm clears it — the gate ADMITS, not just refuses
+  const pmConfirm = await POST(`/api/shows/${QS}/confirm`, {}, { token: PMT });
+  ok('F5 GATE: the pm who OWNS the folder clears it', pmConfirm.status === 200, pmConfirm.body);
+  ok('F5: confirm records who and when', !!pmConfirm.body.show.confirmed_at &&
+     pmConfirm.body.show.confirmed_by === pmUser, pmConfirm.body.show.confirmed_by);
+  ok('F5: ...advances the stage and says the scheduler is unlocked',
+     pmConfirm.body.show.stage === 'confirmed' && pmConfirm.body.scheduler_unlocked === true);
+  ok('F5: ...and prompts for the real QuickBooks number, because the job is TEMP',
+     !!pmConfirm.body.qb_prompt && /^TEMP-/.test(pmConfirm.body.qb_prompt.qb_job_number),
+     pmConfirm.body.qb_prompt);
+  const confAct = await pool.query(
+    `SELECT action, detail FROM activity WHERE show_id=$1 AND action='show.confirm'`, [QS]);
+  ok('F5: ...and it is in the audit trail', confAct.rows.length === 1, confAct.rows[0]);
+  const twice = await POST(`/api/shows/${QS}/confirm`, {}, { token: A });
+  ok('F5: confirming twice is a 409 — one datestamp, never two', twice.status === 409, twice.body);
+
+  // ── F5: the push gate ────────────────────────────────────────────────────
+  const preShow = await POST('/api/shows', {
+    project_id: P, name: TAG + ' prepush', venue: 'Arena',
+    load_in_date: '2026-12-10', event_date: '2026-12-12', stage: 'quoted'
+  }, { token: A });
+  const PS = preShow.body.id;
+  const pushRefused = await POST(`/api/shows/${PS}/push-to-scheduler`, { live: true }, { token: A });
+  ok('F5 GATE: an UNCONFIRMED show refuses the live push (409)',
+     pushRefused.status === 409 && /not confirmed/i.test(JSON.stringify(pushRefused.body)),
+     pushRefused.body);
+  ok('F5 GATE: ...and the refusal names the endpoint that fixes it',
+     /\/confirm$/.test(String(pushRefused.body.confirmEndpoint || '')), pushRefused.body);
+  const preDry = await POST(`/api/shows/${PS}/push-to-scheduler`, {}, { token: A });
+  ok('F5: the DRY RUN still runs — it is the diagnostic, and it explains the refusal',
+     preDry.status === 200 && preDry.body.ready === false &&
+     preDry.body.problems.some((p) => /not confirmed/i.test(p)), preDry.body.problems);
+  await POST(`/api/shows/${PS}/confirm`, {}, { token: A });
+  const postDry = await POST(`/api/shows/${PS}/push-to-scheduler`, {}, { token: A });
+  ok('F5: confirming clears that problem from the dry run',
+     !postDry.body.problems.some((p) => /not confirmed/i.test(p)), postDry.body.problems);
+  // ADDITIVE PROOF: a LEGACY row is pushable without anyone confirming it
+  const legacyDry = await POST(`/api/shows/${LS}/push-to-scheduler`, {}, { token: A });
+  ok('F5 ADDITIVE: a pre-existing "planning" row is NOT blocked — no migration needed',
+     !legacyDry.body.problems.some((p) => /not confirmed/i.test(p)), legacyDry.body.problems);
+
+  // ── F4: the scope line ───────────────────────────────────────────────────
+  const noScope = await GET(`/api/shows/${S}/scope`, { token: A });
+  ok('F4: a show with no scope answers cleanly rather than 404ing',
+     noScope.status === 200 && noScope.body.scope_line === '', noScope.body);
+  const techScope = await PUT(`/api/shows/${S}/scope`, { kind: 'led', cabinet_count: 999 }, { token: TECHT });
+  ok('F4 GATE: a tech cannot set the scope', techScope.status === 403, techScope.body);
+  const setScope = await PUT(`/api/shows/${S}/scope`, {
+    kind: 'led', linear_feet: 800, cabinet_count: 144, pitch: 'P10'
+  }, { token: A });
+  ok('F4: pm+ can, and the server renders the ONE canonical line',
+     setScope.status === 200 && setScope.body.scope_line === 'LED · 800′ · 144× P10',
+     setScope.body.scope_line);
+  ok('F4: ...and stamps who verified it and when',
+     !!setScope.body.scope_verified_at && setScope.body.scope_verified_by === 'admin');
+  const badKind = await PUT(`/api/shows/${S}/scope`, { kind: 'holograms' }, { token: A });
+  ok('F4: an unknown scope kind is a 400 that lists the real ones',
+     badKind.status === 400 && /led, print, both/.test(String(badKind.body.error)), badKind.body);
+  const negScope = await PUT(`/api/shows/${S}/scope`, { cabinet_count: -5 }, { token: A });
+  ok('F4: a negative count is refused, not stored', negScope.status === 400, negScope.body);
+  const printScope = await PUT(`/api/shows/${LS}/scope`, {
+    kind: 'print', print_pieces: 34, print_sqft: 4120
+  }, { token: A });
+  ok('F4: a print scope reads in its own units',
+     printScope.body.scope_line === 'Print · 34 pcs · 4,120 sq ft', printScope.body.scope_line);
+  const bothScope = await PUT(`/api/shows/${LS}/scope`, {
+    kind: 'both', linear_feet: 560, cabinet_count: 64
+  }, { token: A });
+  ok('F4: switching to "both" KEEPS the print numbers — nothing is a union type',
+     bothScope.body.scope_line === 'LED + Print · 560′ · 64× · 34 pcs · 4,120 sq ft',
+     bothScope.body.scope_line);
+  await PUT(`/api/shows/${LS}/scope`, { kind: 'print' }, { token: A });
+
+  // F4: auto-fill + divergence from the BOUND SPEC (the smoke show has one)
+  const specScope = await POST(`/api/shows/${S}/scope/from-spec`, {}, { token: A });
+  ok('F4: filling from the bound spec takes the STACK-AWARE count',
+     specScope.status === 200 && specScope.body.scope_cabinet_count === specScope.body.spec.cabinet_count,
+     { got: specScope.body.scope_cabinet_count, spec: specScope.body.spec });
+  ok('F4: ...and marks the source so nobody wonders where the number came from',
+     specScope.body.scope_source === 'spec');
+  ok('F4: ...while linear feet, which no spec records, is untouched',
+     Number(specScope.body.scope_linear_feet) === 800);
+  await PUT(`/api/shows/${S}/scope`, { cabinet_count: 999, source: 'manual' }, { token: A });
+  const diverged = await GET(`/api/shows/${S}/scope`, { token: A });
+  ok('F4: divergence from the bound spec is a QUESTION, not an error',
+     diverged.status === 200 && diverged.body.questions.length >= 1 &&
+     diverged.body.questions[0].kind === 'question' &&
+     /Which is what we delivered\?/.test(diverged.body.questions[0].ask),
+     diverged.body.questions);
+  ok('F4: ...and the hand-entered number was NOT overwritten by asking',
+     diverged.body.scope.cabinet_count === 999);
+  const noSpecShow = await POST(`/api/shows/${LS}/scope/from-spec`, {}, { token: A });
+  ok('F4: a show with no usable spec says so instead of inventing numbers',
+     noSpecShow.status === 409 && /No bound spec/.test(String(noSpecShow.body.error)), noSpecShow.body);
+  await PUT(`/api/shows/${S}/scope`, { kind: 'led', linear_feet: 800, cabinet_count: 144,
+                                       pitch: 'P10', cabinet_type: null, source: 'manual' }, { token: A });
+
+  // ── F4 FIREWALL ASSERTION: the whitelist was widened DELIBERATELY ─────────
+  // On a show of its own: the smoke folder's main show already carries a SENT
+  // recap, and a sent recap is a record rather than a draft — regenerating one
+  // is correctly refused, which is a different assertion from this one.
+  const fwShow = await POST('/api/shows', {
+    project_id: P, name: TAG + ' firewall', venue: 'Firewall Arena',
+    load_in_date: '2026-11-20', event_date: '2026-11-22', strike_date: '2026-11-23',
+    stage: 'confirmed'
+  }, { token: A });
+  const FS = fwShow.body.id;
+  await PUT(`/api/shows/${FS}/scope`,
+    { kind: 'led', linear_feet: 800, cabinet_count: 144, pitch: 'P10' }, { token: A });
+  const fw = require('../lib/firewall');
+  ok('F4 FIREWALL: the seven scope fields are named in RECAP_SOURCES.show',
+     ['scope_kind', 'scope_linear_feet', 'scope_cabinet_count', 'scope_cabinet_type',
+      'scope_pitch', 'scope_print_pieces', 'scope_print_sqft']
+       .every((f) => fw.RECAP_SOURCES.show.includes(f)));
+  ok('F4 FIREWALL: scope_verified_by / _at are NOT — who checked our numbers is ours',
+     !fw.RECAP_SOURCES.show.includes('scope_verified_by') &&
+     !fw.RECAP_SOURCES.show.includes('scope_verified_at'));
+  const recapScoped = await POST(`/api/shows/${FS}/recap`, {}, { token: A });
+  const scopeStat = (recapScoped.body.body.stats || []).find((x) => x.key === 'scope');
+  ok('F4 FIREWALL: the scope reaches the recap as a stat with a client-safe KEY',
+     !!scopeStat && scopeStat.value === 'LED · 800′ · 144× P10', scopeStat);
+  const statKeys = new Set((await GET('/api/recap-stat-keys', { token: A })).body.map((k) => k.key));
+  ok('F4 FIREWALL: every stat key the generator emits is in recap_stat_keys (an FK, not a regex)',
+     (recapScoped.body.body.stats || []).every((x) => statKeys.has(x.key)),
+     (recapScoped.body.body.stats || []).map((x) => x.key));
+  const badStat = await PUT(`/api/shows/${FS}/recap`, {
+    stats: [{ key: 'unit_cost', label: 'Unit cost', value: '12' }]
+  }, { token: A });
+  ok('F4 FIREWALL: a stat key OFF the whitelist is refused by name',
+     badStat.status === 400 && /not a client-safe stat key/.test(String(badStat.body.error)),
+     badStat.body);
+
+  // ── F2: tech show reports ────────────────────────────────────────────────
+  // Give the smoke show a crew with logins and one local hire with none.
+  await POST(`/api/shows/${FS}/crew`, { username: techUser, role_on_site: 'LED tech',
+                                       call_time: '07:00' }, { token: A });
+  await POST(`/api/shows/${FS}/crew`, { username: pm2User, role_on_site: 'Systems',
+                                       call_time: '08:00' }, { token: A });
+  await POST(`/api/shows/${FS}/crew`, { name: 'Local Hand', phone: '(555) 555-0100',
+                                       role_on_site: 'Local hand' }, { token: A });
+  const struck = await POST(`/api/shows/${FS}/struck`, {}, { token: A });
+  ok('F2: marking a show struck creates one report per LOGGED-IN crew member',
+     struck.status === 200 && struck.created !== 0 && struck.body.summary.total === 2,
+     struck.body.summary);
+  ok('F2: ...the local hire owes nothing — no login, nobody to ask',
+     struck.body.summary.total === 2, struck.body.summary);
+  ok('F2: ...and it records who struck it', !!struck.body.show.struck_at);
+  const struckAgain = await POST(`/api/shows/${FS}/struck`, {}, { token: A });
+  ok('F2: striking twice creates nothing — it is idempotent',
+     struckAgain.body.created === 0, struckAgain.body);
+  const nagNote = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM notes WHERE show_id=$1 AND author='system'`, [FS]);
+  ok('F2: the nag rides the EXISTING bell mechanism — an anchored note per person',
+     nagNote.rows[0].n >= 2, nagNote.rows[0]);
+  const nagOutbox = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM notification_outbox WHERE show_id=$1 AND kind='report_nag'`, [FS]);
+  ok('F2/F3: ...and an outbox row of kind report_nag, so the NAG preference applies',
+     nagOutbox.rows[0].n >= 2, nagOutbox.rows[0]);
+
+  // F2 GATE: view-all is pm+, mutation-tested with discriminating identities
+  const techList = await GET(`/api/shows/${FS}/tech-reports`, { token: TECHT });
+  ok('F2 GATE: a TECH sees his own row and nobody else’s',
+     techList.status === 200 && techList.body.can_view_all === false &&
+     techList.body.reports.length === 1 && techList.body.reports[0].username === techUser,
+     techList.body.reports.map((r) => r.username));
+  ok('F2 GATE: ...gets the headcount but NOT the names of who else is late',
+     techList.body.summary.owed === 2 && techList.body.summary.waiting_on === undefined,
+     techList.body.summary);
+  const pmList = await GET(`/api/shows/${FS}/tech-reports`, { token: PMT });
+  ok('F2 GATE: a PM sees every row', pmList.body.can_view_all === true &&
+     pmList.body.reports.length === 2, pmList.body.reports.length);
+  ok('F2 GATE: ...and the names of everyone still out',
+     Array.isArray(pmList.body.summary.waiting_on) && pmList.body.summary.waiting_on.length === 2,
+     pmList.body.summary.waiting_on);
+  const othersId = pmList.body.reports.find((r) => r.username === pm2User).id;
+  const techPeek = await GET(`/api/tech-reports/${othersId}`, { token: TECHT });
+  ok('F2 GATE: a tech cannot read a colleague’s report directly either',
+     techPeek.status === 403, techPeek.body);
+
+  // F2: filing — the tech's own, and what it changes
+  const myOwed = await GET('/api/me/reports', { token: TECHT });
+  ok('F2: /api/me/reports is the My Tasks nag', myOwed.status === 200 && myOwed.body.length === 1 &&
+     !!myOwed.body[0].show, myOwed.body.length);
+  const filedEmpty = await POST(`/api/shows/${FS}/tech-report`, { body: '   ' }, { token: TECHT });
+  ok('F2: an empty report is not filed', filedEmpty.status === 400, filedEmpty.body);
+  const filed = await POST(`/api/shows/${FS}/tech-report`, {
+    body: 'One cabinet in the north run failed on first power — swapped from the spare pack. ' +
+          'Dock was double-booked with catering at 08:00, worth writing into the advance.'
+  }, { token: TECHT });
+  ok('F2: filing flips it to FILED with a datestamp',
+     filed.status === 200 && filed.body.report.status === 'filed' && !!filed.body.report.filed_at,
+     filed.body.report);
+  ok('F2: ...and it lands in the event folder’s files as a document',
+     !!filed.body.file && filed.body.file.kind === 'report' && filed.body.file.show_id === FS,
+     filed.body.file);
+  ok('F2: ...the summary drops to one outstanding', filed.body.summary.owed === 1, filed.body.summary);
+  ok('F2: ...and My Tasks stops nagging him',
+     (await GET('/api/me/reports', { token: TECHT })).body.length === 0);
+  const revised = await POST(`/api/shows/${FS}/tech-report`, { body: 'Revised: two failures.' },
+                             { token: TECHT });
+  ok('F2: revising does NOT create a second document',
+     revised.body.file.id === filed.body.file.id, { a: filed.body.file.id, b: revised.body.file.id });
+  const offCrew = await POST(`/api/shows/${FS}/tech-report`, { body: 'I was not there.' },
+                             { token: MGRT });
+  ok('F2: someone not on the crew owes nothing and is told so, not silently enrolled',
+     offCrew.status === 403 && /not on this show/.test(String(offCrew.body.error)), offCrew.body);
+  const myReportId = filed.body.report.id;
+  const pmWrite = await PUT(`/api/tech-reports/${myReportId}`, { body: 'A pm rewriting it.' },
+                            { token: PMT });
+  ok('F2 GATE: a PM cannot WRITE somebody else’s report — there is no such lever',
+     pmWrite.status === 403 && /written by the person it belongs to/.test(String(pmWrite.body.error)),
+     pmWrite.body);
+  const stillMine = await pool.query('SELECT body FROM tech_reports WHERE id=$1', [myReportId]);
+  ok('F2 GATE: ...and the body is untouched', /Revised: two failures/.test(stillMine.rows[0].body));
+
+  // F2 GATE: review is pm+ — mutation-tested both ways
+  const techReview = await POST(`/api/tech-reports/${myReportId}/review`, {}, { token: TECHT });
+  ok('F2 GATE: a TECH cannot mark a report reviewed — not even his own',
+     techReview.status === 403 && /never sign one off/.test(String(techReview.body.error)),
+     techReview.body);
+  const unreviewed = await pool.query('SELECT status FROM tech_reports WHERE id=$1', [myReportId]);
+  ok('F2 GATE: ...and the refusal wrote nothing', unreviewed.rows[0].status === 'filed');
+  const pmReview = await POST(`/api/tech-reports/${myReportId}/review`, {}, { token: PMT });
+  ok('F2 GATE: a PM can — the gate ADMITS as well as refuses',
+     pmReview.status === 200 && pmReview.body.status === 'reviewed' &&
+     pmReview.body.reviewed_by === pmUser, pmReview.body);
+  const rewriteAfter = await PUT(`/api/tech-reports/${myReportId}`, { body: 'sneak' }, { token: TECHT });
+  ok('F2: a reviewed report is locked until a pm reopens it', rewriteAfter.status === 409,
+     rewriteAfter.body);
+  await POST(`/api/tech-reports/${myReportId}/reopen`, {}, { token: PMT });
+  const reopened = await pool.query('SELECT status FROM tech_reports WHERE id=$1', [myReportId]);
+  ok('F2: reopening puts it back to FILED, not to owed — the obligation stayed met',
+     reopened.rows[0].status === 'filed', reopened.rows[0]);
+
+  // ── F2 FIREWALL ASSERTION: a report body can NEVER reach a recap ──────────
+  const POISON = 'CANARY9931 the venue went over budget and the vendor invoice was wrong';
+  await pool.query(`UPDATE tech_reports SET body=$2 WHERE id=$1`, [myReportId, POISON]);
+  const factsShow = await require('../lib/db').loadShow(FS);
+  const facts = await fw.recapFacts(pool, factsShow);
+  ok('F2 FIREWALL: recapFacts does not return the report body under ANY key',
+     JSON.stringify(facts).indexOf('CANARY9931') < 0);
+  const regen = await POST(`/api/shows/${FS}/recap`, {}, { token: A });
+  ok('F2 FIREWALL: a real regenerate through the route does not carry it either',
+     JSON.stringify(regen.body.body).indexOf('CANARY9931') < 0);
+  const stillThere = await pool.query('SELECT body FROM tech_reports WHERE id=$1', [myReportId]);
+  ok('F2 FIREWALL: ...and the body really is still sitting there, simply unread',
+     /CANARY9931/.test(stillThere.rows[0].body));
+  // THE ENFORCEMENT, not the observation: the guard THROWS on a forbidden read.
+  let guardThrew = null;
+  try {
+    await fw.guardRecapQuery(pool).query('SELECT body FROM tech_reports WHERE show_id=$1', [FS]);
+  } catch (e) { guardThrew = e.message; }
+  ok('F2 FIREWALL: the query guard THROWS if the generator ever reads tech_reports',
+     !!guardThrew && /may not read `tech_reports`/.test(guardThrew), guardThrew);
+  ok('F2 FIREWALL: ...and names every other table it may not read either',
+     ['expenses', 'purchase_orders', 'jobs', 'budget_lines', 'notes', 'deliverables']
+       .every((t) => fw.RECAP_FORBIDDEN_TABLES.includes(t)), fw.RECAP_FORBIDDEN_TABLES);
+  let allowedOk = false;
+  try {
+    await fw.guardRecapQuery(pool).query('SELECT id FROM shows WHERE id=$1', [FS]);
+    allowedOk = true;
+  } catch (_) { allowedOk = false; }
+  ok('F2 FIREWALL: ...while the reads it IS allowed pass straight through', allowedOk);
+  ok('F2 FIREWALL: a human pasting the report body into the recap is REFUSED, not scrubbed',
+     !!fw.recapUnsafe(POISON), fw.recapUnsafe(POISON));
+
+  // ── F3: the notification outbox ──────────────────────────────────────────
+  const prefs = await GET('/api/me/notification-prefs', { token: TECHT });
+  ok('F3: a person with no stored row gets Tom’s defaults',
+     prefs.status === 200 && prefs.body.prefs.assignment === 'immediate' &&
+     prefs.body.prefs.mention === 'immediate' && prefs.body.prefs.notify === 'digest' &&
+     prefs.body.prefs.report_nag === 'digest', prefs.body.prefs);
+  const prefRows0 = await pool.query(
+    'SELECT COUNT(*)::int AS n FROM notification_prefs WHERE username=$1', [techUser]);
+  ok('F3: ...and the table stores NOTHING for them — it is a deviation list',
+     prefRows0.rows[0].n === 0, prefRows0.rows[0]);
+  const setPref = await PUT('/api/me/notification-prefs', { notify: 'off' }, { token: TECHT });
+  ok('F3: setting a deviation stores it', setPref.status === 200 && setPref.body.prefs.notify === 'off');
+  const prefRows1 = await pool.query(
+    'SELECT mode FROM notification_prefs WHERE username=$1 AND kind=$2', [techUser, 'notify']);
+  ok('F3: ...as exactly one row', prefRows1.rows.length === 1 && prefRows1.rows[0].mode === 'off');
+  await PUT('/api/me/notification-prefs', { notify: 'digest' }, { token: TECHT });
+  const prefRows2 = await pool.query(
+    'SELECT COUNT(*)::int AS n FROM notification_prefs WHERE username=$1', [techUser]);
+  ok('F3: writing the HOUSE DEFAULT removes the row again', prefRows2.rows[0].n === 0);
+  const badMode = await PUT('/api/me/notification-prefs', { mention: 'telepathy' }, { token: TECHT });
+  ok('F3: an unknown delivery mode is a 400 that lists the real ones',
+     badMode.status === 400 && /immediate, digest, off/.test(String(badMode.body.error)), badMode.body);
+
+  // an assignment is a real delivery
+  const assignStep = (await GET(`/api/steps?show_id=${S}`, { token: A })).body[0];
+  await PUT(`/api/steps/${assignStep.id}/assign`, { owner: techUser }, { token: A });
+  const assignRow = await pool.query(
+    `SELECT * FROM notification_outbox WHERE username=$1 AND kind='assignment' ORDER BY id DESC LIMIT 1`,
+    [techUser]);
+  ok('F3: assigning work queues an IMMEDIATE outbox row',
+     assignRow.rows.length === 1 && assignRow.rows[0].mode === 'immediate' &&
+     assignRow.rows[0].status === 'queued', assignRow.rows[0]);
+  ok('F3: ...naming the task, not just "something changed"',
+     /Assigned to you/.test(assignRow.rows[0].subject), assignRow.rows[0].subject);
+
+  // an @mention is a real delivery, and it carries its note id
+  const mentionNote = await POST('/api/notes', {
+    anchor_type: 'show', anchor_id: S, body: `Power plan is sorted — @${techUser} worth a look.`
+  }, { token: A });
+  const mentionRow = await pool.query(
+    `SELECT * FROM notification_outbox WHERE note_id=$1`, [mentionNote.body.id]);
+  ok('F3: an @mention queues an outbox row carrying its NOTE ID',
+     mentionRow.rows.length === 1 && mentionRow.rows[0].kind === 'mention' &&
+     mentionRow.rows[0].username === techUser, mentionRow.rows[0]);
+
+  // SKIP-IF-READ-IN-APP
+  const marked = await POST('/api/me/inbox/read', { ids: [mentionNote.body.id] }, { token: TECHT });
+  ok('F3 SKIP-IF-READ: the tech read it in the app first', marked.body.marked === 1, marked.body);
+  const flush1 = await POST('/api/admin/notifications/flush', {}, { token: A });
+  const afterFlush = await pool.query('SELECT * FROM notification_outbox WHERE note_id=$1',
+    [mentionNote.body.id]);
+  ok('F3 SKIP-IF-READ: a row whose note was already read in-app is SKIPPED, not sent',
+     afterFlush.rows[0].status === 'skipped' && afterFlush.rows[0].skipped_reason === 'read in-app',
+     afterFlush.rows[0]);
+  ok('F3 SKIP-IF-READ: ...and the flush counted it', flush1.body.skipped >= 1, flush1.body);
+  const unreadNote = await POST('/api/notes', {
+    anchor_type: 'show', anchor_id: S, body: `Second one — @${techUser} this one is unread.`
+  }, { token: A });
+  await POST('/api/admin/notifications/flush', {}, { token: A });
+  const sentRow = await pool.query('SELECT * FROM notification_outbox WHERE note_id=$1',
+    [unreadNote.body.id]);
+  ok('F3: an UNREAD one really goes out, and records which driver took it',
+     sentRow.rows[0].status === 'sent' && sentRow.rows[0].driver === 'log' && !!sentRow.rows[0].sent_at,
+     sentRow.rows[0]);
+  const logAct = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM activity WHERE action='notification.sent' AND show_id=$1`, [S]);
+  ok('F3: the log driver is a REAL delivery — it records where it went',
+     logAct.rows[0].n >= 1, logAct.rows[0]);
+
+  // 'off' silences the email and NEVER the bell
+  await PUT('/api/me/notification-prefs', { notify: 'off' }, { token: TECHT });
+  const bellBefore = (await GET('/api/me/inbox/count', { token: TECHT })).body;
+  await PUT(`/api/shows/${S}`, { venue: 'UW Field House', notify: [techUser] }, { token: A });
+  const bellAfter = (await GET('/api/me/inbox/count', { token: TECHT })).body;
+  ok('F3: notify:off STILL reaches the bell — it silences the email only',
+     (bellAfter.count || bellAfter.badge || 0) > (bellBefore.count || bellBefore.badge || 0),
+     { bellBefore, bellAfter });
+  const offRow = await pool.query(
+    `SELECT * FROM notification_outbox WHERE username=$1 AND kind='notify' ORDER BY id DESC LIMIT 1`,
+    [techUser]);
+  ok('F3: ...and the outbox RECORDS the silence rather than dropping it',
+     offRow.rows[0].status === 'skipped' && offRow.rows[0].skipped_reason === 'preference off',
+     offRow.rows[0]);
+  await PUT('/api/me/notification-prefs', { notify: 'digest' }, { token: TECHT });
+
+  // the digest row
+  const digestRows = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM notification_outbox
+      WHERE username=$1 AND kind='digest' AND status='queued'`, [techUser]);
+  ok('F3 DIGEST: exactly ONE open digest row per person', digestRows.rows[0].n <= 1, digestRows.rows[0]);
+  const beforeDigest = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM notification_outbox WHERE mode='digest' AND status='queued'`);
+  await POST('/api/admin/notifications/flush', {}, { token: A });
+  const afterPlain = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM notification_outbox WHERE mode='digest' AND status='queued'`);
+  ok('F3 DIGEST: a plain flush leaves digest rows ALONE — there is no scheduler',
+     afterPlain.rows[0].n === beforeDigest.rows[0].n, { beforeDigest, afterPlain });
+  const digestFlush = await POST('/api/admin/notifications/flush', { digest: true }, { token: A });
+  ok('F3 DIGEST: asking for the digest explicitly flushes it',
+     digestFlush.status === 200 && digestFlush.body.considered >= 0, digestFlush.body);
+
+  // the mail layer's honest posture
+  const mailStatus = await GET('/api/admin/mail-status', { token: A });
+  ok('F3 MAIL: the default driver is `log`, and it is configured',
+     mailStatus.status === 200 && mailStatus.body.driver === 'log' &&
+     mailStatus.body.configured === true, mailStatus.body);
+  const mail = require('../lib/mail');
+  const wasDriver = process.env.MAIL_DRIVER;
+  process.env.MAIL_DRIVER = 'graph';
+  ok('F3 MAIL: with MAIL_DRIVER=graph and nothing else set, it reports NOT configured',
+     mail.driverName() === 'graph' && mail.mailConfigured() === false &&
+     mail.graphMissing().length === 4, mail.graphMissing());
+  const graphRes = await mail.send({ to: 'x@example.test', subject: 's', text: 't' });
+  ok('F3 MAIL: ...and answers a 501-shaped "mail not configured", NAMING the vars',
+     graphRes.ok === false && graphRes.status === 501 && graphRes.retryable === true &&
+     /MAIL_TENANT_ID/.test(graphRes.error), graphRes);
+  const stayQueued = await pool.query(
+    `INSERT INTO notification_outbox (username, kind, mode, status, subject, body)
+     VALUES ($1,'assignment','immediate','queued','graph test','body') RETURNING id`, [techUser]);
+  await POST('/api/admin/notifications/flush', {}, { token: A });
+  const stillQueuedRow = await pool.query('SELECT * FROM notification_outbox WHERE id=$1',
+    [stayQueued.rows[0].id]);
+  ok('F3 MAIL: an unconfigured driver LEAVES THE ITEM QUEUED — the backlog survives',
+     stillQueuedRow.rows[0].status === 'queued' && stillQueuedRow.rows[0].attempts >= 1 &&
+     /not configured/.test(String(stillQueuedRow.rows[0].last_error)), stillQueuedRow.rows[0]);
+  process.env.MAIL_DRIVER = wasDriver || 'log';
+  ok('F3 MAIL: the Graph skeleton knows its own endpoints, so wiring it is credentials only',
+     /login\.microsoftonline\.com/.test(mail.graphTokenUrl()) &&
+     /graph\.microsoft\.com\/v1\.0\/users\/.*\/sendMail/.test(mail.graphSendMailUrl('a@b.c')) &&
+     mail.graphSendMailBody({ to: 'a@b.c', subject: 's', text: 't' }).message.subject === 's');
+  await POST('/api/admin/notifications/flush', {}, { token: A });
+
+  const myNotifs = await GET('/api/me/notifications', { token: TECHT });
+  ok('F3: a person can audit their OWN queue',
+     myNotifs.status === 200 && myNotifs.body.length > 0 &&
+     myNotifs.body.every((n) => n.username === techUser), myNotifs.body.length);
+  const outboxAdmin = await GET('/api/admin/notification-outbox', { token: A });
+  ok('F3: an admin sees the whole outbox with per-status counts',
+     outboxAdmin.status === 200 && !!outboxAdmin.body.counts, outboxAdmin.body.counts);
+  const outboxPm = await GET('/api/admin/notification-outbox', { token: PMT });
+  ok('F3 GATE: ...and a pm does not', outboxPm.status === 403, outboxPm.body);
+
+  // ── F6: closeout + archiving ─────────────────────────────────────────────
+  const closeout1 = await GET(`/api/shows/${FS}/closeout`, { token: A });
+  ok('F6: closeout is machine-checked against three conditions',
+     closeout1.status === 200 && closeout1.body.complete === false &&
+     typeof closeout1.body.recap_sent === 'boolean' &&
+     typeof closeout1.body.reports_complete === 'boolean' &&
+     typeof closeout1.body.finance_clear === 'boolean', closeout1.body);
+  ok('F6: ...and it names which of the three is out',
+     closeout1.body.recap_sent === false && closeout1.body.reports_owed === 1,
+     { recap: closeout1.body.recap_sent, owed: closeout1.body.reports_owed });
+
+  const pmArchive = await POST(`/api/shows/${FS}/archive`, {}, { token: PMT });
+  ok('F6 GATE: a pm — even the folder’s owner — may not archive',
+     pmArchive.status === 403 && /admin act/.test(String(pmArchive.body.error)), pmArchive.body);
+  const mgrArchive = await POST(`/api/shows/${FS}/archive`, {}, { token: MGRT });
+  ok('F6 GATE: nor may a manager — this one really is admin-only', mgrArchive.status === 403);
+  const notArchived = await pool.query('SELECT archived_at FROM shows WHERE id=$1', [FS]);
+  ok('F6 GATE: ...and both refusals wrote nothing', notArchived.rows[0].archived_at === null);
+
+  const arch = await POST(`/api/shows/${QS}/archive`, {}, { token: A });
+  ok('F6: an admin may, and it is datestamped and attributed',
+     arch.status === 200 && !!arch.body.show.archived_at && arch.body.show.archived === true,
+     arch.body.show.archived_at);
+  const listDefault = await GET(`/api/shows?project_id=${P}`, { token: A });
+  ok('F6 EXCLUSION: the default show list EXCLUDES it',
+     !listDefault.body.some((s) => s.id === QS), listDefault.body.map((s) => s.id));
+  const listArchived = await GET(`/api/shows?project_id=${P}&archived=1`, { token: A });
+  ok('F6 EXCLUSION: ?archived=1 returns ONLY the archived ones',
+     listArchived.body.length === 1 && listArchived.body[0].id === QS,
+     listArchived.body.map((s) => s.id));
+  const listBoth = await GET(`/api/shows?project_id=${P}&include_archived=1`, { token: A });
+  ok('F6 EXCLUSION: ?include_archived=1 returns both',
+     listBoth.body.length === listDefault.body.length + 1);
+  const stillResolves = await GET(`/api/shows/${QS}`, { token: A });
+  ok('F6 EXCLUSION: BUT the show still resolves by id — a deep link and a search hit both open it',
+     stillResolves.status === 200 && stillResolves.body.id === QS);
+  const folderStill = await GET(`/api/projects/${P}`, { token: A });
+  ok('F6 EXCLUSION: ...and the FOLDER still carries it, so season rollups are unaffected',
+     folderStill.body.shows.some((s) => s.id === QS), folderStill.body.shows.map((s) => s.id));
+  const mySteps = await GET('/api/my-steps', { token: A });
+  ok('F6 EXCLUSION: an archived show’s open steps stop nagging in My Tasks',
+     !mySteps.body.some((s) => s.show && s.show.id === QS));
+  await POST(`/api/shows/${QS}/unarchive`, {}, { token: A });
+  const back = await GET(`/api/shows/${QS}`, { token: A });
+  ok('F6: unarchive puts it back, and leaves it CLOSED rather than inventing a stage',
+     back.body.archived === false && back.body.stage === 'closed', back.body.stage);
+
+  // the folder-level archive, and the auto-archive rule
+  const arcProj = await POST('/api/projects', { name: TAG + ' arc', client: 'X', type: 'led',
+                                                owner: 'admin' }, { token: A });
+  const AP = arcProj.body.id;
+  const arcShow = await POST('/api/shows', { project_id: AP, name: TAG + ' arc show',
+    venue: 'V', event_date: '2026-01-01', strike_date: '2026-01-02' }, { token: A });
+  const AS = arcShow.body.id;
+  await POST(`/api/projects/${AP}/archive`, {}, { token: A });
+  const apRow = await pool.query('SELECT archived_at FROM projects WHERE id=$1', [AP]);
+  const asRow = await pool.query('SELECT archived_at FROM shows WHERE id=$1', [AS]);
+  ok('F6: archiving a FOLDER takes its shows with it',
+     !!apRow.rows[0].archived_at && !!asRow.rows[0].archived_at);
+  const projList = await GET('/api/projects', { token: A });
+  ok('F6 EXCLUSION: ...and the portfolio drops it',
+     !projList.body.some((p) => p.id === AP));
+  const projArch = await GET('/api/projects?archived=1', { token: A });
+  ok('F6: the Archive view finds it', projArch.body.some((p) => p.id === AP));
+  await POST(`/api/projects/${AP}/unarchive`, {}, { token: A });
+  ok('F6: unarchiving the folder brings its shows back too',
+     (await GET('/api/projects', { token: A })).body.some((p) => p.id === AP));
+
+  // the 60-day auto-archive, driven through the sweep. The fixture has to be
+  // GENUINELY closed out — recap sent, nobody owing a report, no money waiting —
+  // because the sweep re-checks all three before it archives anything, and a
+  // faked marker is exactly what it would clear.
+  await POST(`/api/shows/${AS}/confirm`, {}, { token: A });
+  await POST(`/api/shows/${AS}/recap`, {}, { token: A });
+  await POST(`/api/recaps/${(await GET(`/api/shows/${AS}/recap`, { token: A })).body.id}/approve`,
+             {}, { token: A });
+  await POST(`/api/shows/${AS}/recap/sent`, {}, { token: A });
+  const arcCo = await GET(`/api/shows/${AS}/closeout`, { token: A });
+  ok('F6: the archive fixture really is closed out on all three conditions',
+     arcCo.body.complete === true, arcCo.body);
+  await pool.query(
+    `UPDATE shows SET closeout_complete_at = NOW() - INTERVAL '61 days' WHERE id=$1`, [AS]);
+  const pmSweep = await POST('/api/admin/sweep', {}, { token: PMT });
+  ok('F6 GATE: the sweep is admin-only', pmSweep.status === 403, pmSweep.body);
+  const sweep1 = await POST('/api/admin/sweep', {}, { token: A });
+  ok('F6 SWEEP: it runs and reports what it did',
+     sweep1.status === 200 && typeof sweep1.body.archived === 'number', sweep1.body);
+  const autoArch = await pool.query('SELECT archived_at, archived_by, stage FROM shows WHERE id=$1', [AS]);
+  ok('F6 SWEEP: a show 61 days past closeout is AUTO-ARCHIVED',
+     !!autoArch.rows[0].archived_at && autoArch.rows[0].stage === 'archived', autoArch.rows[0]);
+  ok('F6 SWEEP: ...and its folder went with it, because every show in it is archived',
+     !!(await pool.query('SELECT archived_at FROM projects WHERE id=$1', [AP])).rows[0].archived_at);
+  const sweep2 = await POST('/api/admin/sweep', {}, { token: A });
+  ok('F6 SWEEP: running it twice changes nothing — it is idempotent',
+     sweep2.body.archived === 0 && sweep2.body.struck === 0, sweep2.body);
+  ok('F6 SWEEP: ...and it says out loud that it is not a scheduled job',
+     /no scheduler/i.test(String(sweep2.body.note)), sweep2.body.note);
+  await DEL(`/api/projects/${AP}`, { token: A });
+
+  // closeout regression: it CLEARS again when the state comes undone
+  const coProj = await POST('/api/events', {
+    name: TAG + ' closeout', type: 'led', client: 'Closeout Co', venue: 'CV',
+    load_in_date: '2026-02-01', event_date: '2026-02-02', strike_date: '2026-02-03'
+  }, { token: A });
+  const CS = coProj.body.show.id, CP = coProj.body.project.id;
+  await POST(`/api/shows/${CS}/confirm`, {}, { token: A });
+  await POST(`/api/shows/${CS}/recap`, {}, { token: A });
+  await POST(`/api/shows/${CS}/recap/approve`, {}, { token: A });
+  await POST(`/api/shows/${CS}/recap/sent`, {}, { token: A });
+  const coDone = await GET(`/api/shows/${CS}/closeout`, { token: A });
+  ok('F6: a show with a sent recap, no crew and no money exceptions closes out',
+     coDone.body.complete === true && !!coDone.body.closeout_complete_at, coDone.body);
+  // A SENT recap can never be reopened — it is a record of what left the
+  // building. So the way a closeout really comes undone is LATE MONEY: a
+  // booking that landed after the fact with no confirmation attached.
+  await POST('/api/bookings', { show_id: CS, category: 'Truck / freight', vendor: 'Late Freight Co',
+    status: 'done', amount: 3100, booked_date: '2026-02-04' }, { token: A });
+  const coUndone = await GET(`/api/shows/${CS}/closeout`, { token: A });
+  ok('F6: late money with no paperwork UN-completes the closeout',
+     coUndone.body.complete === false && coUndone.body.finance_clear === false,
+     { complete: coUndone.body.complete, exceptions: coUndone.body.finance_exceptions });
+  ok('F6: ...and the 60-day clock stops with it, rather than running against ' +
+     'paperwork that came undone',
+     coUndone.body.closeout_complete_at === null, coUndone.body.closeout_complete_at);
+
+  // ── F1: real event creation ──────────────────────────────────────────────
+  const beforeCounts = await pool.query(
+    `SELECT (SELECT COUNT(*) FROM projects) p, (SELECT COUNT(*) FROM shows) s,
+            (SELECT COUNT(*) FROM jobs) j`);
+  const ev = await POST('/api/events', {
+    name: TAG + ' Bucks Opener', type: 'led', client: 'Milwaukee Bucks',
+    venue: 'Fiserv Forum', city: 'Milwaukee, WI',
+    load_in_date: '2027-01-08', event_date: '2027-01-10', strike_date: '2027-01-11',
+    scope: { kind: 'led', linear_feet: 800, cabinet_count: 144, pitch: 'P10' },
+    notify: [pmUser]
+  }, { token: A });
+  const EP = ev.body.project.id, ES = ev.body.show.id;
+  ok('F1: ONE call creates the folder, the show and the job', ev.status === 200 &&
+     !!ev.body.project.id && !!ev.body.show.id && !!ev.body.job.id, Object.keys(ev.body));
+  const afterCounts = await pool.query(
+    `SELECT (SELECT COUNT(*) FROM projects) p, (SELECT COUNT(*) FROM shows) s,
+            (SELECT COUNT(*) FROM jobs) j`);
+  ok('F1: ...exactly one of each, in one transaction',
+     Number(afterCounts.rows[0].p) === Number(beforeCounts.rows[0].p) + 1 &&
+     Number(afterCounts.rows[0].s) === Number(beforeCounts.rows[0].s) + 1 &&
+     Number(afterCounts.rows[0].j) === Number(beforeCounts.rows[0].j) + 1,
+     { before: beforeCounts.rows[0], after: afterCounts.rows[0] });
+  ok('F1: the job opens on a TEMP placeholder — nobody has a QB number yet',
+     ev.body.job.qb_number_status === 'temp' && /^TEMP-\d\d-\d{3,}$/.test(ev.body.job.qb_job_number),
+     ev.body.job.qb_job_number);
+  ok('F1: the show is QUOTED — nobody has committed to anything',
+     ev.body.show.stage === 'quoted' && ev.body.show.confirmed === false);
+  ok('F1: the event TYPE seeded its lane set and T-minus pipeline',
+     ev.body.instantiated_steps > 10, ev.body.instantiated_steps);
+  ok('F1: ...with due dates back-scheduled off the event date',
+     ev.body.show.steps.some((s) => s.due_date && s.due_date < '2027-01-10'));
+  ok('F1: the scope entered at creation is on the show',
+     ev.body.show.scope_line === 'LED · 800′ · 144× P10', ev.body.show.scope_line);
+  ok('F1: the show inherits the folder’s job', ev.body.show.default_job_id === ev.body.job.id);
+  ok('F1 NOTIFY: the picker delivered ONE ping for the whole act, not three',
+     Array.isArray(ev.body.notified) && ev.body.notified.length === 1 &&
+     ev.body.notified[0] === pmUser, ev.body.notified);
+  const evNote = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM notes WHERE show_id=$1 AND author='admin'`, [ES]);
+  ok('F1 NOTIFY: ...and it is ONE anchored note on the new show', evNote.rows[0].n === 1, evNote.rows[0]);
+  const evOutbox = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM notification_outbox WHERE show_id=$1 AND kind='notify'`, [ES]);
+  ok('F1/F3 NOTIFY: ...which also queued the second channel', evOutbox.rows[0].n === 1, evOutbox.rows[0]);
+  const evAct = await pool.query(
+    `SELECT action FROM activity WHERE show_id=$1 AND action='event.create'`, [ES]);
+  ok('F1: ...and ONE line in the activity feed', evAct.rows.length === 1, evAct.rows);
+
+  const silentEv = await POST('/api/events', { name: TAG + ' silent', type: 'print' }, { token: A });
+  ok('F1 NOTIFY: with no picker selection, NOBODY is notified — silence is the default',
+     silentEv.body.notified.length === 0, silentEv.body.notified);
+  const techEvent = await POST('/api/events', { name: TAG + ' nope', type: 'led' }, { token: TECHT });
+  ok('F1 GATE: a tech cannot create an event', techEvent.status === 403, techEvent.body);
+  const noName = await POST('/api/events', { type: 'led' }, { token: A });
+  ok('F1: an event with no name is a 400', noName.status === 400, noName.body);
+  const badDate = await POST('/api/events', { name: TAG + ' bad', event_date: 'soon' }, { token: A });
+  ok('F1: a malformed date is refused rather than stored', badDate.status === 400, badDate.body);
+  await DEL(`/api/projects/${EP}`, { token: A });
+  await DEL(`/api/projects/${silentEv.body.project.id}`, { token: A });
+  await DEL(`/api/projects/${CP}`, { token: A });
+
+  }
+
   section('6. cascade integrity — a folder with a child of EVERY type');
   const before = await childCounts(P);
   ok('the smoke folder has children of every wired type',
@@ -1540,7 +2204,8 @@ const DEL = (p, o) => call('DELETE', p, o);
      && before.jobs > 0 && before.budget_lines > 0 && before.notes > 0 && before.note_reads > 0
      && before.note_mentions > 0 && before.schedule_items > 0 && before.crew_assignments > 0
      && before.deliverables > 0 && before.milestones > 0 && before.proposals > 0
-     && before.purchase_orders > 0 && before.po_lines > 0 && before.activity > 0,
+     && before.purchase_orders > 0 && before.po_lines > 0 && before.activity > 0
+     && before.tech_reports > 0 && before.notification_outbox > 0,
      before);
   // add the remaining child types so the cascade is exercised in full
   await POST('/api/bookings', { show_id: S, category: 'Truck / freight', vendor: 'Landstar',
@@ -1683,6 +2348,10 @@ async function childCounts(projectId) {
     spec_renders:     await q(`SELECT COUNT(*) n FROM spec_renders WHERE show_id ${inShows}`),
     flex_state:       await q(`SELECT COUNT(*) n FROM flex_state WHERE show_id ${inShows}`),
     proposals:        await q(`SELECT COUNT(*) n FROM proposals WHERE project_id=$1 OR show_id ${inShows}`),
+    // F2/F3 — two new tables, and the rule this list exists to enforce: a table
+    // that is not counted here is a table that leaks rows on every folder delete.
+    tech_reports:     await q(`SELECT COUNT(*) n FROM tech_reports WHERE project_id=$1 OR show_id ${inShows}`),
+    notification_outbox: await q(`SELECT COUNT(*) n FROM notification_outbox WHERE project_id=$1 OR show_id ${inShows}`),
     activity:         await q(`SELECT COUNT(*) n FROM activity WHERE project_id=$1 OR show_id ${inShows}`)
   };
 }

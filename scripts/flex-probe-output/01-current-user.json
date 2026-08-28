@@ -1,0 +1,50 @@
+{
+  "id": "21ad5aca-11d8-4e8c-952a-fd10c5ad77d0",
+  "name": "Tom Andres",
+  "userName": "tandres",
+  "emailAddress": "tom@e360sport.com",
+  "createdDate": "2026-01-09T11:48:22",
+  "deleted": false,
+  "systemUser": false,
+  "supportUser": false,
+  "locked": false,
+  "passwordChangeRequired": false,
+  "defaultGroup": {
+    "id": "ec2d2472-aa2a-11df-8779-00e08175e43e",
+    "name": "Administrators",
+    "domainId": "user-group"
+  },
+  "groupMembershipIds": [
+    "ec2d2472-aa2a-11df-8779-00e08175e43e"
+  ],
+  "contact": {
+    "id": "b20f0d50-b478-42a4-bd45-6386e6aa5345",
+    "name": "Tom Andres",
+    "preferredDisplayString": null,
+    "barcode": null,
+    "deleted": false,
+    "shortName": null,
+    "domainId": "contact",
+    "className": "CONTACT",
+    "shortNameOrName": "Tom Andres"
+  },
+  "homebaseLocation": {
+    "id": "2f49c62c-b139-11df-b8d5-00e08175e43e",
+    "name": "Dallas/Fort Worth",
+    "preferredDisplayString": "Dallas/Fort Worth",
+    "barcode": null,
+    "deleted": false,
+    "shortName": null,
+    "domainId": "business-location",
+    "shortNameOrName": "Dallas/Fort Worth",
+    "className": null
+  },
+  "corporateIdentity": {
+    "id": "4149edac-b139-11df-b8d5-00e08175e43e",
+    "name": "e360Sport",
+    "domainId": "corporate-identity"
+  },
+  "enabledLocationIds": [
+    "2f49c62c-b139-11df-b8d5-00e08175e43e"
+  ]
+}

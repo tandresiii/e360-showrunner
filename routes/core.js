@@ -16,7 +16,7 @@
 'use strict';
 
 const express = require('express');
-const { pool, withTx, loadProject, loadShow, projectForRow, mintTempJobNumber,
+const { pool, withTx, loadProject, loadShow, loadJob, projectForRow, mintTempJobNumber,
         deleteProjectCascade, deleteShowCascade } = require('../lib/db');
 const { requireAuth, requireRole, canEditProject, canUpdateStepStatus, roleRank,
         hasFinance } = require('../lib/auth');
@@ -30,8 +30,16 @@ const {
 } = require('../lib/mappers');
 const {
   PROJECT_TYPES, STAGES, RAGS, STEP_STATUSES, EVIDENCE_TYPES, AUTO_SOURCES,
-  oneOf, addDays, slug, isISODate, intOrNull
+  SCOPE_KINDS, LIFECYCLE_STAGES, ROLE_RANK,
+  oneOf, addDays, slug, isISODate, intOrNull, num, money, sameUser,
+  canonicalStage, stageLabel, isConfirmed, scopeLine, scopeOf, todayISO
 } = require('../lib/enums');
+// F2/F3/F5/F6 — the four post-deploy engines. Each one owns its decision; this
+// module only routes to them.
+const lifecycle = require('../lib/lifecycle');
+const reports = require('../lib/reports');
+const notify = require('../lib/notify');
+const { scopeFromDocs, scopeQuestions } = require('../lib/speccheck');
 // The staffing-app client. The field mapping (M1–M14) lives there, not here,
 // so the dry run and the live push can never drift.
 const {
@@ -102,10 +110,35 @@ async function hydrateProject(row, q = pool, { deep = true, session = null } = {
 // route family shares one implementation — see notifyTargets there.
 
 // ════════════════════════════════════════════════════════════════════════════
+// F6. THE ARCHIVE FILTER — one predicate, three list routes
+// ────────────────────────────────────────────────────────────────────────────
+// Tom: "we don't want 300 in our normal area in a year… fully searchable/
+// browsable via an Archive filter/view."  So:
+//
+//   (no param)             archived rows are EXCLUDED — the working set
+//   ?archived=1            ONLY archived rows — the Archive view
+//   ?include_archived=1    both — for a caller that wants the whole history
+//
+// It applies to the LIST routes only. GET /projects/:id and GET /shows/:id
+// always resolve, archived or not, so a deep link, a bell row and a search hit
+// all still open. And hydrateProject() keeps EVERY show of a folder it is
+// asked for, archived included — that is what leaves season rollups unaffected.
+function archiveClause(req, col = 'archived_at') {
+  const only = String(pick(req.query, 'archived') || '') === '1' ||
+               String(pick(req.query, 'archived') || '') === 'true';
+  const both = String(pick(req.query, 'include_archived') || '') === '1' ||
+               String(pick(req.query, 'include_archived') || '') === 'true';
+  if (both) return '';
+  return only ? ` ${col} IS NOT NULL` : ` ${col} IS NULL`;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // PROJECTS
 // ════════════════════════════════════════════════════════════════════════════
 router.get('/projects', asyncH(async (req, res) => {
-  const r = await pool.query(`SELECT * FROM projects ORDER BY created_at DESC, id DESC`);
+  const clause = archiveClause(req);
+  const r = await pool.query(
+    `SELECT * FROM projects${clause ? ' WHERE' + clause : ''} ORDER BY created_at DESC, id DESC`);
   const out = [];
   for (const row of r.rows) out.push(await hydrateProject(row, pool, { session: req.session }));
   res.json(out);
@@ -205,9 +238,13 @@ router.delete('/projects/:id', asyncH(async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 router.get('/shows', asyncH(async (req, res) => {
   const params = [];
-  let q = 'SELECT * FROM shows';
+  const where = [];
   const projectId = intOrNull(pick(req.query, 'project_id'));
-  if (projectId) { params.push(projectId); q += ` WHERE project_id=$${params.length}`; }
+  if (projectId) { params.push(projectId); where.push(`project_id=$${params.length}`); }
+  const arch = archiveClause(req);
+  if (arch) where.push(arch.trim());
+  let q = 'SELECT * FROM shows';
+  if (where.length) q += ' WHERE ' + where.join(' AND ');
   q += ' ORDER BY event_date ASC, id ASC';
   const r = await pool.query(q, params);
   const out = [];
@@ -355,6 +392,446 @@ router.delete('/milestones/:id', requireRole('pm'), asyncH(async (req, res) => {
 }));
 
 // ════════════════════════════════════════════════════════════════════════════
+// F1. NEW EVENT — folder + job + show + lanes, in ONE transaction
+// ────────────────────────────────────────────────────────────────────────────
+// "New Event" was the last mock button in the app. This is what it now calls.
+//
+// It is a COMPOSITE over the routes that already exist — POST /projects, the
+// auto-created TEMP-numbered job, POST /shows, instantiate-template — not a
+// second implementation of any of them. Three reasons it is one endpoint rather
+// than three calls from the browser:
+//
+//   · ATOMICITY. A folder with no show, or a show with no job, is a broken
+//     record somebody has to clean up by hand. One transaction, or nothing.
+//   · ONE NOTIFY. Tom's own blind spot (TEAM_FEEDBACK, 2026-08-27): "when I add
+//     an event I should have the option of letting people know about it." Three
+//     calls would mean three notify lists and three pings for one act. The
+//     notify-picker row on this modal produces exactly ONE anchored ping,
+//     naming the event.
+//   · ONE ACTIVITY STORY. `event.create` reads as one line in the feed.
+//
+// The job opens on a TEMP placeholder (POLISH_LIST #5) because nobody has a
+// QuickBooks number the moment a folder is opened — and F5's Confirm is the
+// moment Candice swaps in the real one.
+router.post('/events', requireRole('pm'), asyncH(async (req, res) => {
+  const b = req.body || {};
+  const name = String(pick(b, 'name') || '').trim();
+  if (!name) throw badRequest('name required');
+  const type = oneOf(pick(b, 'type'), PROJECT_TYPES, 'led');
+  const client = String(pick(b, 'client') || '').trim();
+  const venue = String(pick(b, 'venue') || '').trim();
+  const eventDate = String(pick(b, 'event_date') || '').trim();
+  if (eventDate && !isISODate(eventDate)) throw badRequest('event_date must be YYYY-MM-DD');
+  const loadIn = String(pick(b, 'load_in_date') || '').trim();
+  if (loadIn && !isISODate(loadIn)) throw badRequest('load_in_date must be YYYY-MM-DD');
+  const strike = String(pick(b, 'strike_date') || '').trim();
+  if (strike && !isISODate(strike)) throw badRequest('strike_date must be YYYY-MM-DD');
+  // A pm always owns what they create; manager+ may hand it to someone else.
+  const owner = (roleRank(req.session.role) >= ROLE_RANK.manager && pick(b, 'owner'))
+    ? String(pick(b, 'owner')) : req.session.username;
+  if (owner !== req.session.username) {
+    const { unknown } = await resolveUsernames([owner]);
+    if (unknown.length) throw badRequest(`Unknown user '${owner}'`);
+  }
+  // A brand-new event is QUOTED — nobody has committed to anything yet, and
+  // pretending otherwise is exactly what F5's Confirm button exists to stop.
+  const stage = oneOf(pick(b, 'stage'), STAGES, 'quoted');
+
+  const out = await withTx(async (c) => {
+    const proj = (await c.query(
+      `INSERT INTO projects (name, slug, client, type, stage, owner, description, summary, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [name, slug(name), client, type, stage, owner,
+       String(pick(b, 'description') || ''), pick(b, 'summary') || null,
+       pick(b, 'source') || null])).rows[0];
+
+    const job = (await c.query(
+      `INSERT INTO jobs (project_id, name, qb_job_number, qb_number_status, client, deal_type,
+                         description, contract_value)
+       VALUES ($1,$2,$3,'temp',$4,$5,'',$6) RETURNING *`,
+      [proj.id, pick(b, 'job_name') || name, await mintTempJobNumber(c), client,
+       oneOf(pick(b, 'deal_type'), ['rental', 'sale'], 'rental'),
+       money(pick(b, 'contract_value'), 0)])).rows[0];
+
+    const showName = String(pick(b, 'show_name') || name).trim();
+    const show = (await c.query(
+      `INSERT INTO shows (project_id, name, slug, venue, city, load_in_date, event_date,
+                          strike_date, stage, rag, on_site_poc, owner, default_job_id, cabinets)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'idle',$10,$11,$12,$13) RETURNING *`,
+      [proj.id, showName, slug(showName), venue, String(pick(b, 'city') || ''),
+       loadIn, eventDate, strike, stage, String(pick(b, 'on_site_poc') || ''),
+       owner, job.id, parseInt(pick(b, 'cabinets'), 10) || 0])).rows[0];
+
+    // The event TYPE's template supplies the lane set + the T-minus pipeline.
+    // Explicit template_id wins; otherwise the first template for this type.
+    let templateId = intOrNull(pick(b, 'template_id'));
+    if (!templateId && pick(b, 'seed_template', true) !== false) {
+      const t = await c.query(
+        'SELECT id FROM event_type_templates WHERE event_type=$1 ORDER BY id LIMIT 1', [type]);
+      if (t.rows.length) templateId = t.rows[0].id;
+    }
+    let instantiated = 0;
+    if (templateId) instantiated = await instantiateTemplateOnShow(c, templateId, show, proj);
+
+    // F4. A scope line may be entered at creation. Silently ignored when empty,
+    // because most events are opened before anyone knows the cabinet count.
+    const scope = await applyScope(c, show, b, req.actor, { silent: true });
+    if (scope) Object.assign(show, scope);
+
+    await logActivity(c, {
+      projectId: proj.id, showId: show.id, actor: req.actor, action: 'event.create',
+      detail: `${name} · ${type}` + (venue ? ` · ${venue}` : '') +
+              ` · job ${job.qb_job_number}` + (instantiated ? ` · +${instantiated} steps` : ''),
+      accent: true
+    });
+    // ONE ping for the whole act, carrying the event's own name.
+    const notified = await notifyTargets(c, {
+      body: b, anchorType: 'show', anchorId: show.id, projectId: proj.id, showId: show.id,
+      actor: req.actor,
+      summary: `opened the event “${name}”${venue ? ' at ' + venue : ''}${eventDate ? ' · ' + eventDate : ''} —`,
+      link: '/#show/' + show.id
+    });
+    return { proj, job, show, instantiated, notified };
+  });
+
+  const showRec = await hydrateShow(out.show, pool, { withSteps: true });
+  showRec.instantiated_steps = out.instantiated;
+  res.json({
+    ok: true,
+    project: await hydrateProject(out.proj, pool, { session: req.session }),
+    job: stripMoney(dbToJob(out.job), hasFinance(req.session)),
+    show: showRec,
+    instantiated_steps: out.instantiated,
+    notified: out.notified
+  });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// F4. SCOPE LINE
+// ════════════════════════════════════════════════════════════════════════════
+// Structured "what we're delivering", per show. ONE writer, shared by
+// PUT /shows/:id/scope and the create flow above, so both validate identically.
+//
+// `silent` is for the create path: an event opened with no scope numbers is the
+// normal case, not a 400.
+async function applyScope(c, show, b, actor, { silent = false } = {}) {
+  const has_ = (k) => has(b, k) || has(b, 'scope_' + k);
+  const get_ = (k) => (has(b, 'scope_' + k) ? pick(b, 'scope_' + k) : pick(b, k));
+  const wanted = ['kind', 'linear_feet', 'cabinet_count', 'cabinet_type', 'pitch',
+                  'print_pieces', 'print_sqft'].filter(has_);
+  const scopeObj = pick(b, 'scope');
+  if (!wanted.length && (!scopeObj || typeof scopeObj !== 'object')) {
+    if (silent) return null;
+    throw badRequest('nothing to set — send a scope kind and at least one number');
+  }
+  const src = (scopeObj && typeof scopeObj === 'object' && !Array.isArray(scopeObj)) ? scopeObj : null;
+  const val = (k) => (src && src[k] !== undefined) ? src[k] : (has_(k) ? get_(k) : undefined);
+
+  const kindIn = val('kind');
+  const kind = kindIn === undefined ? show.scope_kind
+    : (kindIn === null || kindIn === '' ? null : oneOf(String(kindIn), SCOPE_KINDS, null));
+  if (kindIn !== undefined && kindIn !== null && kindIn !== '' && !kind) {
+    throw badRequest(`scope kind must be one of: ${SCOPE_KINDS.join(', ')}`);
+  }
+  const numField = (k, cur, isInt) => {
+    const v = val(k);
+    if (v === undefined) return cur;
+    if (v === null || v === '') return null;
+    const n2 = isInt ? intOrNull(v) : num(v, null);
+    if (n2 == null || n2 < 0) throw badRequest(`scope ${k} must be a non-negative number`);
+    return n2;
+  };
+  const textField = (k, cur) => {
+    const v = val(k);
+    if (v === undefined) return cur;
+    const t = String(v == null ? '' : v).trim().slice(0, 60);
+    return t || null;
+  };
+
+  const next = {
+    scope_kind: kind,
+    scope_linear_feet: numField('linear_feet', show.scope_linear_feet, false),
+    scope_cabinet_count: numField('cabinet_count', show.scope_cabinet_count, true),
+    scope_cabinet_type: textField('cabinet_type', show.scope_cabinet_type),
+    scope_pitch: textField('pitch', show.scope_pitch),
+    scope_print_pieces: numField('print_pieces', show.scope_print_pieces, true),
+    scope_print_sqft: numField('print_sqft', show.scope_print_sqft, false),
+    scope_source: oneOf(String(val('source') || show.scope_source || 'manual'),
+                        ['manual', 'spec'], 'manual')
+  };
+  const r = await c.query(
+    `UPDATE shows SET scope_kind=$2, scope_linear_feet=$3, scope_cabinet_count=$4,
+       scope_cabinet_type=$5, scope_pitch=$6, scope_print_pieces=$7, scope_print_sqft=$8,
+       scope_source=$9, scope_verified_at=NOW(), scope_verified_by=$10, updated_at=NOW()
+     WHERE id=$1 RETURNING *`,
+    [show.id, next.scope_kind, next.scope_linear_feet, next.scope_cabinet_count,
+     next.scope_cabinet_type, next.scope_pitch, next.scope_print_pieces, next.scope_print_sqft,
+     next.scope_source, String(actor || '').replace(/^agent:/, '')]);
+  return r.rows[0];
+}
+
+// GET the scope + whatever the bound spec has to say about it.
+router.get('/shows/:id/scope', asyncH(async (req, res) => {
+  const show = await loadShow(idParam(req));
+  if (!show) throw notFound('Show not found');
+  const { boundSpecDocs } = require('./files');
+  const { docs } = await boundSpecDocs(show.id);
+  const derived = scopeFromDocs(docs);
+  const scope = scopeOf(show);
+  res.json({
+    show_id: show.id,
+    scope,
+    scope_line: scopeLine(show),
+    source: show.scope_source || 'manual',
+    verified_at: show.scope_verified_at, verified_by: show.scope_verified_by,
+    spec: derived,
+    // D7's rule, reused: a difference between the sold scope and the bound
+    // spec is a QUESTION for a human, never an error and never a silent
+    // overwrite. Same shape as the chain checker's findings.
+    questions: scopeQuestions(scope, derived)
+  });
+}));
+
+// pm+ (and only on a folder they may edit) — the scope line is a commercial
+// statement, not a field note.
+router.put('/shows/:id/scope', requireRole('pm'), asyncH(async (req, res) => {
+  const show = await loadShow(idParam(req));
+  if (!show) throw notFound('Show not found');
+  const project = await loadProject(show.project_id);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to edit this show');
+  const b = req.body || {};
+
+  const row = await withTx(async (c) => {
+    const updated = await applyScope(c, show, b, req.actor);
+    await logActivity(c, {
+      projectId: show.project_id, showId: show.id, actor: req.actor, action: 'scope.set',
+      detail: scopeLine(updated) || 'scope cleared', accent: true });
+    await notifyTargets(c, { body: b, anchorType: 'show', anchorId: show.id,
+      projectId: show.project_id, showId: show.id, actor: req.actor,
+      summary: `set the scope to ${scopeLine(updated) || '—'} —`, link: '/#show/' + show.id });
+    return updated;
+  });
+  const { boundSpecDocs } = require('./files');
+  const { docs } = await boundSpecDocs(show.id);
+  const derived = scopeFromDocs(docs);
+  res.json({ ...(await hydrateShow(row, pool)), spec: derived,
+             questions: scopeQuestions(scopeOf(row), derived) });
+}));
+
+// Auto-fill from the bound spec. Explicitly a SEPARATE act from GET — a spec
+// bind never silently rewrites a number a human typed; somebody asks for it.
+router.post('/shows/:id/scope/from-spec', requireRole('pm'), asyncH(async (req, res) => {
+  const show = await loadShow(idParam(req));
+  if (!show) throw notFound('Show not found');
+  const project = await loadProject(show.project_id);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to edit this show');
+  const { boundSpecDocs } = require('./files');
+  const { docs } = await boundSpecDocs(show.id);
+  const derived = scopeFromDocs(docs);
+  if (!derived.available) {
+    throw conflict('No bound spec on this show can answer for the scope yet — ' +
+      'bind a .e360, .nsf or .pcfg first, or enter the numbers by hand.');
+  }
+  const row = await withTx(async (c) => {
+    const patch = { source: 'spec' };
+    if (derived.cabinet_count != null) patch.cabinet_count = derived.cabinet_count;
+    if (derived.cabinet_type) patch.cabinet_type = derived.cabinet_type;
+    // A show with no scope kind yet takes the one its spec implies.
+    if (!show.scope_kind) patch.kind = (project && project.type === 'print') ? 'print' : 'led';
+    const updated = await applyScope(c, show, { scope: patch }, req.actor);
+    await logActivity(c, {
+      projectId: show.project_id, showId: show.id, actor: req.actor, action: 'scope.from_spec',
+      detail: `${scopeLine(updated)} · ${derived.count_source}` +
+              (derived.stack_aware ? ' (stack-aware)' : ''), accent: true });
+    return updated;
+  });
+  res.json({ ...(await hydrateShow(row, pool)), spec: derived,
+             questions: scopeQuestions(scopeOf(row), derived) });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// F5. CONFIRM — the explicit act that records the client committed
+// ════════════════════════════════════════════════════════════════════════════
+// Tom: "Confirm = explicit action, admin/PM only, means the client committed
+// (signed/PO'd) — datestamped + logged."
+//
+// It is a BUTTON, never a side effect of editing the stage dropdown: the stage
+// string can be typed by anyone who may edit the show, and "the client signed"
+// is a different claim with a different gate (lifecycle.canConfirm).
+router.post('/shows/:id/confirm', asyncH(async (req, res) => {
+  const show = await loadShow(idParam(req));
+  if (!show) throw notFound('Show not found');
+  const project = await loadProject(show.project_id);
+  if (!lifecycle.canConfirm(req.session, show, project)) {
+    throw forbidden('confirming a show requires manager, admin — or the pm who owns it');
+  }
+  if (show.confirmed_at) {
+    throw conflict(`This show was already confirmed by ${show.confirmed_by || 'someone'}`,
+      { confirmedAt: show.confirmed_at, confirmedBy: show.confirmed_by });
+  }
+  const b = req.body || {};
+
+  const out = await withTx(async (c) => {
+    // The stage advances to 'confirmed' unless it is already further along —
+    // confirming a show that is mid-delivery records the fact without dragging
+    // the pipeline backwards.
+    const nextStage = lifecycle.stageAtLeast(show.stage, 'confirmed') ? show.stage : 'confirmed';
+    const r = await c.query(
+      `UPDATE shows SET confirmed_at=NOW(), confirmed_by=$2, stage=$3, updated_at=NOW()
+       WHERE id=$1 RETURNING *`, [show.id, req.session.username, nextStage]);
+
+    // The temp-job prompt. Confirming is the moment the deal is real, which is
+    // exactly when Candice can cut the QuickBooks number (POLISH_LIST #5). We
+    // do NOT mint one here — accounting owns that number — we surface it.
+    const job = show.default_job_id ? await loadJob(show.default_job_id, c) : null;
+    const tempJob = job && job.qb_number_status === 'temp' ? job : null;
+
+    await logActivity(c, {
+      projectId: show.project_id, showId: show.id, jobId: job ? job.id : null,
+      actor: req.actor, action: 'show.confirm',
+      detail: `client committed — confirmed by ${req.session.username}` +
+              (tempJob ? ` · job still on ${tempJob.qb_job_number}` : ''),
+      accent: true });
+    await notifyTargets(c, { body: b, anchorType: 'show', anchorId: show.id,
+      projectId: show.project_id, showId: show.id, actor: req.actor,
+      summary: `confirmed ${show.name || show.venue || 'the show'} — the client committed —`,
+      link: '/#show/' + show.id });
+    return { row: r.rows[0], tempJob };
+  });
+
+  const rec = await hydrateShow(out.row, pool, { withSteps: true });
+  res.json({
+    ok: true,
+    show: rec,
+    // What the UI turns into the "enter the real QB number" prompt.
+    qb_prompt: out.tempJob ? {
+      job_id: out.tempJob.id,
+      qb_job_number: out.tempJob.qb_job_number,
+      message: `This job is still on the placeholder ${out.tempJob.qb_job_number}. ` +
+               'Now that the client has committed, Candice can cut the real QuickBooks number.'
+    } : null,
+    scheduler_unlocked: true
+  });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// F2. STRUCK — "the show is over; everyone on the crew owes a report"
+// ════════════════════════════════════════════════════════════════════════════
+// The hand-operated twin of the sweep's date trigger. Both call
+// reports.ensureTechReports(), so a pm who strikes early and a strike date that
+// simply passes produce identical rows.
+router.post('/shows/:id/struck', requireRole('pm'), asyncH(async (req, res) => {
+  const show = await loadShow(idParam(req));
+  if (!show) throw notFound('Show not found');
+  const project = await loadProject(show.project_id);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to modify this show');
+
+  const out = await withTx(async (c) => {
+    if (!show.struck_at) {
+      await c.query('UPDATE shows SET struck_at=NOW(), struck_by=$2, updated_at=NOW() WHERE id=$1',
+        [show.id, req.session.username]);
+    }
+    const created = await reports.ensureTechReports(c, show, { actor: req.actor });
+    const renagged = await reports.nagOwed(c, show, { actor: req.actor });
+    await logActivity(c, { projectId: show.project_id, showId: show.id, actor: req.actor,
+      action: 'show.struck',
+      detail: `struck · ${created.length} report${created.length === 1 ? '' : 's'} now owed`,
+      accent: true });
+    const summary = await reports.owedSummary(show.id, c);
+    return { created: created.length, renagged, summary };
+  });
+  const fresh = await loadShow(show.id);
+  res.json({ ok: true, show: await hydrateShow(fresh, pool), ...out });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// F6. CLOSEOUT + ARCHIVING
+// ════════════════════════════════════════════════════════════════════════════
+// The machine-checked closeout: recap sent · every tech report filed · no open
+// finance exception on this show. Reading it also SYNCS the marker, so the
+// number a person sees and the 60-day clock can never disagree.
+router.get('/shows/:id/closeout', asyncH(async (req, res) => {
+  const show = await loadShow(idParam(req));
+  if (!show) throw notFound('Show not found');
+  const st = await withTx(async (c) => lifecycle.syncCloseout(c, show.id, { actor: req.actor }));
+  res.json(st);
+}));
+
+router.post('/shows/:id/archive', asyncH(async (req, res) => {
+  const show = await loadShow(idParam(req));
+  if (!show) throw notFound('Show not found');
+  if (!lifecycle.canArchive(req.session)) {
+    throw forbidden('archiving is an admin act — ask Tom, Tony or Jim');
+  }
+  const out = await withTx(async (c) => lifecycle.archiveShow(c, show, { actor: req.actor }));
+  const fresh = await loadShow(show.id);
+  res.json({ ok: true, already: out.already, show: await hydrateShow(fresh, pool) });
+}));
+
+router.post('/shows/:id/unarchive', asyncH(async (req, res) => {
+  const show = await loadShow(idParam(req));
+  if (!show) throw notFound('Show not found');
+  if (!lifecycle.canArchive(req.session)) {
+    throw forbidden('unarchiving is an admin act — ask Tom, Tony or Jim');
+  }
+  const out = await withTx(async (c) => lifecycle.unarchiveShow(c, show, { actor: req.actor }));
+  const fresh = await loadShow(show.id);
+  res.json({ ok: true, already: out.already, show: await hydrateShow(fresh, pool) });
+}));
+
+router.post('/projects/:id/archive', asyncH(async (req, res) => {
+  const p = await loadProject(idParam(req));
+  if (!p) throw notFound('Project not found');
+  if (!lifecycle.canArchive(req.session)) {
+    throw forbidden('archiving is an admin act — ask Tom, Tony or Jim');
+  }
+  await withTx(async (c) => {
+    const shows = await c.query('SELECT * FROM shows WHERE project_id=$1', [p.id]);
+    for (const s of shows.rows) await lifecycle.archiveShow(c, s, { actor: req.actor });
+    // An EMPTY folder has no shows to carry it, so archive it directly.
+    await c.query(
+      `UPDATE projects SET archived_at=NOW(), archived_by=$2, updated_at=NOW()
+       WHERE id=$1 AND archived_at IS NULL`, [p.id, req.actor]);
+    await logActivity(c, { projectId: p.id, actor: req.actor, action: 'project.archive',
+      detail: 'archived by hand', accent: true });
+  });
+  res.json(await hydrateProject(await loadProject(p.id), pool, { session: req.session }));
+}));
+
+router.post('/projects/:id/unarchive', asyncH(async (req, res) => {
+  const p = await loadProject(idParam(req));
+  if (!p) throw notFound('Project not found');
+  if (!lifecycle.canArchive(req.session)) {
+    throw forbidden('unarchiving is an admin act — ask Tom, Tony or Jim');
+  }
+  await withTx(async (c) => {
+    await c.query(
+      'UPDATE projects SET archived_at=NULL, archived_by=NULL, updated_at=NOW() WHERE id=$1', [p.id]);
+    const shows = await c.query('SELECT * FROM shows WHERE project_id=$1 AND archived_at IS NOT NULL',
+      [p.id]);
+    for (const s of shows.rows) await lifecycle.unarchiveShow(c, s, { actor: req.actor });
+    await logActivity(c, { projectId: p.id, actor: req.actor, action: 'project.unarchive',
+      detail: 'back in the working set', accent: true });
+  });
+  res.json(await hydrateProject(await loadProject(p.id), pool, { session: req.session }));
+}));
+
+// The stage vocabulary itself, so the UI never hardcodes it (the same argument
+// GET /event-types makes for lanes).
+router.get('/stages', asyncH(async (req, res) => {
+  res.json({
+    lifecycle: LIFECYCLE_STAGES,
+    all: STAGES,
+    labels: LIFECYCLE_STAGES.concat(STAGES.filter((s) => LIFECYCLE_STAGES.indexOf(s) < 0))
+      .reduce((a, s) => { a[s] = stageLabel(s); return a; }, {}),
+    // the legacy → lifecycle display map, published rather than duplicated
+    alias: STAGES.filter((s) => LIFECYCLE_STAGES.indexOf(s) < 0)
+      .reduce((a, s) => { a[s] = canonicalStage(s); return a; }, {}),
+    archive_after_days: lifecycle.ARCHIVE_AFTER_DAYS
+  });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
 // STEPS
 // ════════════════════════════════════════════════════════════════════════════
 // C. A step's lane must be one of the lanes ITS project type declares. That is
@@ -403,10 +880,13 @@ router.get('/my-steps', asyncH(async (req, res) => {
     if (roleRank(req.session.role) < 3) throw forbidden("Only manager+ may read another person's tasks");
     who = asked;
   }
+  // F6. An archived show is out of the working set, so its open steps stop
+  // nagging. A project-level step (show_id NULL) is unaffected by the LEFT JOIN.
   const r = await pool.query(
     `SELECT s.*, sh.name AS show_name, sh.venue AS show_venue, sh.project_id AS show_project_id
      FROM steps s LEFT JOIN shows sh ON sh.id = s.show_id
      WHERE LOWER(s.owner)=LOWER($1) AND s.status NOT IN ('done','na')
+       AND sh.archived_at IS NULL
      ORDER BY s.due_date ASC NULLS LAST, s.id ASC`, [who]);
   res.json(r.rows.map((row) => ({
     ...dbToStep(row),
@@ -499,10 +979,30 @@ router.put('/steps/:id/assign', requireRole('pm'), asyncH(async (req, res) => {
     // an unknown token is worth flagging rather than silently storing.
     if (unknown.length) throw badRequest(`Unknown user '${owner}'`);
   }
-  const r = await pool.query('UPDATE steps SET owner=$1, updated_at=NOW() WHERE id=$2 RETURNING *',
-    [owner, cur.id]);
-  await logActivity(pool, { projectId: project ? project.id : null, showId: cur.show_id,
-    actor: req.actor, action: 'step.assign', detail: `${cur.title} → ${owner || '(unassigned)'}` });
+  const r = await withTx(async (c) => {
+    const upd = await c.query('UPDATE steps SET owner=$1, updated_at=NOW() WHERE id=$2 RETURNING *',
+      [owner, cur.id]);
+    await logActivity(c, { projectId: project ? project.id : null, showId: cur.show_id,
+      actor: req.actor, action: 'step.assign', detail: `${cur.title} → ${owner || '(unassigned)'}` });
+    // F3. Being given work is the archetypal REAL delivery, and Tom's default
+    // for it is immediate. The bell already carries it (the assignee sees it in
+    // My Tasks); this is the second channel. Unassigning notifies nobody —
+    // there is no one to tell.
+    if (owner) {
+      const show = cur.show_id ? await loadShow(cur.show_id, c) : null;
+      const where = show ? (show.name || show.venue || ('show ' + show.id))
+        : (project ? project.name : 'Showrunner');
+      await notify.enqueue(c, {
+        username: owner, kind: 'assignment', actor: req.actor,
+        subject: `Assigned to you — ${cur.title}`,
+        body: `${req.actor} assigned you “${cur.title}” on ${where}` +
+              (cur.due_date ? `, due ${cur.due_date}.` : '.'),
+        projectId: project ? project.id : null, showId: cur.show_id || null,
+        link: cur.show_id ? '/#show/' + cur.show_id : ''
+      });
+    }
+    return upd;
+  });
   res.json(dbToStep(r.rows[0]));
 }));
 
@@ -770,6 +1270,32 @@ router.post('/shows/:id/push-to-scheduler', requireRole('pm'), asyncH(async (req
       },
       payloads
     });
+  }
+
+  // ── F5. THE CONFIRM GATE — on the LIVE path only ─────────────────────────
+  // Tom: "Confirming is the natural trigger moment for … scheduler-push
+  // unlock." Publishing crew and travel to the staffing app commits real
+  // people's calendars, so it waits for the client to have committed too.
+  //
+  // It sits HERE and not above the dry run on purpose. A dry run sends nothing;
+  // its entire job is to tell you what is wrong before you commit, and refusing
+  // to run the diagnostic that would have explained the refusal is the classic
+  // way to make a gate feel like a bug. The dry run therefore REPORTS
+  // "not confirmed" among its problems (lib/scheduler validateForPush) and
+  // reports ready:false; the live push is the one that says no.
+  //
+  // Additive-safe by construction: isConfirmed() answers YES for an explicit
+  // confirm datestamp OR for any stage at or past 'confirmed' on the lifecycle,
+  // which covers every legacy 'planning' / 'ready' / 'scheduled' / 'closed' row
+  // already in the database. Only a genuinely pre-commitment show ('lead' /
+  // 'quoted') is refused, and the refusal says exactly what to do about it.
+  if (!isConfirmed(show)) {
+    throw conflict(
+      'This show is not confirmed yet, so it cannot be pushed to the scheduler. ' +
+      'Confirm it first — that records who committed and when, and it is the moment ' +
+      'to swap a TEMP job number for the real QuickBooks one.',
+      { stage: show.stage, stageCanonical: canonicalStage(show.stage),
+        confirmEndpoint: `POST /api/shows/${show.id}/confirm` });
   }
 
   // ── LIVE ──────────────────────────────────────────────────────────────────

@@ -3,3 +3,4 @@ node_modules/
 dist/
 .storage/
 *.log
+RAILWAY_ENV.txt

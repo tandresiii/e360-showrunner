@@ -7,7 +7,35 @@
 /* ============================================================================
    MY TASKS — everything assigned to CURRENT_USER, across every show
    ========================================================================== */
-function viewMyTasks(mine) {
+/* F2 — the show reports THIS person still owes, rendered above the task table.
+   TEAM_FEEDBACK: "nags in My Tasks + bell until submitted". It sits at the top
+   because it is the one thing here that is REQUIRED rather than assigned, and
+   because a nag buried under twenty steps is not a nag. */
+function myReportsBlock(owed) {
+  if (!owed || !owed.length) return '';
+  var rows = owed.map(function (r) {
+    var s = r.show || SHOWS_BY_ID[r.show_id];
+    var late = r.due_date && r.due_date < TODAY_ISO;
+    var age = r.due_date ? dayAge(r.due_date) : null;
+    return '<div class="next-item" ' + act('openReport', r.show_id) + ' style="cursor:pointer">' +
+      '<div class="txt">Show report — ' + esc(s ? showLabel(s) : 'show ' + r.show_id) +
+      '<span>' + esc(r.role_on_site || 'crew') +
+      (r.due_date ? ' · due ' + esc(fmtDate(r.due_date)) +
+        (late && age ? ' · ' + age + 'd late' : '') : '') +
+      (r.nag_count ? ' · asked ' + r.nag_count + '×' : '') + '</span></div>' +
+      '<span class="pill ' + (late ? 'crit' : 'warn') + '"><span class="dot"></span>' +
+      (late ? 'Overdue' : 'Required') + '</span>' +
+      '<button class="btn sm primary" ' + act('openReport', r.show_id) + '>' + icon('pencil') + 'Write it</button>' +
+      '</div>';
+  }).join('');
+  return '<div class="panel report-nag"><h3>' + inlineIcon('alert') + ' Show reports you owe · ' +
+    owed.length + '</h3><div class="next-list">' + rows + '</div>' +
+    '<div class="perm-note">' + inlineIcon('lock') + ' Required after every show you crew. Write it in ' +
+    'the app or attach the document you already have — it lands in the event folder’s files. Nobody ' +
+    'signs it off; filing it is what clears it.</div></div>';
+}
+
+function viewMyTasks(mine, owedReports) {
   var dueSoon = mine.filter(function (m) { var d = daysUntil(m.step.due_date); return d != null && d <= 10; }).length;
   var over = mine.filter(function (m) { return isOverdue(m.step); }).length;
   var laneOf = function (m) { return LANES[m.step.lane] || { label: m.step.lane }; };
@@ -22,12 +50,14 @@ function viewMyTasks(mine) {
       '<td class="mono" style="color:' + (isOverdue(m.step) ? 'var(--crit)' : 'var(--text-2)') + '">' + esc(fmtDate(m.step.due_date)) + '</td></tr>';
   }).join('') || '<tr><td colspan="5"><div class="empty">Nothing open assigned to you.</div></td></tr>';
 
-  return '<div class="page-h"><div><h1>My Tasks</h1><div class="sub">Everything assigned to you, across every show and every lane set.</div></div></div>' +
+  var owed = owedReports || reportsOwedBy(ME);
+  return '<div class="page-h"><div><h1>My Tasks</h1><div class="sub">Everything assigned to you, across every show and every lane set — plus anything you owe after a show.</div></div></div>' +
     '<div class="stats" style="grid-template-columns:repeat(4,1fr)">' +
     '<div class="stat accent"><div class="rail-c" style="background:var(--accent)"></div><div class="k">Assigned to me</div><div class="v">' + mine.length + '</div></div>' +
     '<div class="stat"><div class="rail-c" style="background:var(--warn)"></div><div class="k">Due within 10d</div><div class="v" style="color:var(--warn)">' + dueSoon + '</div></div>' +
     '<div class="stat"><div class="rail-c" style="background:var(--crit)"></div><div class="k">Overdue</div><div class="v" style="color:var(--crit)">' + over + '</div></div>' +
-    '<div class="stat"><div class="rail-c" style="background:var(--go)"></div><div class="k">Discipline</div><div class="v" style="font-size:20px;padding-top:6px">' + typeTag(CURRENT_USER.discipline) + '</div></div></div>' +
+    '<div class="stat"><div class="rail-c" style="background:' + (owed.length ? 'var(--crit)' : 'var(--go)') + '"></div><div class="k">Show reports owed</div><div class="v" style="color:' + (owed.length ? 'var(--crit)' : 'var(--go)') + '">' + owed.length + '</div></div></div>' +
+    myReportsBlock(owed) +
     '<div class="card"><div class="card-h"><h3>Open tasks — ' + esc(CURRENT_USER.name) + '</h3></div><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Task</th><th>Show</th><th>Lane</th><th>Status</th><th>Due</th></tr></thead><tbody>' + list + '</tbody></table></div></div>';
 }
 
@@ -299,8 +329,112 @@ function viewSettings(ctx) {
         '<div class="set-row"><span class="k">Purchasing view</span><span class="v"><button class="btn sm ghost" ' + act('goPurchasing') + '>' + icon('cart') + 'Open Purchasing</button></span></div>' +
         '<div class="perm-note" style="margin-top:10px">' + inlineIcon('lock') + ' Over $5,000, approval sits with the admins — <b>Tom, Tony, Jim</b> — plus <b>Candice</b> via her finance capability. Tom’s confirmed rule.</div>';
     })()) +
+    /* ══ F3 · NOTIFICATIONS — the user's own card ═══════════════════════════
+       Tony's rule made a setting. The BELL is not on this card and never will
+       be: the actor already chose to notify you, and you always see it in the
+       app. What is adjustable is the SECOND channel — whether that same event
+       also reaches your inbox, and how fast. */
+    card('bell', 'Notifications', (function () {
+      var prefs = ctx.notifyPrefs || notifyPrefsFor(ME);
+      var mail = ctx.mail || { driver: MAIL_DRIVER, configured: MAIL_CONFIGURED,
+                               queued: notifyQueuedCount(ME) };
+      var kinds = ['assignment', 'mention', 'notify', 'report_nag'];
+      var rows2 = kinds.map(function (k) {
+        var cur = prefs[k] || NOTIFY_DEFAULT_MODE[k];
+        var seg = NOTIFY_MODES.map(function (m) {
+          return '<button class="' + (cur === m ? 'on' : '') + '" ' + act('notifPref', null, k + ':' + m) +
+            ' title="' + esc(m === 'off'
+              ? 'Bell only — it still reaches you in the app, it just does not leave the building.'
+              : m === 'immediate' ? 'As it happens.' : 'Batched into a digest.') + '">' +
+            esc(NOTIFY_MODE_LABEL[m]) + '</button>';
+        }).join('');
+        return '<div class="set-row notif-row"><span class="k">' + esc(NOTIFY_KIND_LABEL[k]) + '</span>' +
+          '<span class="v"><span class="seg sm">' + seg + '</span></span></div>';
+      }).join('');
+      var q = mail.queued || 0;
+      return '<p>Every notification reaches you in the <b>bell</b> — that never changes and cannot be ' +
+        'switched off here. These control the <b>second channel</b>: whether the same event also lands ' +
+        'in your inbox, and how quickly.</p>' + rows2 +
+        row('Delivery', mail.configured
+          ? '<span style="color:var(--go)">' + esc(mail.driver) + '</span>' +
+            (mail.driver === 'log' ? ' <small style="color:var(--muted)">recorded, not mailed</small>' : '')
+          : '<span style="color:var(--warn)">not configured — items stay queued</span>') +
+        row('Waiting for you', q ? '<span style="color:var(--warn)">' + q + ' queued</span>'
+                                 : '<span style="color:var(--go)">nothing queued</span>') +
+        '<div class="set-row"><span class="k">Your queue</span><span class="v">' +
+        '<button class="btn sm ghost" ' + act('openOutbox') + '>' + icon('mail') + 'See what was sent</button>' +
+        '</span></div>' +
+        '<div class="perm-note" style="margin-top:10px">' + inlineIcon('bolt') +
+        ' Defaults are assignments and @mentions right away, everything else digested. ' +
+        '<b>Bell only</b> silences the email, never the app. A message you already read in-app is ' +
+        'skipped rather than mailed. There is no scheduler here yet, so digests flush when someone ' +
+        'asks — an honest gap, not a hidden cron.</div>';
+    })()) +
+    /* ══ F6 · the operator's card — the sweep and the archive ══════════════ */
+    (CURRENT_USER.role === 'admin' ? card('box', 'Archive &amp; the sweep', (function () {
+      /* the counts come from the caller when there is a server to ask (the
+         route hands them in); the local computation is the demo's own answer */
+      var arch = ctx.archivedCount != null ? ctx.archivedCount : archivedProjects().length;
+      var owed = ctx.owedReports != null ? ctx.owedReports
+        : TECH_REPORTS.filter(function (r) { return r.status === 'owed'; }).length;
+      return '<p>Closeout is machine-checked: <b>recap sent</b> + <b>every show report filed</b> + ' +
+        '<b>no money waiting on paperwork</b>. ' + ARCHIVE_AFTER_DAYS + ' days after all three hold, ' +
+        'the folder leaves the working set.</p>' +
+        row('Archived folders', String(arch)) +
+        row('Show reports outstanding', owed
+          ? '<span style="color:var(--warn)">' + owed + '</span>' : '<span style="color:var(--go)">none</span>') +
+        row('Auto-archive after', ARCHIVE_AFTER_DAYS + ' days') +
+        '<div class="set-row"><span class="k">Run it now</span><span class="v">' +
+        '<button class="btn sm ghost" ' + act('runSweep') + '>' + icon('refresh') + 'Sweep</button>' +
+        '</span></div>' +
+        '<div class="perm-note" style="margin-top:10px">' + inlineIcon('alert') +
+        ' <b>There is no scheduler.</b> The sweep runs once on boot and whenever an admin asks — it ' +
+        'strikes overdue shows, creates and re-sends the reports their crews owe, re-checks every ' +
+        'closeout, archives what is ripe and flushes the queue. It is idempotent, so running it twice ' +
+        'costs nothing. A real daily job needs Railway cron or the per-user agents.</div>';
+    })()) : '') +
     card('users', 'Roles &amp; access', '<p>Five canonical roles gate edit + assignment rights across the workspace.</p>' + row('Roles', 'admin · manager · pm · tech · viewer') + row('Default', 'viewer')) +
     '</div>';
+}
+
+/* ============================================================================
+   F3 · THE OUTBOX — "what was actually sent, and what wasn't"
+   ----------------------------------------------------------------------------
+   A notification you cannot audit is a notification you cannot trust. Every row
+   says which channel, which preference applied, and — when it did NOT go out —
+   why: read in-app first, preference off, no address, or still queued because
+   the mail layer is not configured yet. That last one is the honest one: the
+   item is not lost, it is waiting.
+   ========================================================================== */
+function viewOutbox(rows) {
+  var list = (rows || []).map(function (n) {
+    var m = NOTIFY_STATUS_META[n.status] || NOTIFY_STATUS_META.queued;
+    var why = n.status === 'skipped' ? n.skipped_reason
+      : n.status === 'failed' ? n.last_error
+      : n.status === 'queued' ? (n.mode === 'digest' ? 'in your digest — flushes when a scheduler exists'
+                                                      : 'waiting for the next flush')
+      : (n.driver === 'log' ? 'recorded in the activity trail' : 'delivered by ' + (n.driver || 'mail'));
+    return '<tr' + (n.show_id ? ' class="rowlink" ' + act('openShow', n.show_id) : '') + '>' +
+      '<td><b style="font-weight:600">' + esc(n.subject) + '</b>' +
+      '<div class="mini" style="margin-top:2px">' + esc(String(n.body || '').slice(0, 110)) + '</div></td>' +
+      '<td><span class="tag">' + esc(NOTIFY_KIND_LABEL[n.kind] || n.kind) + '</span></td>' +
+      '<td><span class="mini">' + esc(NOTIFY_MODE_LABEL[n.mode] || n.mode) + '</span></td>' +
+      '<td><span class="pill ' + esc(m.pill) + '"><span class="dot"></span>' + esc(m.label) + '</span>' +
+      '<div class="mini" style="margin-top:3px">' + esc(why || '') + '</div></td>' +
+      '<td class="mono" style="font-size:12px">' + esc(fmtDate(String(n.queued_at || '').slice(0, 10))) + '</td>' +
+      '</tr>';
+  }).join('') || '<tr><td colspan="5"><div class="empty">Nothing has been queued for you.</div></td></tr>';
+
+  return '<div class="page-h"><div><h1>My notifications</h1><div class="sub">The second channel, audited. ' +
+    'Everything here also reached you in the bell — this is the record of what left the building, what ' +
+    'was deliberately skipped, and what is still waiting.</div></div>' +
+    '<button class="btn ghost" ' + act('gotoTab', null, 'settings') + '>' + icon('gear') + 'Notification settings</button></div>' +
+    '<div class="card"><div class="card-h"><h3>Outbox</h3><span class="pill idle">newest first</span></div>' +
+    '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Message</th><th>Kind</th><th>Preference</th>' +
+    '<th>Outcome</th><th>Queued</th></tr></thead><tbody>' + list + '</tbody></table></div></div>' +
+    '<div class="hint">' + icon('lock') + '<span>Yours alone — nobody else can read your queue. ' +
+    '<b>Skipped</b> is a deliberate outcome, not a failure: a message you had already read in the app ' +
+    'is not mailed to you afterwards.</span></div>';
 }
 
 /* ============================================================================

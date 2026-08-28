@@ -731,3 +731,7 @@ router.delete('/proofs/:id', requireRole('pm'), asyncH(async (req, res) => {
 module.exports = router;
 module.exports.insertExpense = insertExpense;
 module.exports.chainFor = chainFor;
+// F4. The scope endpoints in routes/core.js auto-fill and verify against the
+// bound spec, and this is the one reader of the render bundles.
+module.exports.boundSpecDocs = boundSpecDocs;
+module.exports.buildNasPath = buildNasPath;

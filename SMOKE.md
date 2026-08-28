@@ -2,7 +2,7 @@
 
 `scripts/smoke.js` boots the real server in-process on an ephemeral port and
 drives it over HTTP, exactly as a browser or an agent would. It is the wiring
-pass's proof of work: **322 assertions**, covering initDB idempotency, the
+pass's proof of work: **465 assertions**, covering initDB idempotency, the
 templates.json seed loader, auth, one representative call per route family, the
 whole agent-API happy path, the confidence bands, idempotent replay, the §9
 guardrails, the recap content firewall, cascade integrity, and — since
@@ -62,7 +62,37 @@ for non-loopback hosts.
 | 8 | idempotency | identical replay returns the **original** body with `x-idempotent-replay: true` and creates no duplicate; a different body on the same key → **409** |
 | 9 | §9 guardrails | no `DELETE` under `/api/agent/*`; scheduler push, user admin and key management all **403** with an agent key; deliverables absent; an unknown agent path 404s **there**, never falling through; scope and revocation enforced |
 | 10 | content firewall | a dollar figure and internal accounting language are **refused with the reason**; client-safe prose is accepted |
-| 11 | cascade integrity | a folder carrying a child of **every** wired table is deleted; **zero orphans** across all 23 child tables |
+| 11 | cascade integrity | a folder carrying a child of **every** wired table is deleted; **zero orphans** across all 25 child tables |
+| 15 | **F1 · real event creation** | one `POST /api/events` creates the folder, its show and a TEMP-numbered job **in one transaction** — exactly one of each; the type's template seeds its lanes with back-scheduled due dates; a scope entered at creation lands; the notify picker produces **one** ping, **one** anchored note and **one** activity line for the whole act; with no selection **nobody** is notified; a tech is refused; a nameless or badly-dated event is a 400 |
+| 15 | **F2 · tech show reports** | striking a show creates one report per **logged-in** crew member and none for the local hire; striking twice creates nothing; the nag is an anchored note **plus** an outbox row of kind `report_nag`. **Gate, mutation-tested:** a tech sees only his own row and gets the headcount **without** the names, is 403 on a colleague's report, and cannot mark anything reviewed — *"techs file their own reports but never sign one off"*; a pm sees every row and the waiting-on list, and a pm **cannot write** somebody else's report at all. Filing lands a `report` file in the folder; revising does not create a second one; a reviewed report is locked until a pm reopens it, and reopening returns it to **filed**, not to owed |
+| 15 | **F2 · THE FIREWALL** | a report body carrying a canary reaches **neither** `recapFacts` nor a real regenerate nor the client sheet — and the body is still sitting in the table, simply unread. The enforcement, not the observation: `guardRecapQuery()` **throws** if the generator ever reads `tech_reports` (or `expenses`/`jobs`/`notes`/`deliverables`/…), while the reads it is allowed pass straight through |
+| 15 | **F3 · the outbox** | defaults are Tom's rule and are stored **nowhere** — the prefs table holds deviations only, and writing the house default removes the row; an assignment and an @mention each queue an immediate row, and the mention carries its **note id**. **Skip-if-read-in-app:** a note read in the app first is `skipped`, an unread one is `sent` and the `log` driver records where it went. `off` still reaches the **bell** and records the silence as `skipped: preference off`. A plain flush leaves **digest** rows alone (there is no scheduler); `{digest:true}` flushes them. With `MAIL_DRIVER=graph` unconfigured, `send()` is a 501 naming the four missing vars and **the item stays queued** |
+| 15 | **F4 · the scope line** | pm+ sets it and the **server** renders the one canonical line; a tech is refused; an unknown kind and a negative count are 400s; switching an LED scope to `both` **keeps** the print numbers. Filling from a bound spec takes the **stack-aware** count and marks the source, while leaving linear feet (which no spec records) alone; a divergence is a **question**, not an error, and overwrites nothing. **Firewall:** the seven scope fields are on `RECAP_SOURCES.show` deliberately (`scope_verified_by` is **not**), every stat the generator emits has a key in `recap_stat_keys`, and a key off that list is refused by name |
+| 15 | **F5 · the confirm lifecycle** | `/api/stages` publishes the vocabulary and the legacy alias map. A `planning` row is **stored, returned and labelled** `planning`, carries `stage_canonical: confirmed` alongside, and reads as confirmed **by position with no datestamp invented**. **Gate, mutation-tested:** a tech and a pm-who-owns-nothing are refused and write nothing; the owning pm clears it, records who and when, advances the stage, logs it, and prompts for the real QuickBooks number. Confirming twice is a 409. The **live push** is a 409 pre-confirm naming the endpoint that fixes it, while the **dry run still runs** and reports the reason — and a pre-existing `planning` row is not blocked, which is the additive proof |
+| 15 | **F6 · closeout + archiving** | closeout is machine-checked on three conditions and names which one is out; late money **un-completes** it and stops the 60-day clock. **Gate, mutation-tested:** neither a pm nor a manager may archive — admin only, and both refusals write nothing. Archived is excluded from the default lists, returned by `?archived=1`, included by `?include_archived=1`, **still resolves by id**, is **still carried by its folder** (season rollups unaffected), and stops nagging in My Tasks. Archiving a folder takes its shows; unarchiving returns a show to `closed` rather than inventing a stage. The **sweep** auto-archives a show 61 days past closeout, takes its folder with it, changes nothing on a second run, and says out loud that it is not a scheduled job |
+
+## The additive-upgrade proof
+
+`scratchpad/upgrade_proof.js` (run under the same `pgharness.js`) proves the
+"strictly additive" rule against a **real pre-release database** rather than
+against a claim. It checks the PREVIOUS `lib/db.js` out of git, runs *its*
+`initDB()` — literally the schema now live on Railway — writes a folder, a job,
+a show at stage `planning`, a step and a note the old way, then runs the NEW
+`initDB()` over the same database and asserts, in **29 assertions**:
+
+* every pre-existing column on all five rows is **byte-identical**
+* the show kept its legacy stage string, rag, owner, dates and cabinet count
+* the job kept its real QuickBooks number, and `qb_number_status` defaulted to
+  `confirmed` — a number already in the table came from QuickBooks
+* no row was added or removed
+* all 17 new `shows` columns exist and **every one is NULLABLE** — no `NOT NULL`
+  on an existing table — and read `NULL` on the pre-existing row
+* the three new tables exist and are **empty**: a migration creates obligations
+  for nobody
+* the legacy row reads correctly through the new mappers — stored stage
+  returned verbatim, canonical position *alongside* it, confirmed **by position
+  with no datestamp invented**, and an empty scope line rather than a
+  fabricated one
 
 ## Reading a failure
 

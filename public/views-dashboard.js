@@ -49,10 +49,18 @@ function viewProjects(projects, exceptions) {
 
   var rows = rolls.map(function (x) {
     var p = x.p, r = x.r, d = x.next, n = p.shows.length;
+    /* F4 — a folder's scope line is its shows' scope. One show: print it. Many:
+       print the first that HAS one and say how many more are scoped, because a
+       season's true total is a sum nobody has agreed on yet. */
+    var scoped = p.shows.filter(function (s) { return hasScope(s); });
+    var scopeCell = !scoped.length ? '<span class="mini">—</span>'
+      : scopeChip(scoped[0]) + (scoped.length > 1
+        ? ' <span class="mini">+' + (scoped.length - 1) + ' more scoped</span>' : '');
     return '<tr class="rowlink" ' + act('openFolder', p.id) + '>' +
-      '<td><div class="ev-name"><div class="ic">' + icon(typeDef(p.type).icon) + '</div><div><b>' + esc(p.name) + '</b><span>' + esc(p.client) + '</span></div></div></td>' +
+      '<td><div class="ev-name"><div class="ic">' + icon(typeDef(p.type).icon) + '</div><div><b>' + esc(p.name) + '</b><span>' + esc(p.client) + '</span></div>' + archivedChip(p) + '</div></td>' +
       '<td>' + typeTag(p.type) + '</td>' +
-      '<td>' + stagePill(p.stage) + '</td>' +
+      '<td>' + scopeCell + '</td>' +
+      '<td>' + lifecycleChip(p) + '</td>' +
       '<td>' + ragPill(r.rag) + '</td>' +
       '<td><div class="mono" style="font-size:12.5px"><span style="color:var(--muted)">' + esc(d.k) + '</span> ' + esc(d.v) + '</div></td>' +
       '<td><div class="who-cell">' + av(p.owner) + '<span>' + esc(firstName(p.owner)) + '</span>' + (n > 1 ? '<span class="mini">' + n + ' shows</span>' : '') + '</div></td>' +
@@ -99,8 +107,19 @@ function viewProjects(projects, exceptions) {
       '<div style="margin-top:8px"><span class="lnk" style="cursor:pointer;color:var(--accent);font-size:12px;font-weight:600" ' + act('goFinance') + '>Open Finance →</span></div>';
   }
 
+  /* F6 — the Archive door. It only appears once something is in there, and it
+     says how many, so "where did that folder go" has an answer on screen
+     rather than in somebody's memory. */
+  var nArch = archivedProjects().length;
+  var archBtn = nArch
+    ? '<button class="btn ghost" ' + act('goArchive') + ' title="' +
+      esc('Archived folders are out of the working set — still fully searchable and browsable.') +
+      '">' + icon('box') + 'Archive <span class="sc">' + nArch + '</span></button>'
+    : '';
+
   return '<div class="page-h"><div><h1>Projects</h1><div class="sub">Every event folder, from the sales call to strike — one place. Status rolls up from every show inside the folder, whatever lane set its type uses. Segment the portfolio by division below.</div></div>' +
-    '<button class="btn primary" ' + act('openNew') + '>' + icon('plus') + 'New Event</button></div>' +
+    '<div style="display:flex;gap:9px;flex-wrap:wrap">' + archBtn +
+    '<button class="btn primary" ' + act('openNew') + '>' + icon('plus') + 'New Event</button></div></div>' +
     '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;flex-wrap:wrap"><h3 style="font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700;font-family:var(--font-body)">Division split · where are we as a company</h3>' +
     (DIV_FILTER !== 'all'
       ? '<span class="pill acc"><span class="dot"></span>Filtered to ' + esc(typeLabel(DIV_FILTER)) + ' · ' + active + ' folder' + (active === 1 ? '' : 's') + ' — <span style="cursor:pointer;text-decoration:underline" ' + act('setDiv', null, 'all') + '>clear</span></span>'
@@ -115,7 +134,7 @@ function viewProjects(projects, exceptions) {
     '</div>' +
     '<div class="ov" style="grid-template-columns:1.5fr 1fr">' +
     '<div class="card"><div class="card-h"><h3>' + (DIV_FILTER === 'all' ? 'All folders' : esc(typeLabel(DIV_FILTER)) + ' folders') + '</h3><span class="pill idle">Sorted by soonest milestone</span></div>' +
-    '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Event folder</th><th>Type</th><th>Stage</th><th>Status</th><th>Next date</th><th>Lead</th><th>Progress</th></tr></thead>' +
+    '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Event folder</th><th>Type</th><th>Scope</th><th>Stage</th><th>Status</th><th>Next date</th><th>Lead</th><th>Progress</th></tr></thead>' +
     '<tbody>' + rows + '</tbody></table></div></div>' +
     '<div class="panel"><h3>Needs attention</h3><div class="next-list">' + attn + '</div>' + finAttn +
     '<div class="perm-note">' + inlineIcon('bolt') + ' Aggregated from step status across every show and every lane — a blocked or at-risk step surfaces here no matter which lane set the event uses. Money missing its paperwork surfaces the same way.</div></div>' +
@@ -157,7 +176,7 @@ function viewSeason(project) {
   var upcoming = shows.filter(function (s) { return s.event_date >= TODAY_ISO; });
   var head = '<div class="ef-head">' +
     '<div class="ef-top"><div>' +
-    '<div class="ef-title"><h1>' + esc(project.name) + '</h1>' + typeTag(project.type) + jobsChip(project.jobs) + ragPill(r.rag) + stagePill(project.stage) + '</div>' +
+    '<div class="ef-title"><h1>' + esc(project.name) + '</h1>' + typeTag(project.type) + jobsChip(project.jobs) + ragPill(r.rag) + lifecycleChip(project) + archivedChip(project) + '</div>' +
     '<div class="ef-sub"><span>' + icon('users') + ' <b>' + esc(project.client) + '</b></span>' +
     '<span>' + icon('pin') + ' <b>Multi-city · ' + shows.length + ' shows</b></span>' +
     '<span>Lead <b>' + esc(userName(project.owner)) + '</b></span>' +
@@ -190,9 +209,12 @@ function viewSeason(project) {
     /* quiet photo count (photo pass) — the gallery is filling in */
     var phN = photoCount(s.id);
     var phChip = phN ? '<span class="ph-count" title="' + phN + ' event photo' + (phN === 1 ? '' : 's') + ' on this show">' + inlineIcon('cam') + phN + '</span>' : '';
-    return '<tr class="rowlink" ' + act('openShow', s.id) + '>' +
-      '<td><div class="ev-name"><div class="ic">' + icon(typeDef(s.type).icon) + '</div><div><b>' + esc(s.name) + '</b><span>' + esc(s.venue) + '</span></div>' + phChip + recapGlyph(s) + '</div></td>' +
+    return '<tr class="rowlink' + (s.archived_at ? ' archived' : '') + '" ' + act('openShow', s.id) + '>' +
+      '<td><div class="ev-name"><div class="ic">' + icon(typeDef(s.type).icon) + '</div><div><b>' + esc(s.name) + '</b><span>' + esc(s.venue) + '</span></div>' + phChip + recapGlyph(s) + archivedChip(s) + '</div></td>' +
       '<td class="mono" style="font-size:12.5px">' + esc(fmtDate(s.event_date)) + '</td>' +
+      /* F4 — the season row carries the scope line, so a season dashboard
+         answers "how much LED is Madison" without a drill-in. */
+      '<td>' + (hasScope(s) ? scopeChip(s) : '<span class="mini">—</span>') + '</td>' +
       '<td>' + ragPill(x.r.rag) + poSeasonFlag(s) + '</td>' +
       '<td><div class="mono" style="font-size:12.5px"><span style="color:var(--muted)">' + esc(x.next.k) + '</span> ' + esc(x.next.v) + '</div></td>' +
       '<td>' + (job ? '<span class="tag">' + esc(job.qb_job_number) + '</span>' : '') + (overrides ? ' <span class="mini dep">+' + overrides + ' split</span>' : '') + '</td>' +
@@ -202,7 +224,7 @@ function viewSeason(project) {
   }).join('');
 
   var showTable = '<div class="card"><div class="card-h"><h3>Shows in this folder</h3><span class="pill idle">' + shows.length + ' shows · sorted by date</span></div>' +
-    '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Show</th><th>Date</th><th>Health</th><th>Next milestone</th><th>Job</th><th>On-site</th><th>Progress</th></tr></thead>' +
+    '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Show</th><th>Date</th><th>Scope</th><th>Health</th><th>Next milestone</th><th>Job</th><th>On-site</th><th>Progress</th></tr></thead>' +
     '<tbody>' + rows + '</tbody></table></div></div>';
 
   /* upcoming shows list */
@@ -253,4 +275,61 @@ function viewSeason(project) {
     /* folder-level thread — season-wide notes (notes pass) */
     notesPanel('project', project.id, { title: 'Season notes', collapse: 2 }) +
     '</div></div>';
+}
+
+/* ============================================================================
+   F6 · THE ARCHIVE VIEW — "we don't want 300 in our normal area in a year"
+   ----------------------------------------------------------------------------
+   Archiving hides a folder from the WORKING SET, not from the app. Everything
+   still resolves: the rows below open the same folder view, with the same tabs,
+   the same files and the same money. Season rollups were never touched, because
+   a folder's own show list keeps every show it has ever had.
+
+   Manual unarchive is an ADMIN act (Tom's rule); everyone else can browse.
+   ========================================================================== */
+function viewArchive(projects) {
+  var rows = projects.slice().sort(function (a, b) {
+    return String(b.archived_at || '').localeCompare(String(a.archived_at || ''));
+  }).map(function (p) {
+    var shows = p.shows || [];
+    var span = shows.length
+      ? fmtDate(shows.map(function (s) { return s.event_date; }).sort()[0]) +
+        (shows.length > 1 ? ' – ' + fmtDate(shows.map(function (s) { return s.event_date; }).sort().slice(-1)[0]) : '')
+      : '—';
+    var scoped = shows.filter(function (s) { return hasScope(s); });
+    var value = (p.jobs || []).reduce(function (a, j) { return a + (j.contract_value || 0); }, 0);
+    return '<tr class="rowlink" ' + act('openFolder', p.id) + '>' +
+      '<td><div class="ev-name"><div class="ic">' + icon(typeDef(p.type).icon) + '</div>' +
+      '<div><b>' + esc(p.name) + '</b><span>' + esc(p.client) + '</span></div></div></td>' +
+      '<td>' + typeTag(p.type) + '</td>' +
+      '<td>' + (scoped.length ? scopeChip(scoped[0]) : '<span class="mini">—</span>') + '</td>' +
+      '<td class="mono" style="font-size:12.5px">' + esc(span) + '</td>' +
+      '<td class="mono" style="font-size:12.5px">' + esc(fmtDate(String(p.archived_at || '').slice(0, 10))) +
+        '<span class="mini" style="display:block">' +
+        esc(p.archived_by === 'system' ? 'automatically' : 'by ' + (userName(p.archived_by) || p.archived_by || '—')) +
+        '</span></td>' +
+      '<td class="money" style="font-size:12.5px">' + esc(canSeeFinance() ? fmtMoney(value) : '—') + '</td>' +
+      '<td>' + (canArchive()
+        ? '<button class="btn sm ghost" ' + act('unarchiveProject', p.id) + '>' + icon('refresh') + 'Restore</button>'
+        : '<span class="mini">admins restore</span>') + '</td>' +
+      '</tr>';
+  }).join('') || '<tr><td colspan="7"><div class="empty">Nothing is archived yet. A folder lands here ' +
+    ARCHIVE_AFTER_DAYS + ' days after its closeout completes — recap sent, every show report filed, ' +
+    'and no money left waiting on paperwork.</div></td></tr>';
+
+  return '<div class="page-h"><div><h1>Archive</h1><div class="sub">Folders that closed out and left the ' +
+    'working set. Nothing here is deleted: every folder still opens with all of its files, money and ' +
+    'history, and search still finds it. Auto-archive runs ' + ARCHIVE_AFTER_DAYS +
+    ' days after closeout completes.</div></div>' +
+    '<button class="btn ghost" ' + act('goProjects') + '>' + icon('grid') + 'Back to Projects</button></div>' +
+    '<div class="card"><div class="card-h"><h3>Archived folders</h3>' +
+    '<span class="pill idle">' + projects.length + ' folder' + (projects.length === 1 ? '' : 's') +
+    ' · newest first</span></div>' +
+    '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Event folder</th><th>Type</th><th>Scope</th>' +
+    '<th>Ran</th><th>Archived</th><th>Contract</th><th></th></tr></thead>' +
+    '<tbody>' + rows + '</tbody></table></div></div>' +
+    '<div class="hint">' + icon('bolt') + '<span>Closeout is machine-checked, never a box somebody ticks: ' +
+    '<b>recap sent</b> + <b>every tech show report filed</b> + <b>no money waiting on paperwork</b>. ' +
+    'The ' + ARCHIVE_AFTER_DAYS + '-day clock runs from the moment all three hold — and stops again if ' +
+    'any of them comes undone.</span></div>';
 }

@@ -27,7 +27,10 @@ demo 632 · live-push 65 · flex 67 (measured baseline before the pass: 1,240 �
    `*.log`; the key appears in **exactly one file in the whole office lab**
    (`showrunner-app/.env`) and nowhere in the tree that will be committed;
    `.env.example` holds only placeholders. Nothing else secret-shaped found.
-   Still rotate it — it transited chat.
+   **Tom declined rotation (2026-08-27): use the existing key as-is.** Risk
+   noted and accepted by Tom; do not re-raise. (The separate "API Automation
+   User" idea is likewise optional and not requested — existing key powers
+   everything.)
 4. **Agent PO numbering is lexicographic with no 23505 catch** — **FIXED.** The
    agent's private numbering is gone; it calls the human pipeline's
    `nextPoNumber()` (numeric max) through a new `insertPO()` that retries a lost

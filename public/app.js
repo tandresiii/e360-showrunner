@@ -139,9 +139,23 @@ async function renderView(view, arg) {
     navOn('projects');
 
   } else if (view === 'mytasks') {
+    /* F2 — the two things a person owes: assigned steps, and show reports. */
     var mine = await api.myOpenSteps();
-    s.innerHTML = viewMyTasks(mine);
+    var owed = await api.myReports();
+    s.innerHTML = viewMyTasks(mine, owed);
     crumb([{ t: 'My Tasks' }]);
+
+  } else if (view === 'archive') {
+    /* F6 — the only place archived folders are listed. */
+    s.innerHTML = viewArchive(await api.listArchivedProjects());
+    crumb([{ t: 'Projects', act: act('goProjects') }, { t: 'Archive' }]);
+    navOn('projects');
+
+  } else if (view === 'outbox') {
+    /* F3 — a person's own notification record. */
+    s.innerHTML = viewOutbox(await api.myNotifications());
+    crumb([{ t: 'Settings', act: act('gotoTab', null, 'settings') }, { t: 'My notifications' }]);
+    navOn('settings');
 
   } else if (view === 'calendar') {
     s.innerHTML = viewCalendar(await api.listShows());
@@ -169,7 +183,18 @@ async function renderView(view, arg) {
   } else if (view === 'settings') {
     var fov = await api.getFinanceOverview();
     var pov = await api.getPurchasingOverview();
-    s.innerHTML = viewSettings({ fin: fov.stats, pur: pov.stats, jobs: fov.jobs });
+    /* F3 — the notification card reads live prefs + the mail layer's real
+       posture, so it can say "queued, nothing configured" instead of implying
+       mail that will never arrive. */
+    var np = await api.notificationPrefs();
+    var ms = await api.mailStatus().catch(function () { return null; });
+    /* F6 — the admin card's two counts. Asked for, never assumed: in API mode
+       the demo store holds nothing to count. */
+    var arch = CURRENT_USER.role === 'admin'
+      ? await api.listArchivedProjects().catch(function () { return []; }) : [];
+    s.innerHTML = viewSettings({ fin: fov.stats, pur: pov.stats, jobs: fov.jobs,
+                                 notifyPrefs: np && np.prefs, mail: ms,
+                                 archivedCount: arch.length });
     crumb([{ t: 'Settings' }]);
     applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark');
   }
@@ -546,12 +571,137 @@ async function pushSched(showId) {
   var r = await api.pushToScheduler(showId);
   toast('Pushed to Scheduler', r.show + ' → e360 staffing app (dry run)');
 }
+/* ============================================================================
+   F1 · NEW EVENT — the last mock button in the app, made real
+   ----------------------------------------------------------------------------
+   Two steps, because the type choice CHANGES the form (a print event has no
+   cabinet count and an LED one has no piece count), and because picking a type
+   is the one decision that determines everything downstream: the lane set, the
+   template, and which half of the scope line you are asked for.
+
+     step 1  pick the event type          -> seeds its lanes + T-minus pipeline
+     step 2  the details + the NOTIFY ROW  -> one call, one transaction
+
+   THE NOTIFY ROW IS THE POINT OF THIS BEING REBUILT. Tom, 2026-08-27, about
+   his own blind spot in the staffing app: "I can email itineraries, but when I
+   add an event I should have the option of letting people know about it."
+   Default is nobody — creating an event does not spam the company — and one
+   click adds everyone.
+   ========================================================================== */
+var NEW_EVENT = { type: 'led' };
+
 function openNew() {
-  openModal('New event', '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px">Pick a type to seed its lane set + T-minus pipeline. Types are extensible.</p>' +
+  NEW_EVENT = { type: 'led' };
+  openModal('New event · pick a type',
+    '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px">The type decides the lane set and the ' +
+    'T-minus pipeline that gets seeded, and which scope numbers you are asked for. Types are extensible ' +
+    '— adding one is a config entry, not a deploy.</p>' +
     '<div class="tpl-cards" style="margin:0">' + Object.keys(EVENT_TYPES).map(function (type) {
       var t = typeDef(type);
-      return '<button class="tpl-card" ' + act('newEventType', null, type) + '><div class="ti">' + icon(t.icon) + '</div><b>' + esc(t.label) + '</b><div class="td">' + t.lanes.length + ' lanes · anchored to ' + esc(t.anchor) + '</div></button>';
+      var n = Object.keys(TEMPLATE_STEPS[type] || {}).reduce(function (a, k) {
+        return a + (TEMPLATE_STEPS[type][k] || []).length; }, 0);
+      return '<button class="tpl-card" ' + act('newEventType', null, type) + '><div class="ti">' + icon(t.icon) + '</div><b>' + esc(t.label) + '</b><div class="td">' + t.lanes.length + ' lanes · ' + n + ' steps · anchored to ' + esc(t.anchor) + '</div></button>';
     }).join('') + '</div>');
+}
+
+function newEventForm(type) {
+  NEW_EVENT = { type: type };
+  var t = typeDef(type);
+  var isLed = type === 'led' || type === 'both';
+  var isPrint = type === 'print' || type === 'both';
+  /* a pm always owns what they create; manager+ may hand it to someone else —
+     the same rule the server enforces in POST /api/events */
+  var canPickOwner = CURRENT_USER.role === 'admin' || CURRENT_USER.role === 'manager';
+  var ownerOpts = (canPickOwner ? USERS : [CURRENT_USER])
+    .filter(function (u) { return u.role !== 'viewer'; })
+    .map(function (u) {
+      return '<option value="' + esc(u.username) + '"' + (u.username === ME ? ' selected' : '') + '>' +
+        esc(u.name + ' · ' + roleName(u.role)) + '</option>';
+    }).join('');
+
+  openModal('New ' + t.label + ' event',
+    '<div class="hint" style="margin:0 0 12px">' + icon(t.icon) + '<span>Opens a <b>folder</b>, its first ' +
+    '<b>show</b>, and a <b>job</b> on a temporary number — one act, one transaction. The ' +
+    esc(t.label) + ' template seeds ' + t.lanes.length + ' lanes of T-minus steps off the event date. ' +
+    'The real QuickBooks number lands when you confirm the deal.</span></div>' +
+
+    '<div class="fin-inputs" style="grid-template-columns:1.6fr 1fr">' +
+    finLabelWrap('Event name', '<input id="neName" class="cell-in" placeholder="what we call it — e.g. LOVB Madison — Match 1">') +
+    finLabelWrap('Client', '<input id="neClient" class="cell-in" placeholder="who is paying">') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.6fr 1fr">' +
+    finLabelWrap('Venue', '<input id="neVenue" class="cell-in" placeholder="Fiserv Forum — Milwaukee, WI">') +
+    finLabelWrap('Owner', '<select id="neOwner" class="cell-in">' + ownerOpts + '</select>') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr">' +
+    finLabelWrap('Load-in', '<input id="neLoadIn" class="cell-in" type="date">') +
+    finLabelWrap(t.anchor, '<input id="neEvent" class="cell-in" type="date">') +
+    finLabelWrap('Strike', '<input id="neStrike" class="cell-in" type="date">') +
+    '</div>' +
+
+    /* F4 — the scope line is offered AT CREATION, because this is the one
+       moment somebody definitely knows what was sold. Every field optional:
+       most events are opened before the numbers are firm. */
+    '<div class="ne-scope"><div class="ne-sh">' + inlineIcon('ruler') + 'Scope — what we are delivering ' +
+    '<i>optional, and editable later</i></div>' +
+    (isLed ? '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr 1fr">' +
+      finLabelWrap('Linear feet', '<input id="neFeet" class="cell-in" type="number" min="0" placeholder="800">') +
+      finLabelWrap('Cabinets', '<input id="neCabs" class="cell-in" type="number" min="0" placeholder="144">') +
+      finLabelWrap('Cabinet type', '<input id="neCabType" class="cell-in" placeholder="BP2V2">') +
+      finLabelWrap('Pitch', '<input id="nePitch" class="cell-in" placeholder="P10">') +
+      '</div>' : '') +
+    (isPrint ? '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+      finLabelWrap('Pieces', '<input id="nePieces" class="cell-in" type="number" min="0" placeholder="12">') +
+      finLabelWrap('Square feet', '<input id="neSqft" class="cell-in" type="number" min="0" placeholder="3400">') +
+      '</div>' : '') +
+    '</div>' +
+
+    notifyRow() +
+    '<div class="hint" style="margin-top:2px">' + inlineIcon('bell') + '<span>Nobody is notified unless you ' +
+    'pick them. <span class="lnk-btn" ' + act('notifyAll') + '>Notify everyone on the team</span> if this ' +
+    'is one the whole room needs to know about.</span></div>' +
+    '<div style="display:flex;justify-content:space-between;gap:9px;margin-top:12px">' +
+    '<button class="btn ghost" ' + act('openNew') + '>' + icon('chevL') + 'Back</button>' +
+    '<span style="display:flex;gap:9px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('commitNewEvent') + '>' + icon('plus') + 'Create event</button>' +
+    '</span></div>');
+}
+
+async function commitNewEvent() {
+  var v = function (id) { var el2 = document.getElementById(id); return el2 ? String(el2.value || '').trim() : ''; };
+  var name = v('neName');
+  if (!name) { toast('An event needs a name', 'Type what we call it, or cancel'); return; }
+  var num2 = function (id) { var s = v(id); return s === '' ? null : Number(s); };
+  var scope = { kind: NEW_EVENT.type,
+                linear_feet: num2('neFeet'), cabinet_count: num2('neCabs'),
+                cabinet_type: v('neCabType') || null, pitch: v('nePitch') || null,
+                print_pieces: num2('nePieces'), print_sqft: num2('neSqft') };
+  var anyScope = ['linear_feet', 'cabinet_count', 'cabinet_type', 'pitch', 'print_pieces', 'print_sqft']
+    .some(function (k) { return scope[k] !== null && scope[k] !== ''; });
+
+  stageNotifies();
+  var r;
+  try {
+    r = await api.createEvent({
+      name: name, type: NEW_EVENT.type, client: v('neClient'), venue: v('neVenue'),
+      owner: v('neOwner') || ME,
+      load_in_date: v('neLoadIn'), event_date: v('neEvent'), strike_date: v('neStrike'),
+      cabinets: num2('neCabs') || 0,
+      scope: anyScope ? scope : undefined
+    });
+  } catch (e) {
+    toast('Not created', String(e && e.message || e));
+    return;
+  }
+  closeM();
+  var suffix = await sendNotifies('show', r.show.id,
+    'opened the event “' + name + '”' + (r.show.venue ? ' at ' + r.show.venue : '') + ' —');
+  toast('Opened ' + name,
+    (r.instantiated_steps || 0) + ' steps seeded · job ' + (r.job ? r.job.qb_job_number : '—') +
+    ' (temporary until it is confirmed)' + suffix);
+  await updateMineCount();
+  return render('show', r.show.id);
 }
 async function proofAction(proofId, approve) {
   var show = await api.getShow(CUR.showId);
@@ -1466,6 +1616,290 @@ async function openNoteAct(noteId) {
 }
 
 /* ============================================================================
+   F5 · CONFIRM — the explicit act, and the QuickBooks moment it creates
+   ----------------------------------------------------------------------------
+   Confirming is not a stage dropdown. It records that the client committed, it
+   is datestamped and logged, and it is the moment two other things become
+   possible: the scheduler push unlocks, and Candice can cut the real QB number
+   for a job that has been running on a placeholder. So the flow hands off
+   straight into the existing job-number dialog rather than leaving a toast the
+   person has to act on later.
+   ========================================================================== */
+async function confirmShowAct(showId) {
+  var show = await api.getShow(showId);
+  if (!show) return;
+  var r;
+  try {
+    r = await api.confirmShow(showId);
+  } catch (e) {
+    toast('Not confirmed', String(e && e.message || e));
+    return;
+  }
+  toast('Confirmed', showLabel(show) + ' — the client committed. Scheduler push is unlocked.');
+  await refreshFinanceUI();
+  if (r && r.qb_prompt) {
+    /* the natural moment for the real number, per Tom's spec — offered, not
+       forced: a pm who cannot cut QB numbers gets told who can. */
+    return openJobNumber(r.qb_prompt.job_id);
+  }
+}
+
+/* ============================================================================
+   F4 · SCOPE — edit by hand, or fill from the bound spec
+   ----------------------------------------------------------------------------
+   Divergence between the sold scope and a bound spec is a QUESTION, never an
+   error and never a silent overwrite — the same rule the chain checker lives
+   by, and for the same reason: two correct documents can legitimately disagree.
+   ========================================================================== */
+var PENDING_SCOPE = null;
+async function openScopeEditor(showId) {
+  var show = await api.getShow(showId);
+  if (!show) return;
+  var sc = await api.getScope(showId);
+  PENDING_SCOPE = { showId: Number(showId) };
+  var kind = (sc.scope && sc.scope.kind) || (show.type === 'print' ? 'print' : show.type);
+  var isLed = kind === 'led' || kind === 'both';
+  var isPrint = kind === 'print' || kind === 'both';
+  var val = function (k) {
+    var v = sc.scope ? sc.scope[k] : null;
+    return v === null || v === undefined ? '' : String(v);
+  };
+  var kindOpts = SCOPE_KINDS.map(function (k) {
+    return '<option value="' + esc(k) + '"' + (k === kind ? ' selected' : '') + '>' + esc(SCOPE_LABEL[k]) + '</option>';
+  }).join('');
+
+  var qBlock = (sc.questions || []).map(function (q) {
+    return '<div class="scope-q">' + inlineIcon('alert') + '<div><b>' + esc(q.ask) + '</b>' +
+      '<span>' + esc(q.detail) + '</span></div></div>';
+  }).join('');
+  var specBlock = sc.spec && sc.spec.available
+    ? '<div class="hint" style="margin-top:2px">' + icon('layers') + '<span>The bound ' +
+      esc(sc.spec.count_source || 'spec') + ' counts <b>' + esc(String(sc.spec.cabinet_count)) +
+      '</b> cabinets' + (sc.spec.stack_aware ? ' (stack-aware)' : '') +
+      (sc.spec.cabinet_type ? ' of <b>' + esc(sc.spec.cabinet_type) + '</b>' : '') + '. ' +
+      '<span class="lnk-btn" ' + act('scopeFromSpec', Number(showId)) + '>Fill from the spec</span> — ' +
+      'linear feet and pitch stay hand-entered, because no node of the chain records them.</span></div>'
+    : '<div class="hint" style="margin-top:2px">' + icon('layers') + '<span>Nothing bound to this show can ' +
+      'answer for the scope yet. Bind a .e360, .nsf or .pcfg and the cabinet count fills itself — ' +
+      'stack-aware.</span></div>';
+
+  openModal('Scope · ' + showLabel(show),
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">What we are delivering, structured. ' +
+    'It prints on the show header, the season row, the projects table and the call sheet — and it is ' +
+    'client-safe, so it feeds the recap’s stats.</p>' +
+    qBlock +
+    '<div class="fin-inputs" style="grid-template-columns:1fr"> ' +
+    finLabelWrap('Kind', '<select id="scKind" class="cell-in">' + kindOpts + '</select>') + '</div>' +
+    (isLed ? '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr 1fr">' +
+      finLabelWrap('Linear feet', '<input id="scFeet" class="cell-in" type="number" min="0" value="' + esc(val('linear_feet')) + '">') +
+      finLabelWrap('Cabinets', '<input id="scCabs" class="cell-in" type="number" min="0" value="' + esc(val('cabinet_count')) + '">') +
+      finLabelWrap('Cabinet type', '<input id="scCabType" class="cell-in" value="' + esc(val('cabinet_type')) + '">') +
+      finLabelWrap('Pitch', '<input id="scPitch" class="cell-in" value="' + esc(val('pitch')) + '">') +
+      '</div>' : '') +
+    (isPrint ? '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+      finLabelWrap('Pieces', '<input id="scPieces" class="cell-in" type="number" min="0" value="' + esc(val('print_pieces')) + '">') +
+      finLabelWrap('Square feet', '<input id="scSqft" class="cell-in" type="number" min="0" value="' + esc(val('print_sqft')) + '">') +
+      '</div>' : '') +
+    specBlock +
+    notifyRow() +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('commitScope') + '>' + icon('check') + 'Save scope</button></div>');
+}
+async function commitScope() {
+  if (!PENDING_SCOPE) return;
+  var v = function (id) { var e = document.getElementById(id); return e ? String(e.value || '').trim() : ''; };
+  var num2 = function (id) { var s = v(id); return s === '' ? null : Number(s); };
+  var patch = {
+    kind: v('scKind') || null,
+    linear_feet: num2('scFeet'), cabinet_count: num2('scCabs'),
+    cabinet_type: v('scCabType') || null, pitch: v('scPitch') || null,
+    print_pieces: num2('scPieces'), print_sqft: num2('scSqft'),
+    source: 'manual'
+  };
+  stageNotifies();
+  var show;
+  try {
+    show = await api.setScope(PENDING_SCOPE.showId, patch);
+  } catch (e) {
+    toast('Scope not saved', String(e && e.message || e));
+    return;
+  }
+  closeM();
+  var suffix = await sendNotifies('show', PENDING_SCOPE.showId,
+    'set the scope to ' + (scopeLine(show) || '—') + ' —');
+  toast('Scope saved', (scopeLine(show) || 'cleared') + suffix);
+  PENDING_SCOPE = null;
+  return render('show', show.id || CUR.showId);
+}
+async function scopeFromSpecAct(showId) {
+  try {
+    var show = await api.scopeFromSpec(showId);
+    closeM();
+    toast('Filled from the bound spec', scopeLine(show) + ' — stack-aware where the spec records stacking');
+    return render('show', Number(showId));
+  } catch (e) {
+    toast('Nothing to fill from', String(e && e.message || e));
+  }
+}
+
+/* ============================================================================
+   F2 · TECH SHOW REPORTS — write mine · review theirs · nag
+   ----------------------------------------------------------------------------
+   A pm has exactly three levers here and none of them writes: nag, read, mark
+   reviewed. A report attributed to somebody who did not write it is worse than
+   a missing one, so there is no affordance anywhere for writing someone else's.
+   ========================================================================== */
+async function markStruckAct(showId) {
+  try {
+    var r = await api.markStruck(showId);
+    toast('Marked struck', r.created
+      ? r.created + ' show report' + (r.created === 1 ? '' : 's') + ' now owed — the crew has been asked'
+      : 'nobody on the crew has a login, so no report is owed');
+  } catch (e) {
+    toast('Not marked', String(e && e.message || e));
+    return;
+  }
+  await updateBellBadge();
+  return refreshShowTab(Number(showId), 'reports');
+}
+async function repEditAct(id) {
+  REPORT_UI.editing = Number(id);
+  await refreshShowTab(CUR.showId, 'reports');
+  var ta = document.getElementById('repIn' + Number(id));
+  if (ta && ta.focus) ta.focus();
+}
+async function repCancelAct() {
+  REPORT_UI.editing = null;
+  return refreshShowTab(CUR.showId, 'reports');
+}
+async function repSaveAct(id) {
+  var ta = document.getElementById('repIn' + Number(id));
+  var body = ta ? String(ta.value || '').trim() : '';
+  if (!body) { toast('Nothing to file', 'Write the report first, or attach a document'); return; }
+  var rep = REPORTS_BY_ID[Number(id)];
+  var showId = rep ? rep.show_id : CUR.showId;
+  var r;
+  try {
+    r = await api.fileTechReport(showId, { body: body });
+  } catch (e) {
+    toast('Not filed', String(e && e.message || e));
+    return;
+  }
+  REPORT_UI.editing = null;
+  toast('Report filed', r.summary && r.summary.owed
+    ? 'In the folder’s files. Still waiting on ' + r.summary.owed + ' other' + (r.summary.owed === 1 ? '' : 's') + '.'
+    : 'In the folder’s files — every report on this show is now in.');
+  await updateBellBadge();
+  await updateMineCount();
+  return refreshShowTab(showId, 'reports');
+}
+async function repReviewAct(id) {
+  try { await api.reviewTechReport(id); toast('Marked reviewed', 'Optional bookkeeping — filing was what cleared it'); }
+  catch (e) { toast('Not reviewed', String(e && e.message || e)); return; }
+  return refreshShowTab(CUR.showId, 'reports');
+}
+async function repReopenAct(id) {
+  try { await api.reopenTechReport(id); toast('Reopened', 'Back to filed — they can revise it'); }
+  catch (e) { toast('Not reopened', String(e && e.message || e)); return; }
+  return refreshShowTab(CUR.showId, 'reports');
+}
+async function repNagAct(id) {
+  var rep = REPORTS_BY_ID[Number(id)];
+  if (!rep) return;
+  try {
+    await api.nagTechReports(rep.show_id, rep.username);
+    toast('Nudged ' + (firstName(rep.username) || rep.username), 'Bell + their chosen channel');
+  } catch (e) { toast('Not sent', String(e && e.message || e)); return; }
+  await updateBellBadge();
+  return refreshShowTab(rep.show_id, 'reports');
+}
+async function repNagAllAct(showId) {
+  try {
+    var r = await api.nagTechReports(showId, null);
+    toast('Nudged everyone still out', r.nagged + ' reminder' + (r.nagged === 1 ? '' : 's') + ' sent');
+  } catch (e) { toast('Not sent', String(e && e.message || e)); return; }
+  await updateBellBadge();
+  return refreshShowTab(Number(showId), 'reports');
+}
+/* the My Tasks / bell deep link: open the show, land on Reports, open my editor */
+async function openReportAct(showId) {
+  var rep = reportFor(Number(showId), ME);
+  REPORT_UI.editing = rep ? rep.id : null;
+  await render('show', Number(showId));
+  setFolderTab('reports');
+  var ta = rep ? document.getElementById('repIn' + rep.id) : null;
+  if (ta && ta.focus) ta.focus();
+}
+
+/* ============================================================================
+   F6 · ARCHIVING — admin only, and reversible in one click
+   ========================================================================== */
+async function archiveShowAct(showId) {
+  try {
+    var r = await api.archiveShow(showId);
+    toast(r.already ? 'Already archived' : 'Archived',
+      'Out of the working set — nothing deleted, and the Archive view still opens it');
+  } catch (e) { toast('Not archived', String(e && e.message || e)); return; }
+  return render('show', Number(showId));
+}
+async function unarchiveShowAct(showId) {
+  try {
+    await api.unarchiveShow(showId);
+    toast('Back in the working set', 'It appears in the normal lists again');
+  } catch (e) { toast('Not restored', String(e && e.message || e)); return; }
+  return render('show', Number(showId));
+}
+async function archiveProjectAct(projectId) {
+  try {
+    await api.archiveProject(projectId);
+    toast('Folder archived', 'Every show inside it went with it');
+  } catch (e) { toast('Not archived', String(e && e.message || e)); return; }
+  return render('projects');
+}
+async function unarchiveProjectAct(projectId) {
+  try {
+    await api.unarchiveProject(projectId);
+    toast('Folder restored', 'Back in the portfolio');
+  } catch (e) { toast('Not restored', String(e && e.message || e)); return; }
+  return render('archive');
+}
+
+/* ============================================================================
+   F3 · NOTIFICATION PREFERENCES + the sweep
+   ========================================================================== */
+async function notifPrefAct(spec) {
+  var parts = String(spec || '').split(':');
+  if (parts.length !== 2) return;
+  var patch = {};
+  patch[parts[0]] = parts[1];
+  try {
+    await api.setNotificationPrefs(patch);
+  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  toast(NOTIFY_KIND_LABEL[parts[0]] || parts[0],
+    parts[1] === 'off' ? 'Bell only — it still reaches you in the app'
+      : parts[1] === 'immediate' ? 'You will hear about these right away'
+      : 'Batched into your digest');
+  return render('settings');
+}
+async function runSweepAct() {
+  var r;
+  try { r = await api.sweep(); }
+  catch (e) { toast('Sweep refused', String(e && e.message || e)); return; }
+  var bits = [];
+  if (r.struck) bits.push(r.struck + ' struck');
+  if (r.reports_created) bits.push(r.reports_created + ' reports created');
+  if (r.nagged) bits.push(r.nagged + ' nagged');
+  if (r.closeout_complete) bits.push(r.closeout_complete + ' closed out');
+  if (r.archived) bits.push(r.archived + ' archived');
+  if (r.notifications && r.notifications.sent) bits.push(r.notifications.sent + ' notifications sent');
+  toast('Sweep done', bits.length ? bits.join(' · ') : 'nothing was due — it is idempotent, so that is the normal answer');
+  await updateBellBadge();
+  await updateMineCount();
+  return render('settings');
+}
+
+/* ============================================================================
    ONE DELEGATED LISTENER — every data-act in the app lands here
    ========================================================================== */
 var ACTIONS = {
@@ -1562,7 +1996,45 @@ var ACTIONS = {
   selectTpl:     async function (t, id, k) { selectTpl(k, await api.listProjects()); },
   addEventType:  function () { addEventType(); },
   openNew:       function () { openNew(); },
-  newEventType:  function (t, id, k) { var d = typeDef(k); closeM(); toast('New ' + d.label + ' event', d.lanes.length + ' lanes seeded from the ' + d.label + ' template'); },
+  /* F1 — the last mock button in the app is real: picking a type now opens the
+     form that creates the folder, the show and the job. */
+  newEventType:  function (t, id, k) { newEventForm(EVENT_TYPES[k] ? k : 'led'); },
+  commitNewEvent: function () { return commitNewEvent(); },
+  /* the notify-picker's "everyone" shortcut — Tom's one-click on the event
+     flow. Never the default; always one deliberate click. */
+  notifyAll:     function () {
+    NOTIFY_SEL = USERS.filter(function (u) { return u.username !== ME; })
+      .map(function (u) { return u.username; });
+    repaintNotifyRow();
+    var p = document.getElementById('notifyPop');
+    if (p) p.innerHTML = notifyPopInner();
+  },
+  /* F5 */
+  confirmShow:   function (t, id) { return confirmShowAct(id); },
+  /* F4 */
+  editScope:     function (t, id) { return openScopeEditor(id); },
+  commitScope:   function () { return commitScope(); },
+  scopeFromSpec: function (t, id) { return scopeFromSpecAct(id); },
+  /* F2 */
+  markStruck:    function (t, id) { return markStruckAct(id); },
+  repEdit:       function (t, id) { return repEditAct(id); },
+  repCancel:     function () { return repCancelAct(); },
+  repSave:       function (t, id) { return repSaveAct(id); },
+  repReview:     function (t, id) { return repReviewAct(id); },
+  repReopen:     function (t, id) { return repReopenAct(id); },
+  repNag:        function (t, id) { return repNagAct(id); },
+  repNagAll:     function (t, id) { return repNagAllAct(id); },
+  openReport:    function (t, id) { return openReportAct(id); },
+  /* F6 */
+  goArchive:     function () { return render('archive'); },
+  archiveShow:   function (t, id) { return archiveShowAct(id); },
+  unarchiveShow: function (t, id) { return unarchiveShowAct(id); },
+  archiveProject: function (t, id) { return archiveProjectAct(id); },
+  unarchiveProject: function (t, id) { return unarchiveProjectAct(id); },
+  /* F3 */
+  notifPref:     function (t, id, k) { return notifPrefAct(k); },
+  openOutbox:    function () { return render('outbox'); },
+  runSweep:      function () { return runSweepAct(); },
   closeModal:    function () { closeM(); closeNotifyPop(); },
   toggleTheme:   function () { toggleTheme(); },
   /* notes + mentions (notes pass) */
