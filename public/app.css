@@ -367,30 +367,84 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
 .pagenav{display:inline-flex; align-items:center; gap:2px}
 .pagenav .iconbtn{width:30px;height:30px}
 
-/* ---------- the inline preview: the real bytes, on the stage ----------
-   .stage-canvas is a one-child grid with place-items:center, so the document
-   and the record it belongs to travel together in one column rather than as
-   two independently centred grid rows. */
-.vstack{display:flex; flex-direction:column; align-items:center; gap:20px; width:100%; max-width:860px; min-width:0}
+/* ══════════ THE VIEWER IS A DOCUMENT VIEWER ══════════════════════════════
+   Tom, on v1 of this: "the window where I actually view the spec sheet is too
+   small. I have to be at like 40 percent to not have to scroll all around."
+
+   He was right, and it was two separate mistakes. The stage was sized by its
+   CONTENT (min-height:560px in a page that scrolls) rather than by the FRAME,
+   so a portrait page never had a portrait-shaped hole to sit in; and the white
+   record sheet was stacked underneath the document inside the same scrolling
+   canvas, so the two of them split the height Tom needed for one.
+
+   Now: the stage takes the viewport minus a KNOWN amount of chrome, the
+   document fills the stage edge to edge, and the record moved out to .vrecord
+   below the fold. --viewer-chrome is a real measurement, not a guess:
+   57 topbar + 26 scroll pad-top + ~52 compact .v-head + 14 its margin
+   + 24 breathing room = 173. .v-head is fixed-height for exactly this reason —
+   the old two-line explainer paragraph made it unpredictable AND cost ~95px of
+   the page a person is trying to read. */
+.scroll.is-viewer{padding-bottom:24px}
+.v-head{margin-bottom:14px; align-items:center}
+.v-head h1{font-size:20px}
+.v-head .sub{font-size:11.5px; margin-top:3px; font-family:var(--font-mono); color:var(--muted)}
+.viewer-shell{--viewer-chrome:173px}
+.scroll.is-viewer .stage{height:calc(100vh - var(--viewer-chrome)); min-height:440px}
+.scroll.is-viewer .vstrip,
+.scroll.is-viewer .vmeta{max-height:calc(100vh - var(--viewer-chrome)); overflow-y:auto}
+/* full width: the strip and the panel step aside. Nothing becomes unreachable —
+   paging is on the arrows and the keyboard, and the panel's facts are in the
+   record below. */
+.viewer-shell.max{grid-template-columns:minmax(0,1fr)}
+.viewer-shell.max .vstrip,.viewer-shell.max .vmeta{display:none}
+
+/* the canvas in DOCUMENT mode: no padding, no dot grid, no scrollbar of its
+   own — the embed brings its own viewer and the img is centred in the hole */
+.stage-canvas.doc{padding:0; background:var(--surface-2); background-image:none;
+  display:block; overflow:hidden}
 .vprev{width:100%; background:var(--surface); border:1px solid var(--border); border-radius:var(--r);
   overflow:hidden; display:flex; flex-direction:column; justify-content:center;
   min-height:300px; box-shadow:0 14px 44px rgba(0,0,0,.28)}
-/* The browser's own PDF viewer. A tall-but-bounded frame: big enough to read a
-   spec sheet, never so tall the metadata card below falls off the world. */
-.vprev-frame{width:100%; height:min(72vh,780px); border:0; display:block; background:#fff}
-.vprev-img{width:100%; height:auto; max-height:min(72vh,780px); object-fit:contain; display:block; background:#0b0f0d}
+.stage-canvas.doc>.vprev{height:100%; min-height:0; border:0; border-radius:0; box-shadow:none;
+  background:var(--surface-2)}
+/* the browser's own PDF viewer, given the whole hole */
+.vprev-frame{width:100%; height:100%; min-height:340px; border:0; display:block; background:#fff}
+/* an image is CONTAINED and centred — never cropped, never hugging a corner */
+.vprev-img{max-width:100%; max-height:100%; width:auto; height:auto; object-fit:contain;
+  display:block; margin:0 auto}
+.stage-canvas.doc>.vprev>.vprev-img{max-height:100%}
 .vprev-msg{padding:34px 26px; display:flex; flex-direction:column; align-items:center; gap:7px; text-align:center; color:var(--muted)}
 .vprev-msg b{font-size:13px; font-weight:600; color:var(--text)}
 .vprev-msg span{font-size:11.5px; font-family:var(--font-mono); max-width:440px; line-height:1.5}
 .vprev-msg .vprev-sub{color:var(--muted); opacity:.8}
-.vprev-msg svg{width:22px;height:22px; color:var(--warn)}
+.vprev-msg.fail svg{width:22px;height:22px; color:var(--warn)}
 .vprev-msg.fail b{color:var(--warn)}
 .vprev-spin{width:20px;height:20px;border-radius:50%; border:2px solid var(--border); border-top-color:var(--accent); animation:vprevspin .8s linear infinite}
 @keyframes vprevspin{to{transform:rotate(360deg)}}
-@media (prefers-reduced-motion: reduce){ .vprev-spin{animation:none} }
+/* the progress bar is REAL when the server sent a Content-Length and an
+   indeterminate sweep when it did not — never a fake percentage */
+.vprev-bar{width:220px; height:4px; border-radius:3px; background:var(--surface-3); overflow:hidden; margin-top:5px}
+.vprev-bar i{display:block; height:100%; width:0; border-radius:3px; background:var(--accent); transition:width .18s linear}
+.vprev-bar i.sweep{width:38%; animation:vprevsweep 1.15s ease-in-out infinite}
+@keyframes vprevsweep{from{transform:translateX(-110%)} to{transform:translateX(320%)}}
+.vprev-note{color:var(--text-2)}
+/* Encrypted TRANSFER — see the note in components.js before touching this copy */
+.vprev-sec{display:inline-flex; align-items:center; gap:5px; margin-top:11px; font-size:10.5px;
+  font-family:var(--font-mono); color:var(--muted); opacity:.85; letter-spacing:.01em}
+.vprev-sec svg{width:11px;height:11px; color:inherit; flex:none}
+@media (prefers-reduced-motion: reduce){ .vprev-spin,.vprev-bar i.sweep{animation:none} }
 /* a photo's preview slot IS the gallery frame — it must not draw a second one */
 .ps-frame .vprev.ps-live{position:absolute; inset:0; min-height:0; border:0; border-radius:0; box-shadow:none; background:transparent}
-.ps-frame .vprev.ps-live .vprev-img{width:100%; height:100%; max-height:none; object-fit:cover}
+.ps-frame .vprev.ps-live .vprev-img{width:100%; height:100%; max-width:none; max-height:none; object-fit:cover}
+
+/* ---------- the document record, demoted below the fold ---------- */
+.vrecord{margin-top:20px}
+.vrecord:empty{display:none}
+.vrec-h{display:flex; align-items:center; gap:9px; margin-bottom:12px; color:var(--muted); flex-wrap:wrap}
+.vrec-h svg{width:15px;height:15px; flex:none}
+.vrec-h b{color:var(--text); font-size:13px; font-weight:600}
+.vrec-h span{font-size:11.5px; font-family:var(--font-mono)}
+.vrecord .sheet{margin:0 auto}
 
 .vmeta{background:var(--surface); border:1px solid var(--border); border-radius:var(--r); overflow:hidden; position:sticky; top:0}
 .vmeta .mh{padding:13px 15px; border-bottom:1px solid var(--border)}
@@ -936,7 +990,18 @@ table.tbl td.money,table.tbl th.money{text-align:right}
 .cs-poc i{font-style:normal; font-family:var(--font-mono); font-size:11px; color:#0c6b46; font-weight:700; display:block; margin-top:2px}
 .cs-sheet .sh-cap{text-align:left; margin-top:16px}
 
-@media(max-width:1180px){ .viewer-shell{grid-template-columns:1fr} .vstrip,.vmeta{position:static} .stage{min-height:440px} }
+/* One column below 1180. The STAGE goes first (order:-1) so a phone opens on
+   the document rather than on a file strip the person has to scroll past, and
+   it stops being viewport-tall so the strip, the panel and the record are all
+   still reachable by scrolling. Full-width preview, card below — as asked. */
+@media(max-width:1180px){
+  .viewer-shell{grid-template-columns:1fr}
+  .vstrip,.vmeta{position:static}
+  .stage{min-height:440px}
+  .scroll.is-viewer .stage{order:-1; height:min(74vh,calc(100vh - 150px)); min-height:360px}
+  .scroll.is-viewer .vstrip,.scroll.is-viewer .vmeta{max-height:none; overflow-y:visible}
+  .viewer-shell.max .vstrip,.viewer-shell.max .vmeta{display:block}
+}
 /* !important so panels that set an inline grid-template (1.5fr 1fr etc.) still
    collapse to one column — the inline style was silently winning (audit fix) */
 @media(max-width:1080px){ .ov{grid-template-columns:1fr!important} .stats{grid-template-columns:repeat(2,1fr)!important} .divsplit{grid-template-columns:repeat(2,1fr)} .ef-meta{grid-template-columns:repeat(2,1fr)} .grid-head{display:none} .grid-row{grid-template-columns:1fr 1fr; gap:8px} .grid-row .grip,.grid-row .rowdel{display:none} }

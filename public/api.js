@@ -487,7 +487,43 @@ var SR = (function () {
 
     /* bytes — the NAS layer's two verbs (see bytes() above) */
     putBytes: function (p, body, o) { return bytes('PUT', p, body, o).then(function (r) { return r.json(); }); },
-    getBlob: function (p, o) { return bytes('GET', p, null, o).then(function (r) { return r.blob(); }); },
+    /* `o.onProgress(loaded, total)` reports the transfer as it happens. `total`
+       is null when the server sent no Content-Length, and the caller must then
+       show something indeterminate rather than invent a denominator.
+
+       The reader path is used ONLY when there is a body to read and a caller
+       who asked; everything else falls through to res.blob(), which is what
+       every existing caller still gets. A browser without ReadableStream, or a
+       reader that throws mid-stream, falls back to blob() too — a progress bar
+       is a nicety and must never be the reason a document fails to open. */
+    getBlob: function (p, o) {
+      var opts = o || {};
+      return bytes('GET', p, null, opts).then(function (res) {
+        if (typeof opts.onProgress !== 'function' || !res.body || !res.body.getReader) {
+          return res.blob();
+        }
+        var len = Number(res.headers && res.headers.get ? res.headers.get('content-length') : 0);
+        var total = len > 0 ? len : null;
+        var type = (res.headers && res.headers.get && res.headers.get('content-type')) || '';
+        var reader, chunks = [], loaded = 0;
+        try { reader = res.body.getReader(); } catch (_) { return res.blob(); }
+        try { opts.onProgress(0, total); } catch (_) {}
+        return (function pump() {
+          return reader.read().then(function (r) {
+            if (r.done) {
+              /* rebuild with the SERVER's content-type: an <embed> decides what
+                 to do with a blob by its type, and a typeless one renders as a
+                 download prompt instead of a document */
+              return new Blob(chunks, type ? { type: type } : undefined);
+            }
+            chunks.push(r.value);
+            loaded += r.value.length || r.value.byteLength || 0;
+            try { opts.onProgress(loaded, total); } catch (_) {}
+            return pump();
+          });
+        })();
+      });
+    },
 
     /* store */
     absorb: A,
@@ -1279,9 +1315,9 @@ var api = (function () {
     },
     /* Pull the bytes back down THROUGH the app — the whole reason a tech in a
        truck can open a spec she has no route to the NAS for. */
-    downloadFileBytes: function (fileId) {
+    downloadFileBytes: function (fileId, opts) {
       if (!API()) return fail('downloads need the Showrunner server');
-      return SR.getBlob('/api/files/' + Number(fileId) + '/content');
+      return SR.getBlob('/api/files/' + Number(fileId) + '/content', opts);
     },
     /* Is there anywhere to PUT bytes on this deployment? Env-driven, cached
        with the rest of GET /api/config. Fails CLOSED: an unreachable config

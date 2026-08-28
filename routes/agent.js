@@ -32,6 +32,7 @@ const { requireAgentKey, requireScope, requireRole, getSession, agentRateLimit,
 const { asyncH, badRequest, forbidden, notFound, idParam, limitOf } = require('../lib/http');
 const { logActivity } = require('../lib/activity');
 const { storage, buildNasPath, buildQuarantinePath, MAX_BYTES } = require('../lib/storage');
+const fileCache = require('../lib/filecache');   // a CACHE, never storage
 const { createNote } = require('./notes');
 // PO numbering is the human pipeline's rule; the agent surface shares it rather
 // than keeping a second copy (hardening 4).
@@ -395,6 +396,7 @@ router.put('/documents/:id/content', requireScope('agent:file'),
     }
     if (!Buffer.isBuffer(req.body) || !req.body.length) throw badRequest('Empty body');
     const result = await storage.put(f.nas_path, req.body);
+    fileCache.invalidatePath(f.nas_path);     // new bytes at this path
     await pool.query('UPDATE files SET size=$1 WHERE id=$2', [result.size, f.id]);
     res.json({ ok: true, size: result.size });
   }));

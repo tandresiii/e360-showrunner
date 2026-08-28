@@ -564,7 +564,11 @@ function viewOutbox(rows) {
    MULTIMEDIA VIEWER — bind a spec/proof to a show -> view + print.
    Navigates by FILE ID (not array index) so mutations can't shift the target.
    ========================================================================== */
-var VIEWER = { showId: null, fileId: null };
+/* `max` is the full-width toggle: it drops the file strip and the meta panel and
+   gives the whole row to the document. It is deliberately a VIEW preference and
+   not a per-file one — it survives paging, because somebody who wanted the big
+   window for page 1 wants it for page 2. */
+var VIEWER = { showId: null, fileId: null, max: false };
 function viewViewer(show) {
   var files = show.files;
   if (!files.length) return '<div class="empty">No files bound to this show yet.</div>';
@@ -579,13 +583,25 @@ function viewViewer(show) {
       '<div class="vt"><b>' + esc(label) + '</b><span>.' + esc(f.ext) + ' · ' + esc(fmtSize(f.size)) + '</span></div></button>';
   }).join('');
   var title = show.project.single ? show.project.name : show.name;
-  return '<div class="page-h" style="margin-bottom:16px"><div><h1>Multimedia Viewer</h1><div class="sub">Any bound spec, proof, PDF or image — paged through and print-ready. Make a spec, bind it to a show, and anyone with folder access can view and print it.</div></div>' +
+  /* THE HEADER IS CHROME AND THE DOCUMENT IS THE POINT.
+     This used to be a full page-h: a 26px title over a two-line paragraph
+     explaining the viewer to somebody already standing in it, costing ~95px of
+     the exact vertical space a portrait PDF page needs. One compact line now,
+     and .v-head fixes its height so `--viewer-chrome` below can be a number
+     rather than a guess. */
+  return '<div class="page-h v-head"><div><h1>Multimedia Viewer</h1>' +
+    '<div class="sub">' + esc(title) + ' · ' + files.length + ' file' + (files.length === 1 ? '' : 's') + '</div></div>' +
     '<button class="btn ghost" ' + act('openShow', show.id) + '>' + icon('folder') + 'Back to folder</button></div>' +
-    '<div class="viewer-shell">' +
+    '<div class="viewer-shell' + (VIEWER.max ? ' max' : '') + '" id="vShell">' +
     '<div class="vstrip"><div class="vsh"><b>' + esc(title) + '</b><span class="n">' + files.length + '</span></div>' + strip + '</div>' +
     '<div class="stage" id="vStage"></div>' +
     '<div class="vmeta" id="vMeta"></div>' +
-    '</div>';
+    '</div>' +
+    /* BELOW THE FOLD, on purpose. When the document itself is on the stage the
+       white record sheet is reference material, not the main event — it was
+       stealing half the height from the thing Tom came to read. It keeps its
+       own mount so printFile() and the no-preview path are untouched. */
+    '<div class="vrecord" id="vRecord"></div>';
 }
 function viewerIndex(show) {
   for (var i = 0; i < show.files.length; i++) if (show.files[i].id === VIEWER.fileId) return i;
@@ -618,21 +634,37 @@ function drawViewer(show) {
   var stitle = isPhoto
     ? '<b>' + esc(f.caption || f.name) + '</b><span>.' + esc(f.ext) + ' · ' + esc(fmtTs(f.taken_at)) + ' · ' + esc(f.dim) + '</span>'
     : '<b>' + esc(f.name) + '</b><span>.' + esc(f.ext) + ' · ' + esc(f.ver) + ' · ' + esc(f.dim) + '</span>';
+  /* THE STAGE IS THE DOCUMENT.
+     v1 of this pass stacked the preview ON TOP OF the white record sheet inside
+     a scrolling canvas, which is how Tom ended up at 40% zoom panning around a
+     spec sheet: two full-size things were splitting one column. Now, whenever
+     there are bytes to show, the canvas holds the document and NOTHING else,
+     and the record sheet moves to #vRecord below the fold. A photo is the one
+     exception — photoSheet() puts #vPrev inside its own gallery frame, so it
+     must not be given a second one. */
+  var live = !!prevKind;
+  var sheet = sheetHTML(show, f, show.gear);
   $('#vStage').innerHTML = '<div class="stage-bar"><div class="stitle">' + stitle + '</div>' +
     '<div class="pagenav"><button class="iconbtn" title="Previous" ' + act('vGo', -1) + '>' + icon('chevL') + '</button>' +
     '<span class="mono" style="font-size:11px;color:var(--muted);padding:0 6px">' + (ni + 1) + ' / ' + nav.length + (isPhoto ? ' photos' : '') + '</span>' +
     '<button class="iconbtn" title="Next" ' + act('vGo', 1) + '>' + icon('chevR') + '</button></div>' +
+    (live ? '<button class="iconbtn" title="' + (VIEWER.max ? 'Exit full width' : 'Full width') + '" ' +
+      act('vMax') + '>' + icon(VIEWER.max ? 'collapse' : 'expand') + '</button>' : '') +
     '<button class="btn sm primary" ' + act('printFile') + '>' + icon('print') + 'Print</button></div>' +
-    /* THE STAGE, when there are real bytes behind the row: the document first,
-       the record under it. A photo is the one exception — photoSheet() puts
-       #vPrev inside its own gallery frame, so it must not get a second one. */
-    '<div class="stage-canvas">' +
-      (prevKind && !isPhoto
-        ? '<div class="vstack"><div class="vprev" id="vPrev">' + previewLoadingHTML() + '</div>' +
-          sheetHTML(show, f, show.gear) + '</div>'
-        : sheetHTML(show, f, show.gear)) +
+    '<div class="stage-canvas' + (live && !isPhoto ? ' doc' : '') + '">' +
+      (live && !isPhoto ? '<div class="vprev" id="vPrev">' + previewLoadingHTML() + '</div>' : sheet) +
     '</div>';
-  if (prevKind) drawPreview(f, prevKind);
+  /* The record, demoted. It is still rendered — it is the file's own facts and
+     the print path draws the same sheet — just no longer competing with the
+     document for the fold. Cleared, never left stale, when the stage owns it. */
+  var rec = $('#vRecord');
+  if (rec) {
+    rec.innerHTML = (live && !isPhoto)
+      ? '<div class="vrec-h">' + icon('file') + '<b>Document record</b>' +
+        '<span>the file’s own metadata — the document itself is above</span></div>' + sheet
+      : '';
+  }
+  if (live) drawPreview(f, prevKind);
 
   var title = show.project.single ? show.project.name : show.name;
   if (isPhoto) { drawPhotoMeta(show, f, title, hasBytes); return; }
@@ -763,6 +795,30 @@ function vPrevRelease() {
   VPREV.url = null; VPREV.blob = null; VPREV.fileId = null;
 }
 
+/* Paint the transfer. Determinate when the server told us how big the file is,
+   indeterminate when it did not — the `sweep` class IS the difference, and it
+   is removed the moment a real denominator arrives. Writes straight to the two
+   nodes rather than re-rendering the block, so the spinner does not restart on
+   every chunk. */
+function vPrevProgress(loaded, total) {
+  var bar = $('#vPrevBar'), note = $('#vPrevNote');
+  if (bar && bar.firstChild) {
+    if (total > 0) {
+      var pct = Math.max(2, Math.min(100, Math.round((loaded / total) * 100)));
+      bar.firstChild.className = '';
+      bar.firstChild.style.width = pct + '%';
+    } else {
+      bar.firstChild.className = 'sweep';
+      bar.firstChild.style.width = '';
+    }
+  }
+  if (note) {
+    note.textContent = total > 0
+      ? fmtBytes(loaded) + ' of ' + fmtBytes(total)
+      : (loaded > 0 ? fmtBytes(loaded) + ' so far' : 'Opening the document');
+  }
+}
+
 async function drawPreview(f, kind) {
   var gen = VPREV.gen;                       /* the ticket this run holds */
   var host = $('#vPrev');
@@ -778,7 +834,17 @@ async function drawPreview(f, kind) {
       host.innerHTML = previewFailHTML('This server has no NAS storage configured, so nothing can serve the bytes.');
       return;
     }
-    var blob = await api.downloadFileBytes(f.id);
+    /* PERCEIVED SPEED. Three honest seconds felt like twenty dead ones because
+       nothing on screen moved. The bar is fed by the real transfer — bytes and
+       the server's Content-Length — so it is a measurement, not a placebo, and
+       when there is no Content-Length it stays an indeterminate sweep instead
+       of inventing a denominator. */
+    var blob = await api.downloadFileBytes(f.id, {
+      onProgress: function (loaded, total) {
+        if (stale()) return;
+        vPrevProgress(loaded, total);
+      }
+    });
     /* Navigated away mid-transfer. Return BEFORE createObjectURL: a URL that
        is never minted is a URL that cannot leak. */
     if (stale()) return;

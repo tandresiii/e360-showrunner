@@ -24,6 +24,8 @@ const { logActivity, diffFields, changeSummary } = require('../lib/activity');
 const { announceShowChange } = require('../lib/audience');
 const { notifyTargets } = require('../lib/mentions');
 const { storage, buildNasPath, MAX_BYTES, contentTypeFor, fileName, storageProbe } = require('../lib/storage');
+// A CACHE, never storage — the argument is in the header of lib/filecache.js.
+const fileCache = require('../lib/filecache');
 const {
   pick, has, dbToFile, dbToBooking, dbToProof, dbToProofRound, dbToChainNode,
   dbToFlexState, dbToExpense
@@ -128,6 +130,27 @@ router.post('/admin/storage-probe', requireRole('admin'), asyncH(async (req, res
   // at its job, and a non-2xx would make curl and the SPA hide the body that is
   // the entire point of the call.
   res.json(out);
+}));
+
+// ── GET/POST /api/admin/byte-cache ──────────────────────────────────────────
+// Read the warm copy's state, or throw it away.
+//
+// Clearing a cache is, by construction, always safe: every entry duplicates
+// bytes that live on the NAS, so the worst a clear can do is make the next few
+// opens cost what they cost before the cache existed. That is exactly why it is
+// also the right instrument for MEASURING it — scripts/byte-timing.js clears,
+// times a cold read, then times a warm one, and a number you can reproduce on
+// demand beats a number you got once and have to believe.
+//
+// admin-only, because the state it reports (paths held, byte counts) is
+// operational detail and because nobody else has a reason to reset it.
+router.get('/admin/byte-cache', requireRole('admin'), asyncH(async (req, res) => {
+  res.json(fileCache.info());
+}));
+router.post('/admin/byte-cache/clear', requireRole('admin'), asyncH(async (req, res) => {
+  const before = fileCache.info();
+  fileCache.clear();
+  res.json({ ok: true, cleared: before.entries, bytes: before.bytes, now: fileCache.info() });
 }));
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -371,6 +394,10 @@ router.put('/files/:id/content',
     // reported as its own status. A NAS that is down must not leave the row
     // claiming a size it does not have.
     const result = await storage.put(cur.nas_path, req.body);
+    // New bytes at this path -> the warm copy is now a lie. Dropped BEFORE the
+    // row is updated, so there is no window in which a reader could take a
+    // freshly-validated stale entry. (lib/filecache.js)
+    fileCache.invalidatePath(cur.nas_path);
 
     const w = intOrNull(pick(req.query, 'w')) || intOrNull(pick(req.query, 'width'));
     const h = intOrNull(pick(req.query, 'h')) || intOrNull(pick(req.query, 'height'));
@@ -407,27 +434,68 @@ router.get('/files/:id/content', asyncH(async (req, res) => {
   if (!cur) throw notFound();
   if (!cur.nas_path) throw notFound('This file row has no nas_path');
 
+  // ── the warm copy ────────────────────────────────────────────────────────
+  // Tom waited ~20 seconds on a 364 KB PDF because every open was a fresh trip
+  // out of Railway, across the tailnet and into the Synology. The second open
+  // of a file this container has already served does not leave the box.
+  //
+  // The cache is asked FIRST and validated against the size this very row
+  // records (lib/filecache.js), so a stale entry cannot outlive the row that
+  // describes it. A miss is a normal event, not an error: it costs exactly the
+  // trip it always cost.
+  const hit = fileCache.open(cur.nas_path, cur.size);
+  if (hit) {
+    sendBytes(req, res, cur, hit.stream, hit.size, 'hit');
+    return;
+  }
+
   // Throws before a byte is written to the socket, so a 404/502 is still a
   // clean JSON error the SPA can show — not a truncated download.
   const { stream, size } = await storage.getStream(cur.nas_path);
 
+  // Tee the NAS bytes into the cache on the way past. `cap` is null whenever
+  // there is nothing sensible to store — cache off, unknown size, or a file too
+  // big to be worth a quarter of the budget — and every branch below tolerates
+  // that, because a cache that changes what gets SERVED is a bug.
+  const cap = fileCache.capture(cur.nas_path, size == null ? cur.size : size);
+  sendBytes(req, res, cur, stream, size, 'miss', cap);
+}));
+
+// One place that writes bytes to a client, so a cache hit and a NAS miss cannot
+// drift into serving different headers for the same file.
+function sendBytes(req, res, cur, stream, size, source, cap) {
   res.setHeader('Content-Type', contentTypeFor(cur.ext));
   if (size != null) res.setHeader('Content-Length', String(size));
   res.setHeader('Content-Disposition', contentDisposition(
     fileName({ name: cur.name, ext: cur.ext }),
     String(pick(req.query, 'inline') || '') === '1'));
-  // These bytes are somebody's contract or client proof. Nothing caches them.
+  // These bytes are somebody's contract or client proof. No BROWSER and no
+  // proxy caches them — which is a different question from whether this server
+  // keeps a copy of its own on disk behind its own auth. It does, deliberately,
+  // and lib/filecache.js is where that is argued.
   res.setHeader('Cache-Control', 'private, no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  // Cheap, honest instrumentation: the header the timing script reads, and the
+  // first thing to look at when somebody says a file opened slowly.
+  res.setHeader('X-Byte-Source', source);
 
   stream.on('error', (e) => {
     // Headers are already out; the only honest signal left is an aborted body.
     console.error(`[files/${cur.id}/content] transfer failed:`, e.message);
+    if (cap) cap.abort();
     res.destroy(e);
   });
-  req.on('aborted', () => { try { stream.destroy(); } catch (_) {} });
+  req.on('aborted', () => { if (cap) cap.abort(); try { stream.destroy(); } catch (_) {} });
+  if (cap) {
+    // A half-received file must never become a cache entry: commit() only
+    // happens on a clean 'end', and it re-checks the byte count before the
+    // rename that makes the entry visible.
+    stream.on('data', (c) => cap.write(c));
+    stream.on('end', () => cap.commit());
+    res.on('close', () => { if (!res.writableFinished) cap.abort(); });
+  }
   stream.pipe(res);
-}));
+}
 
 // RFC 6266 / 5987. `filename` for the ASCII-only clients, `filename*` for the
 // em dashes and accented vendor names that are in half of e360's real file
@@ -459,6 +527,9 @@ router.delete('/files/:id', asyncH(async (req, res) => {
     await c.query('DELETE FROM spec_renders WHERE file_id=$1', [cur.id]);
     await c.query('DELETE FROM files WHERE id=$1', [cur.id]);
   });
+  // The row is gone, so nothing can reach these bytes through the API any more
+  // — but the warm copy would sit there holding budget until eviction noticed.
+  fileCache.invalidatePath(cur.nas_path);
   // NOTE: only the DB metadata row goes. The NAS byte-file is left in place;
   // a housekeeping pass (or an operator) removes it from disk deliberately.
   await logActivity(pool, { projectId: project ? project.id : null, showId: cur.show_id,
@@ -630,7 +701,11 @@ router.post('/shows/:id/spec-bind', requireRole('pm'), asyncH(async (req, res) =
     const file = ins.rows[0];
 
     // 5. the bytes — byte-identical to what the tool's own Save button writes.
+    // buildNasPath() is DERIVED from project/show/kind/name, so re-binding a
+    // spec lands on the SAME path the superseded one occupied. Without this,
+    // a v2 bind would keep serving v1 out of the warm copy.
     await storage.put(nasPath, bytes);
+    fileCache.invalidatePath(nasPath);
 
     // 6/7. the chain upsert, identical to PUT /shows/:id/chain/:node.
     const chainBefore = await chainFor(showId, c);

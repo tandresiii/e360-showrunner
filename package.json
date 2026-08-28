@@ -8,6 +8,7 @@
     "build": "npm install",
     "smoke": "node scripts/smoke.js",
     "storage:test": "node scripts/storage-test.js",
+    "byte:timing": "node scripts/byte-timing.js",
     "flex:test": "node scripts/flex-test.js",
     "flex:probe": "node scripts/flex-probe.js",
     "walk": "node scripts/persona-walk.mjs"

@@ -175,6 +175,7 @@ async function fileReport(req, res, rep, show) {
       let stored = true;
       try {
         await storage.put(nasPath, bytes);
+        require('../lib/filecache').invalidatePath(nasPath);   // same derived path each time
       } catch (e) {
         stored = false;
         mirrorNote = e && e.status === 501

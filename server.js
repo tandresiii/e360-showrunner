@@ -47,6 +47,8 @@ const { seedAll } = require('./lib/seed');
 const { apiRateLimit, purgeExpiredSessions } = require('./lib/auth');
 const { purgeIdempotency, expireStaleProposals } = require('./lib/agent');
 const { STORAGE_ROOT, NAS_ROOT, storage, storageInfo, storageReady } = require('./lib/storage');
+// The read-through byte cache. A CACHE — the argument is in its header.
+const fileCache = require('./lib/filecache');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -191,7 +193,13 @@ app.get('/api/health', async (req, res) => {
                // next deploy destroys. Never inferred from `ready` — a store can
                // be perfectly ready and still be about to lose everything.
                storageEphemeralRisk: !!si.ephemeralRisk,
-               storageError: si.error || null });
+               storageError: si.error || null,
+               // The read-through byte cache. Reported as its OWN object with
+               // `role` spelled out, and deliberately NOT folded into any of
+               // the storage* keys above: a warm cache in front of a dead NAS
+               // is still a dead NAS, and an operator reading this at 2am must
+               // not be able to mistake one for the other.
+               fileCache: fileCache.info() });
   } catch (e) {
     res.status(503).json({ ok: false, error: e.message });
   }
@@ -331,6 +339,12 @@ async function boot() {
   setInterval(housekeeping, 6 * 60 * 60 * 1000).unref();
   await bootSweep();
 
+  // The warm copy. Its directory is created (and swept of the previous
+  // process's orphans) here; if that fails the cache simply stays off and the
+  // app is exactly as fast as it was before it existed. Nothing downstream
+  // treats a disabled cache as an error, because it is not one.
+  fileCache.init();
+
   return new Promise((resolve) => {
     const server = app.listen(PORT, () => {
       console.log(`E360 Showrunner ${APP_VERSION} running on port ${PORT}`);
@@ -345,6 +359,10 @@ async function boot() {
       }
       if (si.error) console.log(`  storage WARN   : ${si.error}`);
       console.log(`  NAS path root  : ${NAS_ROOT}`);
+      const fc = fileCache.info();
+      console.log(`  byte cache     : ${fc.enabled
+        ? `on  ->  ${fc.dir}  (cap ${Math.round(fc.maxBytes / 1048576)} MB, cache-only)`
+        : `off (${fc.reason})`}`);
       console.log(`  CORS origins   : ${ORIGINS.length ? ORIGINS.join(', ') : '(same-origin only)'}`);
       resolve(server);
     });

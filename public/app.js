@@ -89,6 +89,11 @@ async function renderView(view, arg) {
      path that used to be the only one that could strand a blob for the life of
      the tab. It runs before the await below, so a slow view still frees it. */
   if (window.__view === 'viewer' && view !== 'viewer' && typeof vPrevRelease === 'function') vPrevRelease();
+  /* The viewer is the one view sized by the FRAME rather than by its content:
+     `is-viewer` is what lets the stage be `calc(100vh - chrome)` tall instead
+     of tall enough for a sheet. Toggled here, on the scroll container, so no
+     other view inherits a height it did not ask for. */
+  try { s.classList.toggle('is-viewer', view === 'viewer'); } catch (_) {}
   window.__view = view; CUR.view = view;
   document.querySelectorAll('#nav a').forEach(function (a) { a.classList.toggle('on', a.dataset.view === view); });
 
@@ -1059,7 +1064,17 @@ async function dropFile(showId, dropped) {
 async function openViewer(fileId) {
   var f = await api.getFile(fileId);
   if (!f) return;
-  VIEWER = { showId: f.show_id, fileId: f.id };
+  /* keep `max`: it is the person's window preference, not a property of the
+     file they happened to be looking at when they set it */
+  VIEWER = { showId: f.show_id, fileId: f.id, max: !!VIEWER.max };
+  return render('viewer');
+}
+/* Full width: drop the strip and the meta panel, keep everything reachable —
+   the strip's job (paging) is already on the arrows and the keyboard, and the
+   meta panel's facts are in the record below. Re-renders rather than toggling a
+   class by hand so the stage-bar button flips its own icon and title with it. */
+async function vMax() {
+  VIEWER.max = !VIEWER.max;
   return render('viewer');
 }
 async function vSet(fileId) {
@@ -3621,6 +3636,7 @@ var ACTIONS = {
   commitUpload:  function () { return commitUpload(); },
   downloadFile:  function (t, id) { return downloadFile(id); },
   vOpenTab:      function (t, id) { return vOpenTab(id); },
+  vMax:          function () { return vMax(); },
   specGen:       function (t, id, k) { return specGen(id, k); },
   openChainFile: function (t, id, k) { return openChainFile(id, k); },
   printChainFile: function (t, id, k) { return printChainFile(id, k); },

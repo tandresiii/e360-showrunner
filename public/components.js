@@ -98,6 +98,9 @@ function icon(n) {
     img: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="1.6"/><path d="m21 15-5-5L5 21"/>',
     play: '<circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4Z"/>',
     x: '<path d="M18 6 6 18M6 6l12 12"/>',
+    /* the viewer's maximize pair — four corners out, four corners in */
+    expand: '<path d="M9 3H5a2 2 0 0 0-2 2v4M15 3h4a2 2 0 0 1 2 2v4M9 21H5a2 2 0 0 1-2-2v-4M15 21h4a2 2 0 0 0 2-2v-4"/>',
+    collapse: '<path d="M3 9h4a2 2 0 0 0 2-2V3M21 9h-4a2 2 0 0 1-2-2V3M3 15h4a2 2 0 0 1 2 2v4M21 15h-4a2 2 0 0 0-2 2v4"/>',
     bolt: '<path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/>',
     dot: '<circle cx="12" cy="12" r="4"/>',
     chevL: '<path d="m15 18-6-6 6-6"/>',
@@ -529,15 +532,42 @@ function fileDownloadChip(f) {
     ' title="Download ' + esc(f.name) + '">' + icon('download') + 'Download</button>';
 }
 
-/* The three states the stage can be in while the bytes are in flight. They are
+/* The two states the stage can be in while the bytes are in flight. They are
    markup only — drawPreview() owns the transitions, so the loading state is
-   never a lie the renderer told itself. */
+   never a lie the renderer told itself.
+
+   "Grabbing from the E360 Vault" is Tom's phrase and it is deliberately the
+   ONLY place the friendly name appears. A person waiting on a document wants
+   to know something is happening in a voice they recognise. /api/health, the
+   storage probe and every error below stay clinical and precise — an operator
+   reading "the E360 Vault refused the credentials" at 2am learns nothing about
+   which box to go and hit. Delight in the waiting room, not in the diagnosis.
+
+   The bar is real when the server sent a Content-Length (drawPreview streams
+   the response and reports progress) and an indeterminate sweep when it did
+   not. It is never a fake percentage of a number nobody has. */
 function previewLoadingHTML() {
-  return '<div class="vprev-msg"><span class="vprev-spin"></span>' +
-    '<b>Fetching the document</b><span>Streaming the bytes from the NAS through the app…</span></div>';
+  return '<div class="vprev-msg load"><span class="vprev-spin"></span>' +
+    '<b>Grabbing from the E360 Vault…</b>' +
+    '<span class="vprev-note" id="vPrevNote">Opening the document</span>' +
+    '<span class="vprev-bar" id="vPrevBar"><i class="sweep"></i></span>' +
+    '<span class="vprev-sec">' + icon('lock') + 'Encrypted transfer · E360 private network</span></div>';
 }
-/* A failure says the SERVER's sentence. "the NAS is unreachable" is the answer
-   the person needs; a friendlier invention here would hide it. */
+/* ── WHAT THAT SECURITY LINE CLAIMS, AND WHAT IT DOES NOT ──────────────────
+   It says TRANSFER, and only transfer, because that is the part that is true:
+   the browser reaches the app over HTTPS, and the app reaches the Synology
+   across the WireGuard tailnet with TLS on top (Dockerfile / WIRING_DAY §6).
+   The hardware is E360's own — hence "private network".
+
+   The share itself is NOT encrypted at rest. Do not "tidy" this into
+   "encrypted vault", "encrypted storage" or "your files are encrypted": that
+   would be a security claim the deployment cannot back, printed on the one
+   screen a person is most inclined to believe it. If at-rest encryption ever
+   lands on the NAS, change the words then and not before. */
+/* A failure says the SERVER's sentence, verbatim and technical. "the NAS is
+   unreachable" is the answer the person needs; a friendlier invention here
+   would hide it, and this is the one screen where the clinical name earns its
+   keep. */
 function previewFailHTML(msg) {
   return '<div class="vprev-msg fail">' + icon('alert') +
     '<b>The bytes did not come back</b><span>' + esc(String(msg || 'Unknown error')) + '</span>' +

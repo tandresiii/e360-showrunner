@@ -70,6 +70,7 @@ const { num, sameUser } = require('../lib/enums');
 const { logActivity } = require('../lib/activity');
 const { notifyTargets } = require('../lib/mentions');
 const { buildNasPath, thumbPathFor, storage } = require('../lib/storage');
+const fileCache = require('../lib/filecache');   // a CACHE, never storage
 
 const router = express.Router();
 
@@ -593,6 +594,7 @@ router.put('/photos/:id/content',
     }
 
     const result = await storage.put(row.nas_path, req.body);
+    fileCache.invalidatePath(row.nas_path);   // new bytes at this path
     await pool.query('UPDATE files SET size=$1 WHERE id=$2', [req.body.length, id]);
     res.json({ ok: true, size: result.size != null ? result.size : req.body.length });
   })

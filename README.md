@@ -170,7 +170,28 @@ DATABASE_URL="…" npm run smoke    # scripts/smoke.js — the end-to-end suite
 npm run storage:test              # the NAS byte layer — no NAS, no DB needed
 npm run flex:test                 # offline, no key needed
 npm run flex:probe                # needs FLEX_BASE_URL + FLEX_API_KEY
+
+BASE=… USER=… PASS=… FILE_ID=2 npm run byte:timing
+                                  # scripts/byte-timing.js — not a test, an
+                                  # INSTRUMENT. Times opening one real file cold
+                                  # (cache cleared, bytes pulled from the NAS)
+                                  # against warm (served from this container's
+                                  # own disk), TTFB separated from total, and
+                                  # repeats so the numbers are reproducible.
+                                  # Point it at any deployment; the cache clear
+                                  # needs an admin login.
 ```
+
+**The byte cache.** `GET /api/files/:id/content` keeps a local copy of what it
+serves, so the second open of a file does not cross the tailnet again — measured
+at ~260 ms → ~7 ms with a 250 ms relay modelled. It is a **cache and never
+storage**: every entry duplicates bytes that live on the NAS, the directory is
+expected to vanish on each deploy, and a warm cache never makes `storageReady`
+look better than it is. Invalidated explicitly at every site that writes bytes,
+validated against the row's own `size`, and a torn transfer is discarded rather
+than committed. Turn it off with `FILE_CACHE_MAX_BYTES=0`; inspect it at
+`GET /api/admin/byte-cache` or in `/api/health` under `fileCache`. The argument
+in full is in the header of **`lib/filecache.js`**.
 
 `storage:test` stands up its own WebDAV server, its own SOCKS5 proxy and its own
 self-signed certificate in-process, then drives the real `webdav` driver at them
