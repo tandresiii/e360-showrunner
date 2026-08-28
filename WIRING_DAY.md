@@ -581,14 +581,99 @@ this session. Nothing else in the repo depends on those two files.
 
 ## §7 · When it does not work
 
+### Start here: `POST /api/admin/storage-probe`
+
+**Do not read the table below before running the probe.** Every row in it is a
+guess, and on 2026-08-28 four of them looked right and all four were wrong.
+
+Railway gives no shell and no log an operator can read from a laptop, so the
+route's **response body is the instrument**. It walks the chain a layer at a
+time and reports each with its own outcome, milliseconds and error — including
+the layers that pass, because the one that answers in 2 ms is how you recognise
+the one that hangs for 8 s. Nine numbered steps: the proxy port, the SOCKS5
+greeting, CONNECT, TLS (with the real certificate and whether it *would*
+verify), then PROPFIND, MKCOL, PUT, GET, DELETE. It cleans up after itself and
+never prints a credential.
+
+```bash
+# sign in, then:
+curl -sS -X POST https://<host>/api/admin/storage-probe \
+     -H "x-auth-token: $TOKEN" -H 'content-type: application/json' \
+     -d '{"timeoutMs":8000}' | jq '.verdict, .steps'
+
+# when the nine steps are not enough — a port sweep through the tunnel, a
+# reply-size ladder, an MTU ladder via `tailscale ping --size`:
+     -d '{"timeoutMs":4000,"deep":true}'
+```
+
+Read **`verdict`** first: it is ordered by how far down the stack the fault is,
+because the lowest failing layer is the only one worth fixing. Then
+`firstFailure`, then the step itself.
+
+> **`/api/health` cannot answer this question and never could.**
+> `storageReady` and `storageTls` are read out of environment variables; that
+> endpoint has never opened a socket. It said `true` and `"verified"` all day
+> against a NAS that could not be reached at all. `"verified"` was not a
+> handshake result — it was the string printed when no self-signed allowance is
+> configured. It now reads `system-trust`, carries `readyMeans` / `tlsMeans`
+> saying what it is and is not, and reports **`storageLiveness`** — whether the
+> NAS answered the last time the app genuinely talked to it, which is the only
+> free measurement there is.
+
+### The one that cost a day
+
+**Symptom:** every byte operation times out at 30 s with *"The NAS did not
+answer"*, whatever its size. Both machines show **Connected**. `tailscale ping`
+pongs in 50 ms. The NAS, the share and the account are perfect over the LAN.
+
+**What it is not:** not DNS (name and IP hang identically), not the firewall
+(off), not the SOCKS client, not credentials, not permissions, not the
+certificate. The probe cleared all of them in one run: steps 1–3 pass in under
+100 ms and HTTP CONNECT through the same port agrees.
+
+**What it is:** over the **direct UDP path** the NAS could not deliver a reply
+that needed more than one packet. The control that proved it — two TLS
+handshakes to the same port in the same second:
+
+| ClientHello | its answer | result |
+|---|---|---|
+| offering no acceptable cipher | a 7-byte `handshake_failure` alert | **arrived**, 7 bytes, connection closed |
+| valid | a 2–4 KB certificate chain | **never arrived**, 0 bytes in 3,000 ms |
+
+Nothing changed but the size of the answer. Every WebDAV verb sat behind that
+handshake, so the only symptom the app could produce was one 30-second silence.
+
+`tailscale ping` stays green throughout — including at 1400 bytes — because a
+disco ping is generated inside `tailscaled` and never touches the far side's TCP
+stack. That is exactly why *"both machines show Connected"* was true and useless.
+
+**Fix:** `TAILSCALE_FORCE_DERP=1`, set in the `Dockerfile`. Traffic goes over a
+Tailscale relay instead of point to point. With it, all nine steps pass and the
+largest reply that arrives whole goes from 528 bytes to 12,130.
+
+**It is a workaround, not a cure.** The fault is the far side: the NAS runs the
+DSM Tailscale package **1.58.2** on a 4.4 kernel, four years older than the
+client in the container. **Tom's hand:** update that package, then delete the
+`ENV TAILSCALE_FORCE_DERP=1` line and re-run the probe. If all nine still pass,
+the direct path is healed and the relay hop can go. To test without a deploy,
+set `TAILSCALE_FORCE_DERP=0` as a Railway variable — it overrides the Dockerfile.
+
+### The rest
+
 | Symptom | Almost always | Fix |
 |---|---|---|
+| **Everything times out at 30 s regardless of size, but `tailscale ping` is fine** | the direct path cannot carry a multi-packet reply | `TAILSCALE_FORCE_DERP=1` — see above. Confirm with `{"deep":true}`: the `tlsRaw` / `tlsTiny` pair is the proof |
+| Probe step 1 fails, 2–9 skipped | `tailscaled` is down, never started, or bound an address the app is not dialling | the deploy log; `TAILSCALE_AUTHKEY` |
+| Probe step 3 fails and step 3b **passes** | our SOCKS5 client is the fault — HTTP CONNECT reached the NAS through the same port and the same dialer | a bug in `lib/storage.js socksConnect`; the probe's trace names the phase |
+| Probe steps 3 **and** 3b both fail the same way | the fault is below our proxy code — the tailnet data plane to this peer | the tailnet, not the app |
+| Probe step 4 says `driverWouldAccept: false` | the certificate question, measured rather than guessed | R5, or `NAS_WEBDAV_ALLOW_SELF_SIGNED=1` |
+| A variable you set does nothing | you spelled it the short way | `config.ignoredEnvVars` in the probe names it. The self-signed spellings are accepted outright; `config.allowSelfSignedFrom` says which one took effect |
 | Deploy log: `WARNING: tailscale up failed` | the auth key is single-use, expired, or tagged without a matching `tagOwners` entry | T4 (Reusable **ON**) / T5 |
 | No `showrunner` machine in the admin console | `TAILSCALE_AUTHKEY` is not set on the service, or the deploy predates it | R2, then redeploy |
 | Health: `storageReady: false` | one of `NAS_WEBDAV_URL` / `USER` / `PASS` is missing — `storageError` names it | R3, R4 |
 | `502 … the hostname did not resolve` | MagicDNS off, or the name is wrong | T2, T3 |
 | `502 … nothing is listening` | WebDAV Server package stopped, or HTTPS/5006 not enabled | N3, N4 |
-| `502 … no route to the host` / everything hangs | DSM firewall is not allowing 5006 on the Tailscale interface | the note in N4 |
+| `502 … no route to the host` | DSM firewall is not allowing 5006 on the Tailscale interface | the note in N4. **If the firewall is off and it still hangs, it is the row at the top of this table, not this one** |
 | `502 … self-signed certificate` / `does not name this hostname` | the certificate question | R5 |
 | `502 … refused the svc-showrunner credentials (401)` | password wrong, or the account lacks the **WebDAV Server** application permission | N5, R4 |
 | `502 … refused to create … (404)` | the share is not named `showrunner`, or the account has read-only on it | N6 |

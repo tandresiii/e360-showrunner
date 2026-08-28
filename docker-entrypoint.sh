@@ -46,24 +46,21 @@ fail_or_warn() {
 }
 
 # ── THE TWO KNOBS THAT CHANGE HOW PACKETS CROSS ────────────────────────────────
-# Added 2026-08-28, when POST /api/admin/storage-probe proved that this container
-# can open a TCP connection to the NAS, exchange small messages with it in 50ms,
-# and never receive a reply that needs more than one packet. Same port, same
-# second: a TLS handshake whose answer is a 7-byte alert arrives; one whose
-# answer is a certificate chain does not.
-#
-# Neither knob is a fix for that — the fault is on the far side — but each one
-# changes the path the NAS's packets take to get here, and either could route
-# around it. They are FLAGS, not defaults, so the shape of a normal deploy is
-# unchanged and turning one on is a decision somebody made on purpose.
+# TAILSCALE_FORCE_DERP=1 is set in the Dockerfile and IS WHAT MAKES THE NAS
+# REACHABLE — the long version of why is there, and the short version is that
+# over the direct UDP path the NAS could not deliver any reply bigger than one
+# packet, so the TLS handshake never completed and every byte operation timed
+# out at 30 seconds. Do not turn it off without re-running
+# POST /api/admin/storage-probe and watching all nine steps pass.
 #
 #   TAILSCALE_FORCE_DERP=1  all traffic over Tailscale's relays instead of the
-#                           direct UDP path. If the direct path is what mangles
-#                           multi-packet replies, this steps around it — at the
-#                           cost of relay latency on every byte.
+#                           direct UDP path. Costs relay latency on every byte;
+#                           buys a link that works.
 #   TAILSCALE_MTU=<n>       the tunnel MTU, which sets the MSS we advertise and
 #                           therefore how the NAS's TCP stack cuts up what it
-#                           sends us. Tailscale's default is 1280.
+#                           sends us. Tailscale's default is 1280. Unset here —
+#                           it is the second thing to try if the relay path ever
+#                           develops the same symptom.
 #
 # Both are tailscale's own debug knobs, spelled the way tailscale spells them.
 if [ "${TAILSCALE_FORCE_DERP:-0}" = "1" ]; then

@@ -75,18 +75,40 @@ RUN npm ci --omit=dev --no-audit --no-fund \
 COPY . .
 RUN chmod +x /app/docker-entrypoint.sh
 
-# ── EXPERIMENT IN PROGRESS (2026-08-28) ────────────────────────────────────────
-# POST /api/admin/storage-probe proved the NAS cannot deliver a reply to this
-# container that needs more than one packet: same port, same second, a TLS
-# handshake whose answer is a 7-byte alert arrives and one whose answer is a
-# certificate chain does not. The fault is on the far side of the tunnel, but
-# the packets' PATH is something this end can change, and one of these two may
-# route around it. Set here rather than as a Railway variable so the setting is
-# in the repo, reviewable, and reverted by deleting a line.
+# ── WHY THIS CONTAINER RELAYS INSTEAD OF GOING DIRECT (2026-08-28) ─────────────
+# THE ONE LINE THAT MAKES THE NAS REACHABLE. Without it, no byte has ever
+# crossed this tunnel in either direction, and the failure is silent and total.
 #
-# Delete both lines once the answer is known (see WIRING_DAY.md). They are read
-# by docker-entrypoint.sh, and a Railway variable of the same name overrides
-# them, so this is a default and not a lock.
+# What was measured, by POST /api/admin/storage-probe:
+#   · the tunnel was never the problem. tailscaled comes up in 1ms, SOCKS5
+#     CONNECT to the NAS returns success in 92ms, HTTP CONNECT through the same
+#     port agrees, the peer is online, and `tailscale ping` pongs in ~50ms at
+#     every size from 200 to 1400 bytes.
+#   · over the DIRECT UDP path, the NAS could not deliver a reply that needed
+#     more than one packet. The control that proved it: two TLS handshakes to
+#     the same port in the same second, one offering no acceptable cipher (whose
+#     answer is a 7-byte alert — ARRIVED) and one valid (whose answer is a 2-4 KB
+#     certificate chain — NEVER ARRIVED). Nothing changed but the size of the
+#     answer. Every WebDAV verb sat behind that, which is why the only symptom
+#     the app could produce was "the NAS did not answer" at 30 seconds.
+#   · with DERP forced, all nine probe steps pass: PROPFIND 207, MKCOL 201,
+#     PUT 201, GET 200 byte-identical, DELETE 204, and the largest reply that
+#     arrived whole went from 528 bytes to 12,130.
+#
+# `tailscale ping` stays green throughout because a disco ping is generated
+# inside tailscaled and never touches the far side's TCP stack. That is exactly
+# why "both machines show Connected" was true and useless.
+#
+# THE COST: every byte to the NAS goes through a Tailscale relay in Dallas
+# instead of point to point. For this app that is a 364 KB spec every so often,
+# and correct-and-slower beats fast-and-never.
+#
+# THIS IS A WORKAROUND, NOT A CURE. The fault is the far side — the NAS runs the
+# DSM Tailscale package 1.58.2 on a 4.4 kernel, four years older than the client
+# here. The cure is on Tom's hand: update that package, then delete this line
+# and re-run the probe. If all nine steps still pass, the direct path is healed
+# and the relay hop can go. Set TAILSCALE_FORCE_DERP=0 as a Railway variable to
+# test that without a deploy — a variable of the same name overrides this.
 ENV TAILSCALE_FORCE_DERP=1
 
 # Documentation only — Railway injects PORT and the app reads it.

@@ -1185,7 +1185,9 @@ The full runbook is **`WIRING_DAY.md`**.
 | `NAS_WEBDAV_URL` | *(unset)* | e.g. `https://e360-nas.tail1a2b3.ts.net:5006/showrunner`. The path is the **share** name. **Unset with `STORAGE_DRIVER=webdav` is a 501 naming this variable** — never a silent failure |
 | `NAS_WEBDAV_USER` / `NAS_WEBDAV_PASS` | *(unset)* | the `svc-showrunner` service account. Both required; either one missing is a 501 |
 | `NAS_WEBDAV_TIMEOUT_MS` | `30000` | per-request deadline. On expiry: **504**, with "the record is intact; the bytes did not move" |
-| `NAS_WEBDAV_ALLOW_SELF_SIGNED` | *(off)* | `1` disables certificate verification **for this driver only**. Not `NODE_TLS_REJECT_UNAUTHORIZED` — every other TLS client in the process (Flex, Graph, staffing) keeps full verification. Acceptable *because* the transport is already an authenticated WireGuard tunnel; reported as `storageTls: "self-signed-allowed"` so nobody mistakes the deployment for a verified one |
+| `NAS_WEBDAV_ALLOW_SELF_SIGNED` | *(off)* | `1` disables certificate verification **for this driver only**. Not `NODE_TLS_REJECT_UNAUTHORIZED` — every other TLS client in the process (Flex, Graph, staffing) keeps full verification. Acceptable *because* the transport is already an authenticated WireGuard tunnel; reported as `storageTls: "self-signed-allowed"` so nobody mistakes the deployment for a verified one. **`ALLOW_SELF_SIGNED`, `WEBDAV_ALLOW_SELF_SIGNED`, `NAS_ALLOW_SELF_SIGNED` and `NAS_WEBDAV_SELF_SIGNED` are accepted as the same thing** — production had the short one set on 2026-08-28, nothing read it, and health printed `"verified"` as though a certificate had been checked. A variable one prefix away from the one we want, set on the service that wants it, is a typo, and refusing to understand a typo is not rigour. The probe reports which spelling took effect |
+| `TAILSCALE_FORCE_DERP` | **`1` in the Dockerfile** | routes tailnet traffic over Tailscale's relays instead of the direct UDP path. **This is what makes the NAS reachable** — see the symptom table in `WIRING_DAY.md` and the block comment in the `Dockerfile`. Over the direct path the NAS could not deliver any reply larger than one packet, so the TLS handshake never completed and every byte operation timed out at 30s. A workaround for a fault on the NAS's side, not a cure |
+| `TAILSCALE_MTU` | *(unset)* | overrides the tunnel MTU (tailscale's default is 1280), which sets the MSS we advertise and so how the NAS's TCP stack cuts up what it sends back. The second thing to try if the relay path ever develops the same symptom |
 | `NAS_WEBDAV_CA` | *(unset)* | a PEM (literal, `\n`-escaped ok) or a path to one. Pins the NAS certificate with verification **on**; reported as `storageTls: "pinned-ca"` |
 | `TAILSCALE_AUTHKEY` | *(unset)* | **the switch.** Set, `docker-entrypoint.sh` starts `tailscaled --tun=userspace-networking` and the driver routes the NAS host through `localhost:1055`. Unset, no daemon starts and the driver uses ordinary sockets — the whole feature is inert |
 | `TAILSCALE_SOCKS` | *(implied)* | `host:port` or `socks5://user:pass@host:port`. Overrides the `localhost:1055` implied by `TAILSCALE_AUTHKEY` |
@@ -1206,6 +1208,55 @@ deployment decision, and naming the missing variable is the whole message.
 was lost, the record is intact, the bytes can be re-sent. Byte failures never
 roll back a committed DB write (`routes/proposals.js` has moved bytes *after*
 the transaction since punch 46, for the same reason).
+
+#### `POST /api/admin/storage-probe` — the instrument *(admin)*
+
+`/api/health` answers a **configuration** question: is a driver selected, and do
+its variables parse? It has never opened a socket, and on 2026-08-28 it printed
+`storageReady: true` and `storageTls: "verified"` all day at a NAS that could
+not be reached at all. `"verified"` was never a handshake result — it is the
+string the code printed when no self-signed allowance was set. That false
+comfort is most of why the fault took a day to find.
+
+So `ready` and `tls` now carry **`readyMeans`** and **`tlsMeans`** saying in the
+payload what they are and are not, `tls` reads `system-trust` rather than
+`verified`, and health gained the one measurement that is free:
+**`storageLastContact`** / **`storageLiveness`** — whether the NAS answered the
+last time the driver genuinely talked to it, recorded on traffic the app was
+already sending. Before any traffic it says *"never contacted since this process
+started"* instead of implying health.
+
+The deliberate measurement is this route. A Railway container has no log an
+operator can read from a laptop, so **the response body is the instrument**:
+nine numbered steps, each with outcome, milliseconds and error, *including the
+ones that pass* — the layer that answers in 2 ms is how you recognise the layer
+that hangs for 8 s.
+
+| # | id | what only this step can prove |
+|---|---|---|
+| 1 | `socks-port` | `tailscaled` is up and accepting on its proxy port |
+| 2 | `socks-greeting` | it speaks SOCKS5, and on which auth method |
+| 3 | `socks-connect` | CONNECT to the NAS succeeds, and how fast |
+| 3b | `http-connect` | *cross-check.* `tailscaled` serves SOCKS5 **and** HTTP CONNECT on one port, so tunnelling the same bytes both ways separates "our hand-rolled SOCKS5 client is wrong" from "the data plane is dead". Evidence, never a gate — it does not affect `ok` |
+| 4 | `tls` | the real certificate: subject, issuer, SAN, fingerprint, and **`wouldVerify`** — computed from `socket.authorized`, so the answer is honest whichever way the config is set |
+| 5 | `propfind` | WebDAV is alive and the credentials are accepted |
+| 6 | `mkcol` | the account can **write** to the share |
+| 7–9 | `put` `get` `delete` | 16 bytes up, back **byte-compared**, and removed |
+
+Body (all optional): `{ timeoutMs: 8000, write: true, deep: false, ports: [] }`.
+`timeoutMs` budgets **each** step, so nine hung layers still answer inside one
+HTTP request. `write:false` stops after PROPFIND. `deep:true` adds the
+follow-ups for what the nine cannot answer alone — a port sweep through the
+tunnel, a plaintext/TLS byte-flow ladder that measures whether a reply arrives
+**and whether that depends on its size**, an MTU ladder via `tailscale ping
+--size`, and the peer's rx/tx counters. It cleans up after itself and says
+whether that succeeded; it never emits a credential (user and password are
+booleans). It answers **200 whatever the verdict** — a probe that reports "step
+4 hung" has succeeded at its job, and a non-2xx would make curl hide the body
+that is the entire point.
+
+It also names environment variables **nothing reads**, because a typo nobody
+complains about is what cost the day.
 | `ADMIN_PASSWORD` | `e360admin` | the first-boot admin password |
 | `SEED_ROSTER` | *(off)* | `1` seeds the prototype's 9-person demo roster |
 | `SEED_ROSTER_PASSWORD` | `e360demo` | |
