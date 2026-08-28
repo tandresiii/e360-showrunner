@@ -171,6 +171,22 @@ app.get('/api/health', async (req, res) => {
                storage: storage.name, nasRoot: NAS_ROOT,
                storageReady: si.ready, storageTarget: si.target,
                storageVia: si.via, storageTls: si.tls || null,
+               // ── SAYING WHAT THESE TWO ARE ─────────────────────────────
+               // storageReady and storageTls are CONFIGURATION, read out of
+               // env vars, and this endpoint has never opened a socket to the
+               // NAS. On 2026-08-28 they read `true` and `verified` all day
+               // against a NAS that could not be reached at all, and that
+               // false comfort is most of why the fault took a day to find.
+               // A health check must not go dial a 30s-timeout NAS on every
+               // poll, so it says what it knows, says what it does not, and
+               // names the endpoint that actually measures.
+               storageReadyMeans: si.readyMeans || null,
+               storageTlsMeans: si.tlsMeans || null,
+               // The one piece of real evidence that is free: whether the NAS
+               // answered the last time this process genuinely talked to it.
+               storageLastContact: si.lastContact || null,
+               storageLiveness: si.liveness || null,
+               storageProbeEndpoint: 'POST /api/admin/storage-probe (admin) — walks the tunnel, TLS and all six WebDAV verbs and reports each with timings',
                // TRUE means bytes are landing on a disk this deploy owns and the
                // next deploy destroys. Never inferred from `ready` — a store can
                // be perfectly ready and still be about to lose everything.

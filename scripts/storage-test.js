@@ -626,7 +626,15 @@ async function call(method, p, { token, body, raw, headers = {} } = {}) {
   ok('...with a message that names the two env vars that fix it',
      /NAS_WEBDAV_CA/.test(certFail.message) && /ALLOW_SELF_SIGNED/.test(certFail.message),
      certFail.message);
-  ok('...and the default driver reports tls: verified', strict.info().tls === 'verified', strict.info());
+  // This assertion used to read `tls === 'verified'`, and that one word cost a
+  // day on 2026-08-28: /api/health printed it beside a NAS the container could
+  // not reach, and it reads as "a certificate was checked and passed" when it
+  // only ever meant "no allowance is configured". The label now names the
+  // POLICY. The RESULT comes from the probe (section 11b) and nowhere else.
+  ok('...and the default driver reports the tls POLICY, never a verdict it did not reach',
+     strict.info().tls === 'system-trust' && strict.info().tls !== 'verified', strict.info());
+  ok('...and the payload itself says the label is not a handshake result',
+     /No certificate has been inspected/i.test(strict.info().tlsMeans || ''), strict.info().tlsMeans);
 
   const lax = makeWebdavDriver({ ...tlsEnv, NAS_WEBDAV_ALLOW_SELF_SIGNED: '1' });
   ok('NAS_WEBDAV_ALLOW_SELF_SIGNED=1 gets the PDF over TLS with its SHA intact',
@@ -742,6 +750,184 @@ async function call(method, p, { token, body, raw, headers = {} } = {}) {
      /Tailscale SOCKS proxy at 127\.0\.0\.1:9/.test(noTailscaled.message), noTailscaled.message);
   await close(socks.server);
   await close(socksAuth.server);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // THE PROBE. This is the section that exists because of 2026-08-28: a NAS
+  // that was perfect on the LAN, a production container that could not move a
+  // byte, and an app whose entire diagnostic vocabulary was one sentence. The
+  // probe's job is to make the LAYER identifiable, so what is asserted here is
+  // not "storage works" — it is "when storage is broken IN THIS PARTICULAR
+  // WAY, the report names that way and no other".
+  // ══════════════════════════════════════════════════════════════════════════
+  section('11b. the storage probe — every layer named, including the liars');
+  const { storageProbe } = require('../lib/storage');
+  const pSocks = makeSocksServer();
+  const pSocksPort = await listen(pSocks.server);
+  const pDav = makeDavServer({ root: davRoot, base: '/showrunner', user: USER, pass: PASS, tls: true });
+  const pDavPort = await listen(pDav.server);
+  const probeEnv = (over = {}) => ({
+    STORAGE_DRIVER: 'webdav',
+    NAS_WEBDAV_URL: `https://localhost:${pDavPort}/showrunner`,
+    NAS_WEBDAV_USER: USER, NAS_WEBDAV_PASS: PASS,
+    TAILSCALE_SOCKS: `127.0.0.1:${pSocksPort}`,
+    ...over
+  });
+  const stepOf = (r, id) => r.steps.find((s) => s.id === id) || {};
+
+  // ── the fault that actually happened ──────────────────────────────────────
+  const pMisspelled = await storageProbe({ timeoutMs: 4000, write: false },
+    probeEnv({ ALLOW_SELF_SIGNED: '1' }));
+  ok('an env var nobody reads (ALLOW_SELF_SIGNED) is reported as IGNORED, by name',
+     pMisspelled.config.ignoredEnvVars.some(
+       (v) => v.set === 'ALLOW_SELF_SIGNED' && v.meant === 'NAS_WEBDAV_ALLOW_SELF_SIGNED'),
+     pMisspelled.config.ignoredEnvVars);
+  ok('...and the verdict says it out loud rather than burying it in a field',
+     pMisspelled.verdict.some((v) => /IGNORED ENV/.test(v) && /ALLOW_SELF_SIGNED/.test(v)),
+     pMisspelled.verdict);
+  ok('...and the same var spelled RIGHT is not reported as ignored',
+     storageProbe.length >= 0 &&
+     (await storageProbe({ timeoutMs: 4000, write: false },
+       probeEnv({ NAS_WEBDAV_ALLOW_SELF_SIGNED: '1', ALLOW_SELF_SIGNED: '1' })
+     )).config.ignoredEnvVars.length === 0);
+
+  // ── the certificate, measured instead of labelled ─────────────────────────
+  const pStrict = await storageProbe({ timeoutMs: 4000, write: false }, probeEnv());
+  ok('step 4 completes a TLS handshake and reads the real certificate',
+     stepOf(pStrict, 'tls').ok === true && /CN=localhost/.test(stepOf(pStrict, 'tls').detail.subject || ''),
+     stepOf(pStrict, 'tls'));
+  ok('...and reports wouldVerify:false for a self-signed cert, whatever the config says',
+     stepOf(pStrict, 'tls').detail.wouldVerify === false &&
+     stepOf(pStrict, 'tls').detail.selfSigned === true, stepOf(pStrict, 'tls').detail);
+  ok('...and says the DRIVER will refuse it, because the allowance is not set',
+     stepOf(pStrict, 'tls').detail.driverWouldAccept === false);
+  ok('...so the verdict blames the certificate and nothing else',
+     pStrict.verdict.some((v) => /THE CERTIFICATE IS THE FAULT/.test(v)), pStrict.verdict);
+  ok('...and PROPFIND then really fails, with the cert error and not a mystery timeout',
+     stepOf(pStrict, 'propfind').ok === false &&
+     /SELF_SIGNED|self.signed|UNABLE_TO_VERIFY/i.test(stepOf(pStrict, 'propfind').error || ''),
+     stepOf(pStrict, 'propfind').error);
+  ok('health\'s old label is quoted next to the measurement that contradicts it',
+     pStrict.config.healthTlsLabel === 'system-trust' && pStrict.config.healthTlsLabelIsAProbe === false);
+
+  // ── the whole chain, green ────────────────────────────────────────────────
+  const pGood = await storageProbe({ timeoutMs: 6000 },
+    probeEnv({ NAS_WEBDAV_ALLOW_SELF_SIGNED: '1' }));
+  ok('with the allowance set, all nine steps pass and ok is true',
+     pGood.ok === true && ['socks-port', 'socks-greeting', 'socks-connect', 'tls',
+       'propfind', 'mkcol', 'put', 'get', 'delete'].every((id) => stepOf(pGood, id).ok === true),
+     pGood.steps.map((s) => `${s.n} ${s.id}=${s.ok}`).join(' '));
+  ok('...the nine steps keep their numbers, and the cross-check is 3b, not 4',
+     stepOf(pGood, 'socks-connect').n === 3 && stepOf(pGood, 'http-connect').n === '3b' &&
+     stepOf(pGood, 'tls').n === 4 && stepOf(pGood, 'delete').n === 9);
+  ok('...every passing step carries a millisecond figure, because the fast ones ' +
+     'are what make the slow one legible',
+     ['socks-port', 'socks-connect', 'tls', 'propfind', 'put', 'get', 'delete']
+       .every((id) => Number.isFinite(stepOf(pGood, id).ms)),
+     pGood.steps.map((s) => `${s.id}=${s.ms}`).join(' '));
+  ok('...GET is byte-compared against what PUT sent, not merely counted',
+     /byte-identical/.test(stepOf(pGood, 'get').detail || ''), stepOf(pGood, 'get').detail);
+  ok('...the SOCKS proxy really carried it (the driver\'s own path, not a shortcut)',
+     pGood.transport.used === 'socks5' && pSocks.state.connections > 0);
+  ok('...and the verdict is a plain sentence a tired operator can act on',
+     pGood.verdict.some((v) => /genuinely live/.test(v)), pGood.verdict);
+  ok('the probe leaves NO litter on the share', !fs.existsSync(path.join(davRoot, '_showrunner-probe')),
+     fs.readdirSync(davRoot));
+  ok('...and says so in the response instead of leaving the operator to check',
+     /deleted/.test(String(pGood.cleanup.runDir)), pGood.cleanup);
+  ok('the probe response NEVER contains the share password',
+     !JSON.stringify(pGood).includes(PASS));
+
+  // ── a pinned CA verifies for real ─────────────────────────────────────────
+  const pPinned = await storageProbe({ timeoutMs: 6000 },
+    probeEnv({ NAS_WEBDAV_CA: TEST_CERT.toString() }));
+  ok('a pinned CA makes wouldVerify TRUE — the probe is measuring, not echoing',
+     stepOf(pPinned, 'tls').detail.wouldVerify === true &&
+     stepOf(pPinned, 'tls').detail.driverWouldAccept === true, stepOf(pPinned, 'tls').detail);
+  ok('...and the nine steps go green through a genuinely verified connection',
+     pPinned.ok === true, pPinned.firstFailure);
+
+  // ── each layer breaks alone, and is named alone ───────────────────────────
+  const pNoDaemon = await storageProbe({ timeoutMs: 2000 },
+    probeEnv({ TAILSCALE_SOCKS: '127.0.0.1:9', NAS_WEBDAV_ALLOW_SELF_SIGNED: '1' }));
+  ok('tailscaled down: step 1 fails and steps 2-9 are SKIPPED, not failed',
+     stepOf(pNoDaemon, 'socks-port').ok === false &&
+     stepOf(pNoDaemon, 'socks-greeting').ok === null && stepOf(pNoDaemon, 'put').ok === null,
+     pNoDaemon.steps.map((s) => `${s.id}=${s.ok}`).join(' '));
+  ok('...and the verdict names the daemon, not the NAS',
+     pNoDaemon.verdict.some((v) => /tailscaled is not accepting/.test(v)), pNoDaemon.verdict);
+  ok('...and firstFailure points at step 1',
+     pNoDaemon.firstFailure && pNoDaemon.firstFailure.n === 1, pNoDaemon.firstFailure);
+
+  pDav.state.rejectAuth = true;
+  const pBadCreds = await storageProbe({ timeoutMs: 4000 },
+    probeEnv({ NAS_WEBDAV_ALLOW_SELF_SIGNED: '1' }));
+  pDav.state.rejectAuth = false;
+  ok('bad credentials: the tunnel and TLS still pass, and PROPFIND is the one that fails',
+     stepOf(pBadCreds, 'socks-connect').ok === true && stepOf(pBadCreds, 'tls').ok === true &&
+     stepOf(pBadCreds, 'propfind').ok === false && /401/.test(stepOf(pBadCreds, 'propfind').detail || ''),
+     stepOf(pBadCreds, 'propfind'));
+  ok('...and the error says CREDENTIALS, which is the one thing a 401 means',
+     /credentials/i.test(stepOf(pBadCreds, 'propfind').error || ''), stepOf(pBadCreds, 'propfind').error);
+
+  pDav.state.failMkcol = true;
+  const pNoWrite = await storageProbe({ timeoutMs: 4000 },
+    probeEnv({ NAS_WEBDAV_ALLOW_SELF_SIGNED: '1' }));
+  pDav.state.failMkcol = false;
+  ok('read-yes/write-no: PROPFIND passes, MKCOL fails, and the verdict says permissions',
+     stepOf(pNoWrite, 'propfind').ok === true && stepOf(pNoWrite, 'mkcol').ok === false &&
+     pNoWrite.verdict.some((v) => /write permission/.test(v)), pNoWrite.verdict);
+
+  const pReadOnly = await storageProbe({ timeoutMs: 4000, write: false },
+    probeEnv({ NAS_WEBDAV_ALLOW_SELF_SIGNED: '1' }));
+  ok('write:false stops after PROPFIND and touches nothing',
+     stepOf(pReadOnly, 'propfind').ok === true &&
+     [ 'mkcol', 'put', 'get', 'delete' ].every((id) => stepOf(pReadOnly, id).ok === null &&
+       /read-only/.test(stepOf(pReadOnly, id).detail || '')),
+     pReadOnly.steps.map((s) => `${s.id}=${s.ok}`).join(' '));
+
+  // The cross-check that assigns blame. Our test proxy speaks SOCKS5 and
+  // nothing else, so HTTP CONNECT must fail HERE and must not derail anything.
+  ok('the HTTP CONNECT cross-check fails against a SOCKS-only proxy...',
+     stepOf(pGood, 'http-connect').ok === false, stepOf(pGood, 'http-connect'));
+  ok('...without stopping the walk, because it is evidence and not a gate',
+     stepOf(pGood, 'delete').ok === true && pGood.ok === true);
+  ok('a stalled NAS is reported as a per-step timeout with the budget named, ' +
+     'not as a 30-second silence',
+     await (async () => {
+       pDav.state.stallMs = 4000;
+       const r = await storageProbe({ timeoutMs: 1200 }, probeEnv({ NAS_WEBDAV_ALLOW_SELF_SIGNED: '1' }));
+       pDav.state.stallMs = 0;
+       return stepOf(r, 'propfind').ok === false && /1200ms/.test(stepOf(r, 'propfind').error || '');
+     })());
+
+  await close(pSocks.server);
+  await close(pDav.server);
+
+  // ── and the honesty fix the probe exists to enforce ───────────────────────
+  const honest = makeWebdavDriver({
+    NAS_WEBDAV_URL: `http://127.0.0.1:${davPort}/showrunner`,
+    NAS_WEBDAV_USER: USER, NAS_WEBDAV_PASS: PASS
+  });
+  ok('info().tls no longer says "verified" for a connection nobody made',
+     honest.info().tls !== 'verified', honest.info().tls);
+  ok('info().ready is labelled as CONFIGURATION, in the payload, next to itself',
+     /NOT a connection test/i.test(honest.info().readyMeans || ''), honest.info().readyMeans);
+  ok('before any traffic, liveness says "never contacted" instead of implying health',
+     honest.info().lastContact === null && /never contacted/.test(honest.info().liveness || ''),
+     honest.info().liveness);
+  await honest.exists(P('P1-x', 'S1-x', 'spec', 'nope.pdf'));
+  ok('...and after one real request it reports a MEASURED contact with a timestamp',
+     honest.info().lastContact && honest.info().lastContact.ok === true &&
+     /the NAS answered/.test(honest.info().liveness || ''), honest.info().lastContact);
+  const deadNas = makeWebdavDriver({
+    NAS_WEBDAV_URL: 'http://127.0.0.1:9/showrunner',
+    NAS_WEBDAV_USER: USER, NAS_WEBDAV_PASS: PASS, NAS_WEBDAV_TIMEOUT_MS: '2000'
+  });
+  await throws(() => deadNas.exists(P('P1-x', 'S1-x', 'spec', 'nope.pdf')));
+  ok('a NAS that did NOT answer is recorded as such — health can no longer print ready:true ' +
+     'over a dead link without the contradiction being visible',
+     deadNas.info().lastContact && deadNas.info().lastContact.ok === false &&
+     /did NOT answer/.test(deadNas.info().liveness || ''), deadNas.info().lastContact);
 
   // ══════════════════════════════════════════════════════════════════════════
   section('12. the local driver still honours the same contract');

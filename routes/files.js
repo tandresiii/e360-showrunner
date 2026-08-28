@@ -23,7 +23,7 @@ const { asyncH, badRequest, forbidden, notFound, conflict, idParam, limitOf } = 
 const { logActivity, diffFields, changeSummary } = require('../lib/activity');
 const { announceShowChange } = require('../lib/audience');
 const { notifyTargets } = require('../lib/mentions');
-const { storage, buildNasPath, MAX_BYTES, contentTypeFor, fileName } = require('../lib/storage');
+const { storage, buildNasPath, MAX_BYTES, contentTypeFor, fileName, storageProbe } = require('../lib/storage');
 const {
   pick, has, dbToFile, dbToBooking, dbToProof, dbToProofRound, dbToChainNode,
   dbToFlexState, dbToExpense
@@ -78,6 +78,49 @@ async function chainFor(showId, q = pool) {
   }
   return out;
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// ADMIN: THE STORAGE PROBE — the permanent instrument
+// ────────────────────────────────────────────────────────────────────────────
+// POST /api/admin/storage-probe
+//
+// WHY THIS IS A ROUTE AND NOT A SCRIPT. Railway gives us no shell and no log an
+// operator can read from a laptop, so on 2026-08-28 a NAS that answered every
+// LAN request perfectly was unreachable from production and the ONLY signal the
+// app could produce was one line — "The NAS did not answer" — for nine
+// different faults. /api/health made it worse by printing storageReady:true and
+// storageTls:"verified", both of which were labels derived from environment
+// variables and neither of which had ever opened a socket.
+//
+// The response body IS the instrument. Every step reports outcome + ms + error,
+// including the ones that pass, because the layer that answers in 2ms is how
+// you know the layer that hangs for 8s is the fault. It ships permanently for
+// the same reason a rack has a patch-bay meter: the next time bytes stop
+// moving, nobody should have to build this again.
+//
+// ADMIN-ONLY, and it has to be: the response names the NAS host, the share
+// path, certificate fingerprints and tailnet peers. It never carries a
+// credential — user/pass are reported as booleans and the probe's own Basic
+// header is built and discarded inside lib/storage.js.
+//
+// Body (all optional): { timeoutMs: 8000, write: true }
+//   · timeoutMs budgets EACH step, so nine hung layers still answer inside one
+//     HTTP request. Range 1000-60000.
+//   · write:false stops after PROPFIND — a read-only first run against a live
+//     share, for when you do not yet trust what this thing will do.
+// It cleans up after itself: the probe collection is deleted on the way out and
+// the response says whether that succeeded.
+router.post('/admin/storage-probe', requireRole('admin'), asyncH(async (req, res) => {
+  const b = req.body || {};
+  const out = await storageProbe({
+    timeoutMs: pick(b, 'timeoutMs') || pick(b, 'timeout_ms'),
+    write: pick(b, 'write') !== false
+  });
+  // 200 whatever the verdict: a probe that reports "step 3 hung" has SUCCEEDED
+  // at its job, and a non-2xx would make curl and the SPA hide the body that is
+  // the entire point of the call.
+  res.json(out);
+}));
 
 // ════════════════════════════════════════════════════════════════════════════
 // FILES
