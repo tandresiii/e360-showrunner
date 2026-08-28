@@ -2240,11 +2240,82 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('16: an unconfigured server offers NO deep link rather than a broken one',
      gearNoCfg.status === 200 && gearNoCfg.body.deepLink === '', gearNoCfg.body);
 
+  // the READ routes answer the same OPS answer, and answer it FIRST
+  for (const p of ['gear-lists', 'pull-sheet']) {
+    const r = await GET(`/api/shows/${FX}/flex/${p}`, { token: A });
+    ok(`16 READ: /${p} with FLEX_* unset is 501 naming both variables`,
+       r.status === 501 && /FLEX_BASE_URL/.test(r.body.error) && /FLEX_API_KEY/.test(r.body.error),
+       r.body);
+    const rv = await GET(`/api/shows/${FX}/flex/${p}`, { token: legacyLogin.body.token });
+    ok(`16 READ GATE: a VIEWER is refused /${p} before the configuration question`,
+       rv.status === 403, rv.body);
+  }
+
   // ── phase 2: configured against an unroutable host, fetch stubbed ─────────
   const FLEX_STUB_BASE = 'https://flex-stub.invalid';
   process.env.FLEX_BASE_URL = FLEX_STUB_BASE;
   process.env.FLEX_API_KEY = 'smoke-stub-key';
   flexLib.flexResetUserCache();
+
+  // ── fixtures for the READ path (§7b) ──────────────────────────────────────
+  // Shaped after the LIVE Track Town read of 2026-08-28: a folder holding a
+  // pull sheet, that pull sheet holding its own prep manifest, and one node
+  // that is NOT an equipment list (the picker must drop it). List B's row-data
+  // is deliberately empty — that is BUG 5's ambiguous 200-with-[].
+  const STUB_LIST_A = '11111111-1111-4111-8111-111111111111';
+  const STUB_LIST_B = '22222222-2222-4222-8222-222222222222';
+  const STUB_OUTSIDER = '44444444-4444-4444-8444-444444444444';
+  const STUB_PREP_USER = '55555555-5555-4555-8555-555555555555';
+  const STUB_TREE = {
+    nodeId: 'stub-element-0001', name: 'Smoke Event Folder', parentId: 'root',
+    leaf: false, domainId: 'simple-project-element',
+    children: [
+      { nodeId: STUB_LIST_A, name: 'Smoke Pull Sheet', documentNumber: 'SM_01',
+        parentId: 'stub-element-0001', leaf: false, domainId: 'equipment-list',
+        children: [
+          { nodeId: STUB_LIST_B, name: 'Smoke Prep Manifest', documentNumber: 'SM_02',
+            parentId: STUB_LIST_A, leaf: true, domainId: 'equipment-list', children: null }
+        ] },
+      { nodeId: 'quote-0001', name: 'A Quote', documentNumber: 'Q1',
+        parentId: 'stub-element-0001', leaf: true, domainId: 'quote', children: null }
+    ]
+  };
+  const STUB_TREE_EMPTY = {
+    nodeId: 'empty-folder', name: 'Wrigley Field Folder', parentId: 'root',
+    leaf: true, domainId: 'simple-project-element', children: null
+  };
+  const STUB_HEADER_A = {
+    id: STUB_LIST_A, name: 'Smoke Pull Sheet', documentNumber: 'SM_01',
+    definitionId: 'a220432c-af33-11df-b8d5-00e08175e43e', domainId: 'equipment-list',
+    locked: false, open: true, weight: 0,
+    plannedStartDate: '2026-11-09T18:00:00', plannedEndDate: '2026-11-22T18:00:00',
+    loadInDate: '2026-11-12T18:00:00', loadOutDate: '2026-11-15T18:00:00',
+    prepCompleted: true, prepCompletedUserId: STUB_PREP_USER,
+    prepCompletedTimestamp: '2026-11-11T14:32:00', prepManifestId: STUB_LIST_B,
+    deprepCompleted: false, shipCompleted: false, returnCompleted: false,
+    receiveCompleted: false, subrentalReturnCompleted: false
+  };
+  const STUB_HEADER_B = { ...STUB_HEADER_A, id: STUB_LIST_B, name: 'Smoke Prep Manifest',
+    documentNumber: 'SM_02', definitionId: '9945d54c-af32-11df-b8d5-00e08175e43e',
+    prepCompleted: false, prepCompletedUserId: null, prepCompletedTimestamp: null };
+  const STUB_ROWS = [
+    { id: 'g-led', name: 'LED Cabinets', group: true, leaf: false, resourceId: null,
+      quantity: 0, isNote: false, children: [
+        { id: 'i-cab', name: '3.9 blackface - 500mm x 500mm', group: false, leaf: true,
+          resourceId: 'res-cab', quantity: 48, barcode: '00009', serial: null, isNote: false },
+        // a CONTAINED item: real gear that also holds something (the live shape)
+        { id: 'i-spool', name: 'Mediacom 300m fiber spool', group: false, leaf: false,
+          container: true, resourceId: 'res-spool', quantity: 1, barcode: '00068',
+          serial: null, isNote: false, children: [
+            { id: 'i-bo', name: 'Media Com Breakout', group: false, leaf: true,
+              resourceId: 'res-bo', quantity: 2, barcode: '00059', isNote: false }
+          ] }
+      ] },
+    // BUG 6 on the wire: quantity null, serial in the name
+    { id: 'i-loose', name: '2024 P10 Perimeter (6858)', group: false, leaf: true,
+      resourceId: 'res-p10', quantity: null, serial: '6858', isNote: false },
+    { id: 'i-note', name: 'REMEMBER THE SPARES', isNote: true, quantity: null }
+  ];
 
   const flexCalls = [];
   let contactCreateFails = false;
@@ -2278,6 +2349,16 @@ const DEL = (p, o) => call('DELETE', p, o);
     if (/\/api\/element$/.test(u) && opts.method === 'POST') {
       return json({ elementId: 'stub-element-0001', elementNumber: null,
                     elementName: JSON.parse(opts.body).name, definitionName: 'Event Folder' });
+    }
+    // ── the READ path's stubs (2026-08-28) ──────────────────────────────────
+    if (/\/api\/element\/stub-element-0001\/tree$/.test(u)) return json(STUB_TREE);
+    if (/\/api\/element\/[^/]+\/tree$/.test(u)) return json(STUB_TREE_EMPTY);
+    if (new RegExp(`/api/equipment-list/${STUB_LIST_A}$`).test(u)) return json(STUB_HEADER_A);
+    if (new RegExp(`/api/equipment-list/${STUB_LIST_B}$`).test(u)) return json(STUB_HEADER_B);
+    if (new RegExp(`/api/line-item/${STUB_LIST_A}/row-data/`).test(u)) return json(STUB_ROWS);
+    if (new RegExp(`/api/line-item/${STUB_LIST_B}/row-data/`).test(u)) return json([]);
+    if (/\/api\/user-profile\/[0-9a-f-]{36}$/.test(u)) {
+      return json({ id: u.split('/').pop(), name: 'Brendon Ochs', userName: 'bochs' });
     }
     return json({ exceptionMessage: 'no stub for ' + u }, 404);
   };
@@ -2407,6 +2488,179 @@ const DEL = (p, o) => call('DELETE', p, o);
      fxPost3.body.plannedStartDate === '2026-11-11T18:00:00Z'
      && !('loadInDate' in fxPost3.body) && !('loadOutDate' in fxPost3.body),
      fxPost3.body);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 16b. THE READ PATH — gear-lists + pull-sheet. Still stubbed, still no Flex.
+  // ──────────────────────────────────────────────────────────────────────────
+  // The contract these assertions defend is "read-only, and honest about it":
+  // every call a read makes is a GET, no row in the database moves, and the
+  // three states a folder can be in (no link / no lists / a real sheet) are
+  // three different answers rather than three empty tables.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('16b. Flex — the READ path (gear-lists + pull-sheet, stubbed)');
+
+  // FX is still linked to stub-element-0001 at this point; FX2 and FX3 too.
+  flexCalls.length = 0;
+  const glGhost = await GET('/api/shows/99999999/flex/gear-lists', { token: A });
+  ok('16b: an unknown show is a 404 and nothing was read from Flex',
+     glGhost.status === 404 && flexCalls.length === 0, glGhost.body);
+
+  // a show with NO link at all — the 409-equivalent, in the words a PM needs
+  const fxShow5 = await POST('/api/shows', {
+    project_id: P, name: TAG + ' unlinked', venue: 'Nowhere', event_date: '2026-11-14'
+  }, { token: A });
+  const FX5 = fxShow5.body.id;
+  flexCalls.length = 0;
+  const glUnlinked = await GET(`/api/shows/${FX5}/flex/gear-lists`, { token: A });
+  ok('16b: an UNLINKED show is a 409 that says "not linked to a real Flex folder"',
+     glUnlinked.status === 409 && /not linked to a real Flex folder/i.test(glUnlinked.body.error),
+     glUnlinked.body);
+  ok('16b: ...and it cost ZERO Flex calls', flexCalls.length === 0, flexCalls);
+  const psUnlinked = await GET(`/api/shows/${FX5}/flex/pull-sheet`, { token: A });
+  ok('16b: the pull-sheet route gives the same 409 for the same reason',
+     psUnlinked.status === 409 && /not linked to a real Flex folder/i.test(psUnlinked.body.error),
+     psUnlinked.body);
+
+  // a FABRICATED link is "not linked", not "linked to something broken"
+  const fxShow6 = await POST('/api/shows', {
+    project_id: P, name: TAG + ' fabricated read', venue: 'Nowhere', event_date: '2026-11-14'
+  }, { token: A });
+  const FX6 = fxShow6.body.id;
+  await PUT(`/api/shows/${FX6}/gear`,
+    { linked: true, element_id: '9f8e7d6c-b1cc-4e90-83ce-bbd69eb3e4fa' }, { token: A });
+  flexCalls.length = 0;
+  const glFab = await GET(`/api/shows/${FX6}/flex/gear-lists`, { token: A });
+  ok('16b: a fabricated element id is a 409 naming the prototype, not a failed read',
+     glFab.status === 409 && /not linked to a real Flex folder/i.test(glFab.body.error)
+     && /prototype/i.test(glFab.body.error) && flexCalls.length === 0, glFab.body);
+
+  // ── the picker: one tree call, the non-list node dropped ──────────────────
+  flexCalls.length = 0;
+  const gl = await GET(`/api/shows/${FX}/flex/gear-lists`, { token: A });
+  ok('16b: the owning admin gets the folder’s equipment lists', gl.status === 200, gl.body);
+  ok('16b: EXACTLY ONE Flex call — the tree. No /identity storm for a picker.',
+     flexCalls.length === 1 && /\/tree$/.test(flexCalls[0].url),
+     flexCalls.map((c) => c.method + ' ' + c.url));
+  ok('16b: both equipment lists come back and the QUOTE node does not',
+     gl.body.count === 2 && gl.body.lists.map((l) => l.docNumber).join(',') === 'SM_01,SM_02'
+     && !gl.body.lists.some((l) => l.domainId !== 'equipment-list'),
+     gl.body.lists.map((l) => [l.docNumber, l.domainId]));
+  ok('16b: each list carries the /view/equipmentlist/header deep link',
+     gl.body.lists.every((l) => l.deepLink ===
+       `${FLEX_STUB_BASE}/f5/ui/#element/${l.id}/view/equipmentlist/header`),
+     gl.body.lists.map((l) => l.deepLink));
+  ok('16b: `type` is null — the tree cannot tell a pull sheet from a manifest, and it says so',
+     gl.body.lists.every((l) => l.type === null), gl.body.lists.map((l) => l.type));
+
+  // a TECH may read (unlike create, which is pm+ AND ownership-gated)
+  const glTech = await GET(`/api/shows/${FX}/flex/gear-lists`, { token: TECHT });
+  ok('16b GATE: a TECH may read the gear lists — the warehouse pulls gear it does not own',
+     glTech.status === 200 && glTech.body.count === 2, glTech.body);
+  const glPm2 = await GET(`/api/shows/${FX}/flex/gear-lists`, { token: PM2T });
+  ok('16b GATE: ...and a pm who does not own the folder may read it too — a read is not a write',
+     glPm2.status === 200, glPm2.body);
+
+  // ── an empty folder is a FACT, said in words ──────────────────────────────
+  const fxShow7 = await POST('/api/shows', {
+    project_id: P, name: TAG + ' empty folder', venue: 'Wrigley Field', event_date: '2026-11-14'
+  }, { token: A });
+  const FX7 = fxShow7.body.id;
+  await PUT(`/api/shows/${FX7}/gear`, { linked: true, element_id: 'empty-folder' }, { token: A });
+  const glEmpty = await GET(`/api/shows/${FX7}/flex/gear-lists`, { token: A });
+  ok('16b: a folder with no equipment lists is 200 with empty:true and an EMPTY ARRAY',
+     glEmpty.status === 200 && glEmpty.body.empty === true && glEmpty.body.count === 0
+     && Array.isArray(glEmpty.body.lists), glEmpty.body);
+  ok('16b: ...and a message that says it is the FOLDER that is empty, naming it',
+     /no equipment lists yet/i.test(glEmpty.body.message)
+     && /Wrigley Field Folder/.test(glEmpty.body.message), glEmpty.body.message);
+  const psEmpty = await GET(`/api/shows/${FX7}/flex/pull-sheet`, { token: A });
+  ok('16b: asking for a pull sheet out of an empty folder is a 404 that says why',
+     psEmpty.status === 404 && /no equipment lists yet/i.test(psEmpty.body.error), psEmpty.body);
+
+  // ── the read itself ───────────────────────────────────────────────────────
+  flexCalls.length = 0;
+  const ps = await GET(`/api/shows/${FX}/flex/pull-sheet?listId=${STUB_LIST_A}`, { token: A });
+  ok('16b: the pull sheet reads back', ps.status === 200, ps.body);
+  ok('16b: EVERY call the read made was a GET — nothing on this path can write to Flex',
+     flexCalls.length > 0 && flexCalls.every((c) => c.method === 'GET'),
+     flexCalls.map((c) => c.method + ' ' + c.url));
+  ok('16b: it spent one tree, one equipment-list header and one row-data (plus the user name)',
+     flexCalls.filter((c) => /\/tree$/.test(c.url)).length === 1
+     && flexCalls.filter((c) => /\/equipment-list\//.test(c.url)).length === 1
+     && flexCalls.filter((c) => /\/row-data\//.test(c.url)).length === 1,
+     flexCalls.map((c) => c.url));
+  ok('16b: the dead node-list endpoint is never called (BUG 4)',
+     !flexCalls.some((c) => /eqlist-line-item/.test(c.url)), flexCalls.map((c) => c.url));
+  const PSH = ps.body.sheet;
+  ok('16b: the TYPE comes from the header’s definitionId — no extra /identity call',
+     PSH.type === 'pull-sheet' && PSH.docNumber === 'SM_01'
+     && !flexCalls.some((c) => /identity/.test(c.url)), { type: PSH.type, doc: PSH.docNumber });
+  ok('16b: the pack-status block reports all six stages, prep done with WHO and WHEN',
+     PSH.status.stages.length === 6 && PSH.status.stages[0].done === true
+     && PSH.status.stages[0].at === '2026-11-11T14:32:00' && PSH.status.stages[0].by === 'Brendon Ochs',
+     PSH.status.stages[0]);
+  ok('16b: ...and an incomplete stage is done:false with a null timestamp, never absent',
+     PSH.status.stages.slice(1).every((x) => x.done === false && x.at === null),
+     PSH.status.stages[2]);
+  const gLed = PSH.groups.find((g) => g.path === 'LED Cabinets');
+  ok('16b: the group nesting is real — LED Cabinets holds the cabinet AND the spool',
+     !!gLed && gLed.type === 'category' && gLed.items.length === 2
+     && gLed.items[0].qty === 48 && gLed.items[0].barcode === '00009',
+     gLed && gLed.items.map((i) => [i.name, i.qty]));
+  ok('16b: a CONTAINED row is gear AND opens its own sub-group',
+     gLed.items[1].qty === 1 && gLed.items[1].contains === 1
+     && PSH.groups.some((g) => g.path === 'LED Cabinets / Mediacom 300m fiber spool'
+                             && g.items[0].qty === 2),
+     PSH.groups.map((g) => g.path));
+  const gLoose = PSH.groups.find((g) => g.type === 'loose');
+  ok('16b: a top-level leaf is loose gear, UNSHIFTED to the front',
+     !!gLoose && PSH.groups[0] === gLoose, PSH.groups.map((g) => g.type));
+  ok('16b BUG 6: the serial is lifted out of the name and the null quantity says qtyAssumed',
+     gLoose.items[0].name === '2024 P10 Perimeter' && gLoose.items[0].serial === '6858'
+     && gLoose.items[0].qty === 1 && gLoose.items[0].qtyAssumed === true, gLoose.items[0]);
+  ok('16b: an isNote row is not gear', !PSH.groups.some((g) => g.items.some((i) => /SPARES/.test(i.name))),
+     PSH.groups.map((g) => g.items.map((i) => i.name)));
+  ok('16b: totals are 3 groups, 4 lines, 52 units',
+     PSH.totals.groups === 3 && PSH.totals.lines === 4 && PSH.totals.units === 52, PSH.totals);
+  ok('16b: the sheet carries its own deep link and the time it was read',
+     PSH.deepLink === `${FLEX_STUB_BASE}/f5/ui/#element/${STUB_LIST_A}/view/equipmentlist/header`
+     && /^\d{4}-\d{2}-\d{2}T/.test(PSH.fetchedAt), { link: PSH.deepLink, at: PSH.fetchedAt });
+
+  // ── a read WRITES NOTHING ─────────────────────────────────────────────────
+  const fxRowAfter = await pool.query('SELECT * FROM flex_state WHERE show_id=$1', [FX]);
+  ok('16b: reading a pull sheet did NOT touch flex_state — pulled is still false, no gear_list_id',
+     fxRowAfter.rows[0].pulled === false && !fxRowAfter.rows[0].gear_list_id
+     && fxRowAfter.rows[0].element_id === 'stub-element-0001', fxRowAfter.rows[0]);
+  const actAfter = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM activity WHERE show_id=$1 AND action LIKE 'flex.%'`, [FX]);
+  ok('16b: ...and wrote no activity line — a read is not an event',
+     actAfter.rows[0].n === 1, actAfter.rows[0]);      // still just the one flex.create
+  const filesAfter = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM files WHERE show_id=$1 AND artifact='pullsheet'`, [FX]);
+  ok('16b: ...and filed no pull-sheet document — the demo invented one, this does not',
+     filesAfter.rows[0].n === 0, filesAfter.rows[0]);
+
+  // ── the id a caller supplies is VERIFIED against the folder ───────────────
+  const psOutside = await GET(`/api/shows/${FX}/flex/pull-sheet?listId=${STUB_OUTSIDER}`, { token: A });
+  ok('16b: a list that is NOT under this show’s folder is refused, and the message names what IS',
+     psOutside.status === 404 && /not under this show/i.test(psOutside.body.error)
+     && /SM_01/.test(psOutside.body.error), psOutside.body);
+  const psJunk = await GET(`/api/shows/${FX}/flex/pull-sheet?listId=not-a-uuid`, { token: A });
+  ok('16b: a non-UUID listId is a 400 before any Flex call is made', psJunk.status === 400, psJunk.body);
+  const psAmbig = await GET(`/api/shows/${FX}/flex/pull-sheet`, { token: A });
+  ok('16b: omitting listId with TWO lists is a 400 that names both, never a guess',
+     psAmbig.status === 400 && /SM_01/.test(psAmbig.body.error) && /SM_02/.test(psAmbig.body.error),
+     psAmbig.body);
+  const psOnly = await GET(`/api/shows/${FX7}/flex/pull-sheet`, { token: A });
+  ok('16b: ...but an empty folder still 404s rather than picking nothing', psOnly.status === 404);
+
+  // ── BUG 5's dangerous half, end to end ────────────────────────────────────
+  const psB = await GET(`/api/shows/${FX}/flex/pull-sheet?listId=${STUB_LIST_B}`, { token: A });
+  ok('16b BUG 5: a 200-with-[] row-data is reported as empty:true + rowCount 0, not as "no gear"',
+     psB.status === 200 && psB.body.sheet.empty === true && psB.body.sheet.rowCount === 0
+     && psB.body.sheet.groups.length === 0, psB.body.sheet);
+  ok('16b: ...and the HEADER still comes through, so the list is identified as the MANIFEST it is',
+     psB.body.sheet.type === 'manifest' && psB.body.sheet.docNumber === 'SM_02', psB.body.sheet.type);
 
   const fxUnlink = await DEL(`/api/shows/${FX}/flex/element`, { token: A });
   ok('16: unlink forgets the pointer and clears the deep link',

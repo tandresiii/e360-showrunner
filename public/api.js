@@ -1133,6 +1133,23 @@ var api = (function () {
       });
     },
 
+    /* ---- THE READ PATH (2026-08-28) — both GET, both live, neither cached --
+       No demo branch, for the same reason flexCreateElement has none: demo mode
+       must never reach a route that talks to a live rental system, and app.js
+       decides which world it is in before it calls. Nothing here writes to the
+       local store either — a fetched pull sheet lives in the view's own state,
+       because a gear list cached into SHOWS_BY_ID is a gear list that goes
+       stale the moment somebody scans a case in the warehouse. */
+    flexGearLists: function (showId) {
+      if (!API()) return fail('flexGearLists is API-mode only — demo mode simulates locally');
+      return SR.get('/api/shows/' + Number(showId) + '/flex/gear-lists');
+    },
+    flexPullSheet: function (showId, listId) {
+      if (!API()) return fail('flexPullSheet is API-mode only — demo mode simulates locally');
+      var q = listId ? '?listId=' + encodeURIComponent(listId) : '';
+      return SR.get('/api/shows/' + Number(showId) + '/flex/pull-sheet' + q);
+    },
+
     /* ---- templates ----------------------------------------------------- */
     /* The one real RESHAPE in the swap. The mock's record is
          {event_type, def:{label,tag,icon,anchor,lanes:[{key,label,color}]},

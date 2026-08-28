@@ -530,16 +530,37 @@ function tabGear(show) {
   var contactToggle = '<button class="btn sm ghost" ' + act('flexToggleContacts', show.id) + ' title="Client and venue are contacts in Flex. With this on, one that has no exact match is created and linked; with it off the field is left blank.">' +
     icon(mkOn ? 'check' : 'x') + (mkOn ? 'Create missing contacts' : 'Skip missing contacts') + '</button>';
 
+  var sheetState = (typeof FLEX_SHEETS !== 'undefined' && FLEX_SHEETS[show.id]) || null;
+  var loadLabel = live
+    ? ((sheetState && sheetState.sheet) ? 'Re-read from Flex' : 'Load from Flex')
+    : (g.pulled ? 'Re-pull from Flex' : 'Pull from Flex');
   var actions = realLink
-    ? viewBtn + '<button class="btn primary" ' + act('flexPull', show.id) + '>' + icon('download') + (g.pulled ? 'Re-pull from Flex' : 'Pull from Flex') + '</button>'
+    ? viewBtn + '<button class="btn primary" ' + act('flexPull', show.id) + '>' + icon('download') + loadLabel + '</button>'
     : contactToggle +
       '<button class="btn ghost" ' + act('flexLink', show.id) + '>' + icon('link') + 'Link existing</button>' +
       '<button class="btn primary" ' + act('flexCreate', show.id) + '>' + icon('folder') + (fabricated ? 'Create the real folder' : 'Create Flex Folder') + '</button>';
 
   var flexbar = '<div class="flexbar"><div class="fi">' + icon('box') + '</div><div class="fx">' + linkState + '</div><div class="fa">' + actions + '</div></div>';
   var note = live
-    ? '<div class="hint" style="margin:-4px 0 14px">' + icon('bolt') + '<b>Create is live.</b> It POSTs a real Event Folder to <span class="mono">/f5/api/element</span> (auth <span class="mono">X-Auth-Token</span>, UTC-<span class="mono">Z</span> dates) and stores the id Flex returns. Doors / show / strike times ride in the folder’s <b>notes</b> — its form has no field for a clock time. <b>Pull from Flex is not wired yet</b> and will say so rather than invent a gear list.</div>'
-    : '<div class="hint" style="margin:-4px 0 14px">' + icon('bolt') + '<b>Demo — nothing here reaches Flex.</b> Element ids, gear lists and flight cases on this screen are generated locally so the screens have something to show. Against a real server the same buttons call <span class="mono">create-element</span> for real.</div>';
+    ? '<div class="hint" style="margin:-4px 0 14px">' + icon('bolt') + '<b>Create and read are both live.</b> Create POSTs a real Event Folder to <span class="mono">/f5/api/element</span> (auth <span class="mono">X-Auth-Token</span>, UTC-<span class="mono">Z</span> dates) and stores the id Flex returns; doors / show / strike times ride in the folder’s <b>notes</b>, since its form has no field for a clock time. <b>Load from Flex</b> reads the folder’s equipment lists and one list’s real line items — every time, live. <b>Nothing on this tab is cached and nothing here writes to Flex.</b></div>'
+    : '<div class="hint" style="margin:-4px 0 14px">' + icon('bolt') + '<b>Demo — nothing here reaches Flex.</b> Element ids, gear lists and flight cases on this screen are generated locally so the screens have something to show. Against a real server the same buttons call <span class="mono">create-element</span> and read the real pull sheet.</div>';
+
+  /* API MODE owns its own body. `pulled` is a demo flag over a demo kit; in API
+     mode the gear on screen is whatever the last live read returned, or an
+     honest statement that nothing has been read yet. */
+  if (live) {
+    if (!realLink) {
+      return flexbar + note + poGearStrip(show) + '<div class="gear-empty">' + icon('box') +
+        '<div style="font-weight:600;font-size:14px">No Flex folder to read</div>' +
+        '<div style="font-size:12.5px;margin-top:7px;max-width:460px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+        (fabricated
+          ? 'This show carries an element id the prototype generated in a browser. It exists in no Flex tenant, so there is nothing to read. <b>Create the real folder</b> to replace it.'
+          : 'Create the Event Folder — or link an existing one by its element id — and then <b>Load from Flex</b> will list the equipment lists inside it.') +
+        '</div></div>';
+    }
+    return flexbar + note + poGearStrip(show) + flexSheetBody(show, sheetState);
+  }
+
   if (!g.pulled) {
     return flexbar + note + poGearStrip(show) + '<div class="gear-empty">' + icon('box') + '<div style="font-weight:600;font-size:14px">No gear list pulled yet</div><div style="font-size:12.5px;margin-top:7px;max-width:440px;margin-left:auto;margin-right:auto;line-height:1.5">Once the Flex Event Folder is linked, <b>Pull from Flex</b> walks the folder tree, identifies the Pull Sheet + Manifest by definition ID, and caches them here — viewable and printable by anyone with folder access.</div></div>';
   }
@@ -557,6 +578,107 @@ function tabGear(show) {
   var body = g.view === 'manifest' ? manifestBody(g) : pullBody(g);
   return flexbar + note + poGearStrip(show) + toggle + deriveLine + body;
 }
+/* ── the LIVE gear body (2026-08-28) ────────────────────────────────────────
+   Same visual language as pullBody() — .gtotals / .gcat / .gitem — because it
+   is the same document; only the source changed from buildKit() to Flex. The
+   differences are all things the demo has no equivalent for: the pack-status
+   row, the read timestamp, the per-line barcode, and the four honest states
+   this can be in before there is a sheet at all. */
+function flexSheetBody(show, st) {
+  if (!st) {
+    return '<div class="gear-empty">' + icon('box') +
+      '<div style="font-weight:600;font-size:14px">Nothing read from Flex yet</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:460px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+      '<b>Load from Flex</b> reads this folder’s equipment lists, then one list’s real line items — groups, quantities, barcodes and the prep / ship / return status Flex holds. It is read live on every click and stored nowhere, so what you see is what the warehouse sees.</div></div>';
+  }
+  if (st.loading) {
+    return '<div class="gear-empty">' + icon('download') +
+      '<div style="font-weight:600;font-size:14px">Reading from Flex…</div>' +
+      '<div style="font-size:12.5px;margin-top:7px">One folder tree, one list header, one row-data call.</div></div>';
+  }
+  if (st.error) {
+    return '<div class="gear-empty" style="border-color:var(--crit)">' + icon('alert') +
+      '<div style="font-weight:600;font-size:14px">Flex could not be read</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:520px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+      esc(st.error) + '</div>' +
+      '<div style="margin-top:14px"><button class="btn sm ghost" ' + act('flexPull', show.id) + '>' + icon('download') + 'Try again</button></div></div>';
+  }
+  if (st.empty) {
+    return '<div class="gear-empty">' + icon('box') +
+      '<div style="font-weight:600;font-size:14px">This Flex folder has no equipment lists</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:480px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+      esc(st.message || '') + '</div>' +
+      '<div style="margin-top:14px;display:flex;gap:9px;justify-content:center;flex-wrap:wrap">' +
+      (st.folderDeepLink ? '<a class="btn sm ghost" href="' + esc(st.folderDeepLink) + '" target="_blank" rel="noopener noreferrer">' + icon('link') + 'Open the folder in Flex</a>' : '') +
+      '<button class="btn sm ghost" ' + act('flexPull', show.id) + '>' + icon('download') + 'Check again</button></div></div>';
+  }
+
+  var s = st.sheet;
+  var typeLabel = s.type === 'pull-sheet' ? 'Pull Sheet' : s.type === 'manifest' ? 'Manifest' : 'Equipment list';
+
+  /* pack status — all six stages, in job order, done or not stated either way.
+     A stage nobody has completed is a dash, never an absence. */
+  var chips = (s.status.stages || []).map(function (x) {
+    if (!x.done) return '<span class="cs" style="font-family:var(--font-mono);font-size:10px">' + esc(x.label) + ' —</span>';
+    return '<span class="fresh-chip" title="' + esc(x.at || '') + (x.by ? ' · ' + esc(x.by) : '') + '">' +
+      esc(x.label) + ' ✓ ' + esc(flexWhen(x.at)) + (x.by ? ' · ' + esc(x.by) : '') + '</span>';
+  }).join('<span style="color:var(--border-strong)">·</span>');
+  var statusRow = '<div class="perm-note" style="margin:0 0 12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+    inlineIcon('truck') + ' <b style="font-weight:600">Pack status</b> ' + chips + '</div>';
+
+  /* switcher — only when the folder really holds more than one list */
+  var others = (st.lists || []).filter(function (l) { return l.id !== s.listId; });
+  var switcher = others.length
+    ? '<div class="hint" style="margin:0 0 12px">' + icon('layers') + 'Also in this folder: ' +
+      others.map(function (l) {
+        return '<button class="btn sm ghost" ' + act('flexPickSheet', show.id, l.id) + '>' +
+          esc(l.docNumber || l.name || l.id.slice(0, 8)) + '</button>';
+      }).join(' ') + '</div>'
+    : '';
+
+  var totals = '<div class="gtotals">' +
+    '<div class="gt"><div class="k">Groups</div><div class="v">' + s.totals.groups + '</div></div>' +
+    '<div class="gt"><div class="k">Line items</div><div class="v">' + s.totals.lines + '</div></div>' +
+    '<div class="gt"><div class="k">Total units</div><div class="v">' + s.totals.units + '</div></div>' +
+    '<div class="gt"><div class="k">' + esc(typeLabel) + '</div><div class="v" style="font-size:15px">' + esc(s.docNumber || '—') + '</div></div></div>';
+
+  var bar = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0">' +
+    '<b style="font-family:var(--font-display);font-size:14px">' + esc(s.name || 'Untitled list') + '</b>' +
+    '<span class="cs" style="font-family:var(--font-mono);font-size:11px">read ' + esc(flexWhen(s.fetchedAt)) + ' · live, not cached</span>' +
+    '<span style="flex:1"></span>' +
+    (s.deepLink ? '<a class="btn sm ghost" href="' + esc(s.deepLink) + '" target="_blank" rel="noopener noreferrer">' + icon('link') + 'Open in Flex</a>' : '') +
+    '<button class="btn sm primary" ' + act('flexPrintSheet', show.id) + '>' + icon('print') + 'Print</button></div>';
+
+  /* BUG 5's dangerous half. 200 + [] is what Flex answers both for an empty
+     list and for a request it silently disliked; the screen must not turn that
+     into the confident sentence "this pull sheet is empty". */
+  if (s.empty || !s.groups.length) {
+    return statusRow + switcher + bar +
+      '<div class="gear-empty">' + icon('alert') +
+      '<div style="font-weight:600;font-size:14px">Flex returned no line items</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:520px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+      'That is either a genuinely empty list or a request Flex did not like — its row-data endpoint answers <span class="mono">200</span> with an empty array for both, so Showrunner cannot tell them apart. Open it in Flex to find out.</div></div>';
+  }
+
+  var cats = s.groups.map(function (c) {
+    var items = c.items.map(function (it) {
+      var tag = it.barcode || (it.resourceId ? it.resourceId.slice(0, 8) : '');
+      return '<div class="gitem"><span class="gnm">' + esc(it.name) +
+        (it.serial ? ' <span class="ser">s/n ' + esc(it.serial) + '</span>' : '') +
+        (it.contains ? ' <span class="ser">+' + it.contains + ' inside</span>' : '') +
+        (it.note ? '<span style="display:block;color:var(--muted);font-size:11.5px">' + esc(it.note) + '</span>' : '') +
+        '</span>' +
+        (tag ? '<span class="gid">' + esc(tag) + '</span>' : '') +
+        '<span class="gqty">× ' + esc(it.qty) + (it.qtyAssumed ? '<span title="Flex reported no quantity on this line — counted as 1">?</span>' : '') + '</span></div>';
+    }).join('');
+    return '<div class="gcat"><div class="gch"><b>' + esc(c.path) + '</b>' +
+      (c.containerSerial ? '<span class="ser">' + esc(c.containerSerial) + '</span>' : '') +
+      '<span class="gn">' + c.items.length + ' line' + (c.items.length === 1 ? '' : 's') + '</span></div>' + items + '</div>';
+  }).join('');
+
+  return statusRow + switcher + bar + totals + '<div style="margin-top:12px">' + cats + '</div>';
+}
+
 function pullBody(g) {
   var lines = g.kit.pull.reduce(function (a, c) { return a + c.items.length; }, 0);
   var units = g.kit.pull.reduce(function (a, c) { return a + c.items.reduce(function (x, i) { return x + i.qty; }, 0); }, 0);

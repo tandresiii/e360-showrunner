@@ -398,10 +398,38 @@ Auth (`staffing/server.js:54-79`):
 | 5 | GET | `/api/element/current-workflow-state?elementIds=A&elementIds=B…` | `flexEnrichWithStatus()` | `:159-183` |
 | 6 | POST | `/api/element` | `flexCreateEventFolder()` / `flexCreateResidencyFolder()` | `:304`, `:354` |
 
+**Added by Showrunner's READ path, 2026-08-28** (all GET, all verified live against
+pull sheet `2e63b247-62e3-47b1-8460-88a9bb32bfba` / folder `257e6ba3-0ced-4ab0-9af4-976bb21c99c6`):
+
+| # | Method | Path | Wrapper | Notes |
+|---|---|---|---|---|
+| 7 | GET | `/api/equipment-list/{id}` | `flexGetEquipmentList()` | 127 keys incl. the whole prep/ship/return block **and `definitionId`** |
+| 8 | GET | `/api/user-profile/{userId}` | `flexGetUserName()` | resolves `prepCompletedUserId` → `{id,name,userName,emailAddress}` |
+
 Endpoints **probed and rejected** — do not use them:
 - `GET /api/eqlist-line-item/node-list/{parentId}?equipmentListId=…` — see BUG 4.
 - `GET /api/equipment-list-definition-settings/{defId}` — 405 `Request method 'GET' not supported` (`tools/probe-output/05-definition-settings.json`).
-- `GET /api/equipment-list/{id}` — returns metadata only, no line items (`tools/probe-output/02-equipment-list.json`); superseded by #4.
+- ~~`GET /api/equipment-list/{id}` — returns metadata only, no line items; superseded by #4.~~
+  **CORRECTED 2026-08-28.** The observation was right and the conclusion was wrong
+  (`FLEX_CAPABILITIES.md` §2.4). That "metadata" is the entire
+  `prep/deprep/ship/return/receive/subrentalReturn` completion block — a boolean, a
+  user id, a timestamp and a generated manifest id per stage — plus `definitionId`,
+  `locked`, `open`, `weight` and the full date set. It does not replace #4; it is the
+  other half of a read. Showrunner's `flexReadPullSheet()` calls both. Live proof:
+  `prepCompleted:true`, `prepCompletedTimestamp:'2026-05-19T20:35:50'`,
+  `prepCompletedUserId:'21ad5aca-…'` (= Tom Andres) on TT_26_1.
+- `GET /api/user/{id}` — 404 `FLEX_5000`. A Flex **user** is not reachable there.
+- `GET /api/contact/{id}` for a user id — 400 `Unable to find contact with id: …`.
+  A Flex user and a Flex contact are different objects with different id spaces;
+  `/api/user-profile/{id}` is the one that answers.
+
+**R21 is RETIRED for the pull-sheet grammar.** §3.5's claim (top-level rows with
+`group===true` whose children are items) was written from the spec with no probe
+evidence. It is now confirmed against a real pull sheet — 9 such rows on TT_26_1 —
+with one correction the spec did not have: a child row may itself carry
+`container:true`, its own `resourceId`, `quantity` and `barcode`, **and** children.
+That row is real gear AND a container. Treating it as a heading (which the first
+draft of `flexNormalizePullSheet` did) silently deletes units from the sheet.
 
 ### 3.3 Known bugs and workarounds — all SIX
 

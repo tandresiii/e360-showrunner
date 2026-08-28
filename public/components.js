@@ -647,6 +647,47 @@ function pullSheetSheet(show, f, gear) {
   }).join('');
   return '<div class="sheet">' + sheetTop('FLEX · PULL SHEET') + '<div class="sh-body"><div class="sh-kick">Flex gear list · ' + esc(gear.docNumber) + '</div><h2>' + esc(show.name) + ' — Pull Sheet</h2>' + boundLine(show) + '<hr><table class="spec-tbl">' + rows + '</table><div class="sh-cap">Pulled from Flex Event Folder ' + esc(gear.elementId ? gear.elementId.slice(0, 8) + '…' : '(modeled)') + ' · derives from the .pcfg power layout</div></div></div>';
 }
+/* ── the printable for a LIVE Flex read (2026-08-28) ────────────────────────
+   pullSheetSheet() above needs a bound `files` row, because in the demo the
+   pull sheet IS a file. A live read creates no file — deliberately — so this
+   takes the fetched sheet directly. Everything else is the same paper: the
+   same sheetTop, the same .spec-tbl, the same green category rules, so a
+   printed live sheet and a printed demo sheet are the same document.
+
+   The two additions are the two things a warehouse actually needs on paper: a
+   barcode column, and the pack-status line with the timestamp it was read. */
+function flexSheetHTML(show, s) {
+  var rows = s.groups.map(function (c) {
+    var head = '<tr><td colspan="3" style="padding-top:14px;font-family:monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#0F9E68;font-weight:700;border-bottom:1px solid #d6e5dd">' +
+      esc(c.path) + (c.containerSerial ? ' · ' + esc(c.containerSerial) : '') + '</td></tr>';
+    var its = c.items.map(function (it) {
+      return '<tr><td>' + esc(it.name) + (it.serial ? ' <span style="color:#9aa8a1;font-family:monospace;font-size:9.5px">s/n ' + esc(it.serial) + '</span>' : '') +
+        '</td><td style="font-family:monospace;font-size:10px;color:#9aa8a1">' + esc(it.barcode || '') +
+        '</td><td>× ' + esc(it.qty) + (it.qtyAssumed ? ' <span style="color:#9aa8a1">(assumed)</span>' : '') + '</td></tr>';
+    }).join('');
+    return head + its;
+  }).join('');
+  var done = (s.status.stages || []).filter(function (x) { return x.done; });
+  var statusLine = done.length
+    ? done.map(function (x) { return esc(x.label) + ' ✓ ' + esc(fmtTs(x.at) || x.at || '') + (x.by ? ' by ' + esc(x.by) : ''); }).join(' · ')
+    : 'No prep / ship / return stage has been completed in Flex yet';
+  var typeLabel = s.type === 'pull-sheet' ? 'FLEX · PULL SHEET' : s.type === 'manifest' ? 'FLEX · MANIFEST' : 'FLEX · EQUIPMENT LIST';
+  return '<div class="sheet">' + sheetTop(typeLabel) +
+    '<div class="sh-body"><div class="sh-kick">Flex gear list · ' + esc(s.docNumber || '—') + '</div>' +
+    '<h2>' + esc(s.name || show.name) + '</h2>' + boundLine(show) +
+    '<div class="sh-cap" style="margin-top:6px">' + statusLine + '</div><hr>' +
+    '<table class="spec-tbl">' + rows + '</table>' +
+    '<div class="sh-cap">' + s.totals.groups + ' groups · ' + s.totals.lines + ' line items · ' + s.totals.units + ' units · ' +
+    'read live from Flex ' + esc(fmtTs(s.fetchedAt) || '') + ' — not a cached copy</div></div></div>';
+}
+function printFlexSheet(show, s) {
+  $('#printArea').innerHTML = flexSheetHTML(show, s) +
+    '<div class="pfoot"><span>e360 Showrunner — ' + esc(show.name) + ' · ' + esc(show.venue) + '</span><span>' +
+    esc(s.docNumber || s.name) + ' · read from Flex ' + esc(fmtTs(s.fetchedAt) || '') + '</span></div>';
+  window.print();
+  toast('Sent to print', (s.docNumber || s.name) + ' · print dialog opened');
+}
+
 function manifestSheet(show, f, gear) {
   var rows = gear.kit.manifest.map(function (m) {
     return '<tr><td>' + esc(m.case) + (m.loose ? ' <span style="color:#9aa8a1;font-family:monospace;font-size:9.5px">loose</span>' : '') + '</td><td>' + esc(m.size + ' · ' + m.weight + ' lb') + '</td></tr>';

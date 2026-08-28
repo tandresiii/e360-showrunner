@@ -510,6 +510,9 @@ Files       GET /api/files · GET /api/files/:id · POST /api/files
             PUT /api/files/:id · PUT /api/files/:id/content · DELETE /api/files/:id
 Chain/Gear  GET/PUT /api/shows/:id/chain[/:node] · GET/PUT /api/shows/:id/gear
 Flex        POST /api/shows/:id/flex/create-element · DELETE /api/shows/:id/flex/element
+            GET  /api/shows/:id/flex/gear-lists · GET /api/shows/:id/flex/pull-sheet?listId=
+            (the two GETs are the READ path — tech+, live every call, cached nowhere,
+             and they write nothing to Flex OR to the database)
 Bookings    GET /api/bookings[/:id] · POST /api/bookings · PUT/DELETE /api/bookings/:id
 Proofs      GET /api/proofs · POST /api/proofs · POST /api/proofs/:id/rounds
             PUT/DELETE /api/proofs/:id
@@ -617,6 +620,8 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | `getGear` / `updateGear` | `GET`/`PUT /api/shows/:id/gear` |
 | `flexCreateElement(sid, {createContacts})` | `POST /api/shows/:id/flex/create-element` — **API mode only, no demo branch** |
 | `flexUnlink(sid)` | `DELETE /api/shows/:id/flex/element` |
+| `flexGearLists(sid)` | `GET /api/shows/:id/flex/gear-lists` — one tree call; `type` comes back **null** because the tree cannot tell a pull sheet from a manifest |
+| `flexPullSheet(sid, listId)` | `GET /api/shows/:id/flex/pull-sheet?listId=` — header + row-data, normalized; `listId` is verified against the folder's tree first |
 | `listTemplates` / `getTemplate(type)` | `GET /api/templates` / `GET /api/templates/:type` |
 | `pushToScheduler(sid)` | `POST /api/shows/:id/push-to-scheduler` |
 | `listBudgetLines(jid)` | `GET /api/jobs/:id/budget` |

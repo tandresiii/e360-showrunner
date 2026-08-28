@@ -579,6 +579,312 @@ function route(url) {
   ok('null / empty are not ids at all',
      flex.flexIsFabricatedElementId(null) === false && flex.flexIsFabricatedElementId('') === false);
 
+  // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+  // THE READ PATH \u2014 fixtures are the REAL live responses, not the spec
+  // \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // Everything above this line for the pull-sheet grammar carried R21: "no
+  // probe evidence, written from the spec". This section retires that warning
+  // for the read path. Every fixture below is copied out of a read-only GET
+  // made against the live tenant on 2026-08-28 \u2014
+  //   folder 257e6ba3-0ced-4ab0-9af4-976bb21c99c6 (Track Town Residency)
+  //   pull sheet 2e63b247-62e3-47b1-8460-88a9bb32bfba (TT_26_1)
+  // \u2014 including the nested container rows the first flat probe print had
+  // hidden, which are the whole reason flexNormalizePullSheet looks the way
+  // it does.
+  // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+  section('the READ path \u2014 fixtures captured LIVE 2026-08-28');
+
+  const TT_FOLDER = '257e6ba3-0ced-4ab0-9af4-976bb21c99c6';
+  const TT_LIST = '2e63b247-62e3-47b1-8460-88a9bb32bfba';
+  const TT_CHILD = 'd0a53187-799e-4f57-bdcb-b3fe41632a9e';
+  const TT_USER = '21ad5aca-11d8-4e8c-952a-fd10c5ad77d0';
+
+  // verbatim /api/element/{folder}/tree
+  const TT_TREE = {
+    nodeId: TT_FOLDER, name: 'Track Town Residency', documentNumber: null, parentId: 'root',
+    leaf: false, domainId: 'simple-project-element',
+    children: [{
+      nodeId: TT_LIST, name: 'Track Town Residency', documentNumber: 'TT_26_1',
+      parentId: TT_FOLDER, leaf: false, domainId: 'equipment-list',
+      children: [{
+        nodeId: TT_CHILD, name: 'Track Town Residency', documentNumber: '5FAXQ',
+        parentId: TT_LIST, leaf: true, domainId: 'equipment-list', children: null,
+        displayName: 'Track Town Residency (5FAXQ)'
+      }],
+      displayName: 'Track Town Residency (TT_26_1)'
+    }],
+    displayName: 'Track Town Residency'
+  };
+
+  // the interesting 40 of /api/equipment-list/{id}'s 127 keys
+  const TT_HEADER = {
+    id: TT_LIST, name: 'Track Town Residency', documentNumber: 'TT_26_1',
+    definitionId: 'a220432c-af33-11df-b8d5-00e08175e43e',   // pull sheet
+    domainId: 'equipment-list', deleted: false, locked: false, open: true,
+    plannedStartDate: '2026-05-19T05:00:00', plannedEndDate: '2026-07-10T04:00:00',
+    loadInDate: '2026-05-26T13:00:00', loadOutDate: '2026-07-04T21:00:00',
+    preparedDate: null, weight: 0, clientId: null, venueId: null,
+    prepCompleted: true, deprepCompleted: false, returnCompleted: false,
+    shipCompleted: false, receiveCompleted: false, subrentalReturnCompleted: false,
+    prepCompletedUserId: TT_USER, deprepCompletedUserId: null, returnCompletedUserId: null,
+    shipCompletedUserId: null, receiveCompletedUserId: null, subrentalReturnCompletedUserId: null,
+    prepCompletedTimestamp: '2026-05-19T20:35:50', deprepCompletedTimestamp: null,
+    returnCompletedTimestamp: null, shipCompletedTimestamp: null,
+    receiveCompletedTimestamp: null, subrentalReturnCompletedTimestamp: null,
+    prepManifestId: TT_CHILD, deprepManifestId: null, shipManifestId: null,
+    returnManifestId: null, receiveManifestId: null, subrentalReturnManifestId: null,
+    displayName: 'Track Town Residency (TT_26_1)'
+  };
+
+  // three of the nine real top-level rows. The Fiber Spools group is the one
+  // that matters: two of its three children are `container:true` rows that
+  // carry their OWN resourceId, barcode and quantity AND hold a breakout.
+  const TT_ROWDATA = [
+    { id: 'row-led', rootLineId: 'row-led', ordinal: 0, leaf: false, resourceId: null,
+      name: 'Modular LED Cabinets', group: true, isNote: false, quantity: 0,
+      serial: null, barcode: null,
+      children: [
+        { id: 'it-led', rootLineId: 'row-led', ordinal: 0, container: false, leaf: true,
+          resourceId: '38b461bc-371a-4714-9407-49210f6bf3af',
+          name: '3.9 blackface - 500mm x 500mm', group: false, note: '', isNote: false,
+          quantity: 48, serial: null, barcode: '00009' }
+      ] },
+    { id: 'row-soca', rootLineId: 'row-soca', ordinal: 1, leaf: false, resourceId: null,
+      name: 'Socapex Cables', group: true, isNote: false, quantity: 0, serial: null, barcode: null,
+      children: [
+        { id: 'it-fan', rootLineId: 'row-soca', ordinal: 0, container: false, leaf: true,
+          resourceId: 'c7646df0-174e-415d-8b86-f15e922ac7eb',
+          name: "Soca to True 1 Fanout - 6'", group: false, note: null, isNote: false,
+          quantity: 7, serial: null, barcode: '00026' },
+        { id: 'it-100', rootLineId: 'row-soca', ordinal: 1, container: false, leaf: true,
+          resourceId: '37036f66-077e-44b3-b625-884c53107c35',
+          name: 'Socapex  Power Cable 100ft - 100ft', group: false, note: null, isNote: false,
+          quantity: 3, serial: null, barcode: '00016' }
+      ] },
+    { id: 'row-fiber', rootLineId: 'row-fiber', ordinal: 5, leaf: false, resourceId: null,
+      name: 'Fiber Spools', group: true, isNote: false, quantity: 0, serial: null, barcode: null,
+      children: [
+        { id: 'it-300', rootLineId: 'row-fiber', ordinal: 0, container: true, leaf: false,
+          resourceId: '5eab37ab-acd1-4f34-9989-6734fdff708d',
+          name: 'Mediacom 300m 12 Channel fiber spool', group: false, note: null, isNote: false,
+          quantity: 1, serial: null, barcode: '00068',
+          children: [
+            { id: 'it-bo1', rootLineId: 'row-fiber', ordinal: 0, container: false, leaf: true,
+              resourceId: '88cb63de-2eac-4538-b437-acc17f1fc8d6',
+              name: 'Media Com Breakout', group: false, note: null, isNote: false,
+              quantity: 2, serial: null, barcode: '00059' }
+          ] },
+        { id: 'it-see', rootLineId: 'row-fiber', ordinal: 1, container: false, leaf: true,
+          resourceId: 'b2321c3e-add5-46a8-8a8b-ec790a8cc1f1',
+          name: 'Seetronic 300m 4-channel LC spool - 300 meters', group: false, note: null,
+          isNote: false, quantity: 3, serial: null, barcode: '00057' }
+      ] }
+  ];
+  const TT_USER_PROFILE = { id: TT_USER, name: 'Tom Andres', userName: 'tandres',
+                            emailAddress: 'tom@e360sport.com', deleted: false };
+
+  let userProfileCalls = 0;
+  function readRoute(url, options) {
+    if (options && options.method && options.method !== 'GET') {
+      return { status: 405, body: { exceptionMessage: 'WRITE ATTEMPTED on the read path: ' + url } };
+    }
+    if (new RegExp(`/element/${TT_FOLDER}/tree$`).test(url)) return { body: TT_TREE };
+    if (new RegExp(`/equipment-list/${TT_LIST}$`).test(url)) return { body: TT_HEADER };
+    if (new RegExp(`/equipment-list/${TT_CHILD}$`).test(url)) {
+      return { body: { ...TT_HEADER, id: TT_CHILD, documentNumber: '5FAXQ',
+                       definitionId: '9945d54c-af32-11df-b8d5-00e08175e43e' } };  // manifest
+    }
+    if (new RegExp(`/line-item/${TT_LIST}/row-data/`).test(url)) return { body: TT_ROWDATA };
+    if (/\/user-profile\/current-user$/.test(url)) return { body: CURRENT_USER };
+    if (/\/user-profile\/[0-9a-f-]{36}$/.test(url)) { userProfileCalls += 1; return { body: TT_USER_PROFILE }; }
+    return route(url, options);
+  }
+  handler = readRoute;
+  flex.flexResetUserNameCache();
+
+  // \u2500\u2500 the picker: ONE tree call, no identity storm \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  calls.length = 0;
+  const found = await flex.flexListEquipmentListsUnder(TT_FOLDER);
+  ok('flexListEquipmentListsUnder spends exactly ONE call \u2014 the tree',
+     calls.length === 1 && /\/tree$/.test(calls[0].url), calls.map((c) => c.url));
+  ok('...and NO /identity call: the tree already says which nodes are gear lists',
+     !calls.some((c) => /identity/.test(c.url)), calls.map((c) => c.url));
+  ok('both equipment lists come back \u2014 the pull sheet AND its nested prep manifest',
+     found.lists.length === 2 && found.lists[0].docNumber === 'TT_26_1'
+     && found.lists[1].docNumber === '5FAXQ', found.lists.map((l) => l.docNumber));
+  ok('the FOLDER itself is not offered as a gear list',
+     !found.lists.some((l) => l.id === TT_FOLDER), found.lists.map((l) => l.id));
+  ok('each list carries id, name, docNumber, domainId, parentId and depth',
+     found.lists.every((l) => l.id && l.name && l.domainId === 'equipment-list' && l.parentId)
+     && found.lists[0].depth === 1 && found.lists[1].depth === 2, found.lists[1]);
+  ok('the deep link ends in /view/equipmentlist/header, not the bare element url',
+     found.lists[0].deepLink ===
+       `https://e360sport.flexrentalsolutions.com/f5/ui/#element/${TT_LIST}/view/equipmentlist/header`,
+     found.lists[0].deepLink);
+  ok('`type` is NULL, not guessed \u2014 the tree cannot tell a pull sheet from a manifest',
+     found.lists.every((l) => l.type === null), found.lists.map((l) => l.type));
+  ok('empty is false and the folder NAME rides along for the honest message',
+     found.empty === false && found.folderName === 'Track Town Residency', found.folderName);
+
+  handler = (url, o) => (/\/tree$/.test(url)
+    ? { body: { nodeId: 'bare', name: 'Wrigley Field Folder', leaf: true,
+                domainId: 'simple-project-element', children: null } }
+    : readRoute(url, o));
+  const bare = await flex.flexListEquipmentListsUnder('bare');
+  ok('a folder with NO children reports empty:true and an empty list \u2014 the new Wrigley folder\u2019s state',
+     bare.empty === true && bare.lists.length === 0 && bare.folderName === 'Wrigley Field Folder', bare);
+  handler = readRoute;
+
+  // \u2500\u2500 the read: header + row-data, and the status block \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  calls.length = 0;
+  userProfileCalls = 0;
+  const sheet = await flex.flexReadPullSheet(TT_LIST);
+  ok('flexReadPullSheet reads the equipment-list HEADER (not /identity)',
+     calls.some((c) => new RegExp(`/f5/api/equipment-list/${TT_LIST}$`).test(c.url))
+     && !calls.some((c) => /identity/.test(c.url)), calls.map((c) => c.url));
+  ok('...and the line items through row-data, with codeList non-empty and node=root',
+     calls.some((c) => /\/line-item\/.+\/row-data\/\?/.test(c.url) && /codeList=name/.test(c.url)
+                       && /[?&]node=root/.test(c.url)), calls.map((c) => c.url));
+  ok('...and NEVER the dead node-list endpoint',
+     !calls.some((c) => /eqlist-line-item/.test(c.url)), calls.map((c) => c.url));
+  ok('EVERY call on the read path is a GET \u2014 nothing here can write to Flex',
+     calls.every((c) => !c.options.method || c.options.method === 'GET'),
+     calls.map((c) => (c.options.method || 'GET') + ' ' + c.url));
+  ok('the type comes from the header\u2019s definitionId \u2014 pull-sheet, for free',
+     sheet.type === 'pull-sheet' && sheet.docNumber === 'TT_26_1', { type: sheet.type, doc: sheet.docNumber });
+  ok('all six workflow stages are reported, done or not, in job order',
+     sheet.status.stages.length === 6
+     && sheet.status.stages.map((s) => s.key).join(',') === 'prep,deprep,ship,return,receive,subrentalReturn',
+     sheet.status.stages.map((s) => s.key));
+  const prep = sheet.status.stages[0];
+  ok('the prep stage carries done + when + who, resolved to a NAME',
+     prep.done === true && prep.at === '2026-05-19T20:35:50' && prep.by === 'Tom Andres'
+     && prep.byUserId === TT_USER, prep);
+  ok('...and the manifest Flex generated for that stage',
+     prep.manifestId === TT_CHILD, prep.manifestId);
+  ok('an INCOMPLETE stage is done:false with a null timestamp \u2014 never absent',
+     sheet.status.stages.slice(1).every((s) => s.done === false && s.at === null && s.by === ''),
+     sheet.status.stages[2]);
+  ok('exactly ONE user-profile lookup for the one distinct completing user',
+     userProfileCalls === 1, userProfileCalls);
+  userProfileCalls = 0;
+  await flex.flexReadPullSheet(TT_LIST);
+  ok('...and a second read spends ZERO \u2014 the name cache is process-wide',
+     userProfileCalls === 0, userProfileCalls);
+  ok('the dates block carries all four, verbatim (no Z on the way BACK \u2014 \u00a73.4)',
+     sheet.dates.plannedStart === '2026-05-19T05:00:00' && sheet.dates.loadIn === '2026-05-26T13:00:00'
+     && sheet.dates.loadOut === '2026-07-04T21:00:00', sheet.dates);
+  ok('locked / open / weight ride along', sheet.locked === false && sheet.open === true, sheet);
+  ok('the sheet knows WHEN it was read \u2014 nothing here is cached, so the time matters',
+     /^\d{4}-\d{2}-\d{2}T/.test(sheet.fetchedAt), sheet.fetchedAt);
+
+  // \u2500\u2500 the normalization: the nested container row is the whole point \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  ok('every group row (group===true) becomes a group; three of them',
+     sheet.groups.filter((g) => g.type === 'category').length === 3,
+     sheet.groups.map((g) => [g.path, g.type]));
+  const fiber = sheet.groups.find((g) => g.path === 'Fiber Spools');
+  ok('a CONTAINED row is still an ITEM \u2014 the Mediacom spool keeps its qty and barcode',
+     !!fiber && fiber.items.length === 2
+     && fiber.items[0].name === 'Mediacom 300m 12 Channel fiber spool'
+     && fiber.items[0].qty === 1 && fiber.items[0].barcode === '00068',
+     fiber && fiber.items.map((i) => [i.name, i.qty]));
+  ok('...and it says how many things are inside it',
+     fiber.items[0].contains === 1 && fiber.items[1].contains === 0,
+     fiber.items.map((i) => i.contains));
+  const inner = sheet.groups.find((g) => g.path === 'Fiber Spools / Mediacom 300m 12 Channel fiber spool');
+  ok('...AND opens a path-named sub-group for its contents',
+     !!inner && inner.type === 'container' && inner.items.length === 1
+     && inner.items[0].name === 'Media Com Breakout' && inner.items[0].qty === 2, inner);
+  ok('the container sub-group carries the container\u2019s own barcode',
+     inner.containerSerial === '00068', inner.containerSerial);
+  ok('a HEADING is never counted as gear \u2014 no item is named after a group',
+     !sheet.groups.some((g) => g.items.some((i) => i.name === 'Fiber Spools')),
+     sheet.groups.map((g) => g.items.map((i) => i.name)));
+  // 48 cabinets + 7 fanouts + 3 socapex + 1 spool + 3 seetronic + 2 breakouts.
+  // The spool's own 1 is the unit the first version of the normalizer dropped.
+  ok('totals count the contained spool: 4 groups, 6 lines, 64 units',
+     sheet.totals.groups === 4 && sheet.totals.lines === 6 && sheet.totals.units === 64,
+     sheet.totals);
+  ok('rows are NOT aggregated by name \u2014 every line keeps its own barcode',
+     sheet.groups.find((g) => g.path === 'Socapex Cables').items
+       .map((i) => i.barcode).join(',') === '00026,00016',
+     sheet.groups.find((g) => g.path === 'Socapex Cables').items.map((i) => i.barcode));
+  ok('a real quantity is never flagged as assumed',
+     sheet.groups.every((g) => g.items.every((i) => i.qtyAssumed === false)),
+     sheet.groups.map((g) => g.items.map((i) => i.qtyAssumed)));
+
+  // \u2500\u2500 the OTHER grammar, and BUG 6, through the same normalizer \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  const mixed = flex.flexNormalizePullSheet(ROWDATA_MANIFEST);
+  ok('manifest grammar: top-level leaves become a Loose Items group, UNSHIFTED first',
+     mixed.groups[0].type === 'loose' && mixed.groups[0].name === 'Loose Items',
+     mixed.groups.map((g) => [g.name, g.type]));
+  ok('a bare case (children, NO resourceId) stays a heading \u2014 it is not gear',
+     !mixed.groups[0].items.some((i) => /Fabulux Quarter Pack/.test(i.name)),
+     mixed.groups[0].items.map((i) => i.name));
+  ok('...and still becomes its own container group carrying its serial',
+     mixed.groups.some((g) => g.name === 'Fabulux Quarter Pack' && g.containerSerial === 'FQ007'),
+     mixed.groups.map((g) => [g.name, g.containerSerial]));
+  const serialed = mixed.groups[0].items.filter((i) => i.name === '2024 P10 Perimeter');
+  ok('BUG 6: two serial-tracked rows stay TWO lines here \u2014 the aggregation was the lossy part',
+     serialed.length === 2, serialed.map((i) => i.serial));
+  ok('BUG 6: the trailing "(6858)" is stripped from the name and LIFTED into serial',
+     serialed[0].serial === '6858' && serialed[1].serial === '6859'
+     && serialed[0].rawName === '2024 P10 Perimeter (6858)', serialed);
+  ok('BUG 6: a null quantity counts as 1 and SAYS SO with qtyAssumed',
+     serialed[0].qty === 1 && serialed[0].qtyAssumed === true, serialed[0]);
+  ok('...while a real quantity is not flagged',
+     mixed.groups[0].items.find((i) => i.name === 'Data Cable 25ft').qty === 12
+     && mixed.groups[0].items.find((i) => i.name === 'Data Cable 25ft').qtyAssumed === false);
+  ok('isNote rows are still not gear',
+     !mixed.groups.some((g) => g.items.some((i) => /REMEMBER THE SPARES/.test(i.name))),
+     mixed.groups.map((g) => g.items.map((i) => i.name)));
+
+  // \u2500\u2500 BUG 5's dangerous half on the read path \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  handler = (url, o) => (/row-data/.test(url) ? { body: [] } : readRoute(url, o));
+  const emptyRead = await flex.flexReadPullSheet(TT_LIST);
+  ok('BUG 5: an empty row-data answer is flagged empty:true with rowCount 0, not reported as a fact',
+     emptyRead.empty === true && emptyRead.rowCount === 0 && emptyRead.groups.length === 0,
+     { empty: emptyRead.empty, rows: emptyRead.rowCount });
+  ok('...and the HEADER is still fully reported, so the status line survives an empty read',
+     emptyRead.docNumber === 'TT_26_1' && emptyRead.status.stages[0].done === true, emptyRead.docNumber);
+  handler = readRoute;
+
+  // \u2500\u2500 fail-soft: a cosmetic lookup must never fail a pull-sheet read \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  flex.flexResetUserNameCache();
+  handler = (url, o) => (/\/user-profile\/[0-9a-f-]{36}$/.test(url)
+    ? { status: 500, body: { exceptionMessage: 'user service down' } } : readRoute(url, o));
+  const noName = await flex.flexReadPullSheet(TT_LIST);
+  ok('R18-style: an unresolvable user leaves `by` empty and the READ STILL SUCCEEDS',
+     noName.status.stages[0].done === true && noName.status.stages[0].by === ''
+     && noName.status.stages[0].byUserId === TT_USER && noName.groups.length === 4,
+     noName.status.stages[0]);
+  handler = readRoute;
+  flex.flexResetUserNameCache();
+
+  // \u2500\u2500 the unconfigured contract holds for the new functions too \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  const savedUrl = process.env.FLEX_BASE_URL, savedKey = process.env.FLEX_API_KEY;
+  delete process.env.FLEX_BASE_URL;
+  delete process.env.FLEX_API_KEY;
+  for (const fn of ['flexGetEquipmentList', 'flexListEquipmentListsUnder', 'flexReadPullSheet']) {
+    let e = null;
+    try { await flex[fn]('x'); } catch (err) { e = err; }
+    ok(`${fn}() throws 501 with no key \u2014 never a silent empty sheet`,
+       !!e && e.status === 501, e && e.message);
+  }
+  ok('flexEquipmentListUrl() throws rather than returning a half-built link',
+     (() => { try { flex.flexEquipmentListUrl('x'); return false; } catch (e) { return e.status === 501; } })());
+  ok('flexGetUserName() is the ONE exception \u2014 it is cosmetic, so it degrades to \'\'',
+     (await flex.flexGetUserName('x')) === '');
+  process.env.FLEX_BASE_URL = savedUrl;
+  process.env.FLEX_API_KEY = savedKey;
+  flex.flexResetUserNameCache();
+  ok('flexEquipmentListUrl builds the header view once configured',
+     flex.flexEquipmentListUrl('abc') ===
+       'https://e360sport.flexrentalsolutions.com/f5/ui/#element/abc/view/equipmentlist/header',
+     flex.flexEquipmentListUrl('abc'));
+  ok('...and an empty id is an empty string, not a link to nowhere',
+     flex.flexEquipmentListUrl('') === '' && flex.flexEquipmentListUrl(null) === '');
+
   console.log(`\n${'\u2550'.repeat(66)}`);
   console.log(`  FLEX CLIENT: ${pass} passed, ${fail} failed  (no network, no key)`);
   if (fail) { console.log('  FAILURES:'); failures.forEach((f) => console.log('    \u00b7 ' + f)); }

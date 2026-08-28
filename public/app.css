@@ -473,6 +473,11 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
 .cnode .cx{font-family:var(--font-mono); font-size:10px; font-weight:600; color:var(--accent); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent); padding:1px 5px; border-radius:4px}
 .cnode.ungen .cx{color:var(--muted); border-color:var(--border-strong)}
 .cnode .cn{font-weight:600; font-size:12.5px; line-height:1.25}
+/* `.cs` = the caption line under a thing. It was only ever defined SCOPED to
+   .cnode, so the same class used on the Gear tab (and in the derivation note)
+   rendered unstyled. The base rule below is the shared definition; .cnode's
+   own rule still wins on specificity, so the chain strip is unchanged. */
+.cs{font-size:10.5px; color:var(--muted); font-family:var(--font-mono)}
 .cnode .cs{font-size:10.5px; color:var(--muted); font-family:var(--font-mono); margin-top:-2px}
 .cnode .cbtns{display:flex; gap:6px; margin-top:auto; flex-wrap:wrap}
 .carrow{display:flex; align-items:center; color:var(--border-strong); padding:0 3px; flex:none}
