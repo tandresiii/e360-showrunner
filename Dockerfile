@@ -75,6 +75,20 @@ RUN npm ci --omit=dev --no-audit --no-fund \
 COPY . .
 RUN chmod +x /app/docker-entrypoint.sh
 
+# ── EXPERIMENT IN PROGRESS (2026-08-28) ────────────────────────────────────────
+# POST /api/admin/storage-probe proved the NAS cannot deliver a reply to this
+# container that needs more than one packet: same port, same second, a TLS
+# handshake whose answer is a 7-byte alert arrives and one whose answer is a
+# certificate chain does not. The fault is on the far side of the tunnel, but
+# the packets' PATH is something this end can change, and one of these two may
+# route around it. Set here rather than as a Railway variable so the setting is
+# in the repo, reviewable, and reverted by deleting a line.
+#
+# Delete both lines once the answer is known (see WIRING_DAY.md). They are read
+# by docker-entrypoint.sh, and a Railway variable of the same name overrides
+# them, so this is a default and not a lock.
+ENV TAILSCALE_FORCE_DERP=1
+
 # Documentation only — Railway injects PORT and the app reads it.
 EXPOSE 3100
 

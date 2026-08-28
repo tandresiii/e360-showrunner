@@ -45,6 +45,36 @@ fail_or_warn() {
   log "WARNING: make this a hard deploy failure instead."
 }
 
+# ── THE TWO KNOBS THAT CHANGE HOW PACKETS CROSS ────────────────────────────────
+# Added 2026-08-28, when POST /api/admin/storage-probe proved that this container
+# can open a TCP connection to the NAS, exchange small messages with it in 50ms,
+# and never receive a reply that needs more than one packet. Same port, same
+# second: a TLS handshake whose answer is a 7-byte alert arrives; one whose
+# answer is a certificate chain does not.
+#
+# Neither knob is a fix for that — the fault is on the far side — but each one
+# changes the path the NAS's packets take to get here, and either could route
+# around it. They are FLAGS, not defaults, so the shape of a normal deploy is
+# unchanged and turning one on is a decision somebody made on purpose.
+#
+#   TAILSCALE_FORCE_DERP=1  all traffic over Tailscale's relays instead of the
+#                           direct UDP path. If the direct path is what mangles
+#                           multi-packet replies, this steps around it — at the
+#                           cost of relay latency on every byte.
+#   TAILSCALE_MTU=<n>       the tunnel MTU, which sets the MSS we advertise and
+#                           therefore how the NAS's TCP stack cuts up what it
+#                           sends us. Tailscale's default is 1280.
+#
+# Both are tailscale's own debug knobs, spelled the way tailscale spells them.
+if [ "${TAILSCALE_FORCE_DERP:-0}" = "1" ]; then
+  export TS_DEBUG_ALWAYS_USE_DERP=1
+  log "TAILSCALE_FORCE_DERP=1 — every packet goes via a DERP relay, no direct path"
+fi
+if [ -n "${TAILSCALE_MTU:-}" ]; then
+  export TS_DEBUG_MTU="${TAILSCALE_MTU}"
+  log "TAILSCALE_MTU=${TAILSCALE_MTU} — tunnel MTU overridden (tailscale's default is 1280)"
+fi
+
 if [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
   log "TAILSCALE_AUTHKEY is set — bringing up tailscaled (userspace networking)"
   mkdir -p /var/run/tailscale /var/lib/tailscale
