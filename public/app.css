@@ -183,6 +183,24 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
 .file .fb{padding:11px 12px}
 .file .fb b{font-size:12.5px; font-weight:600; display:block; font-family:var(--font-body); line-height:1.3}
 .file .fb span{color:var(--muted); font-size:11px; font-family:var(--font-mono); margin-top:4px; display:block}
+/* THE CELL. A card is one <button> and cannot contain another, so the grid item
+   is a wrapper and the Download chip rides on top of the thumb. `display:grid`
+   with one implicit row keeps the card at the cell's full height, so a chip on
+   one card does not make it taller than its neighbours. The chip sits BOTTOM
+   LEFT of the thumb — top right is the .ext badge's. */
+.file-cell{position:relative; display:grid; min-width:0}
+.file-cell>.file{height:100%}
+.file-dl{position:absolute; top:78px; left:8px; z-index:2; display:inline-flex; align-items:center; gap:5px;
+  font-family:var(--font-mono); font-size:9.5px; font-weight:600; letter-spacing:.04em; text-transform:uppercase;
+  padding:4px 8px; border-radius:6px; cursor:pointer;
+  background:var(--bg); color:var(--text-2); border:1px solid var(--border)}
+.file-dl svg{width:12px; height:12px}
+.file-dl:hover{color:var(--text); border-color:var(--border-strong); background:var(--surface)}
+.file-dl:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+/* .file:hover lifts the card 2px; the chip has to travel with it or it detaches
+   from the thumb it is sitting on. Keyed on the CELL so hovering either one
+   moves both. */
+.file-cell:hover .file-dl{transform:translateY(-2px)}
 
 /* ---------- activity ---------- */
 .timeline{position:relative; padding-left:26px}
@@ -348,6 +366,31 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
 .stage-canvas{flex:1; overflow:auto; background:var(--surface-2); background-image:radial-gradient(var(--border) 1px, transparent 1px); background-size:22px 22px; display:grid; place-items:center; padding:28px; min-height:0}
 .pagenav{display:inline-flex; align-items:center; gap:2px}
 .pagenav .iconbtn{width:30px;height:30px}
+
+/* ---------- the inline preview: the real bytes, on the stage ----------
+   .stage-canvas is a one-child grid with place-items:center, so the document
+   and the record it belongs to travel together in one column rather than as
+   two independently centred grid rows. */
+.vstack{display:flex; flex-direction:column; align-items:center; gap:20px; width:100%; max-width:860px; min-width:0}
+.vprev{width:100%; background:var(--surface); border:1px solid var(--border); border-radius:var(--r);
+  overflow:hidden; display:flex; flex-direction:column; justify-content:center;
+  min-height:300px; box-shadow:0 14px 44px rgba(0,0,0,.28)}
+/* The browser's own PDF viewer. A tall-but-bounded frame: big enough to read a
+   spec sheet, never so tall the metadata card below falls off the world. */
+.vprev-frame{width:100%; height:min(72vh,780px); border:0; display:block; background:#fff}
+.vprev-img{width:100%; height:auto; max-height:min(72vh,780px); object-fit:contain; display:block; background:#0b0f0d}
+.vprev-msg{padding:34px 26px; display:flex; flex-direction:column; align-items:center; gap:7px; text-align:center; color:var(--muted)}
+.vprev-msg b{font-size:13px; font-weight:600; color:var(--text)}
+.vprev-msg span{font-size:11.5px; font-family:var(--font-mono); max-width:440px; line-height:1.5}
+.vprev-msg .vprev-sub{color:var(--muted); opacity:.8}
+.vprev-msg svg{width:22px;height:22px; color:var(--warn)}
+.vprev-msg.fail b{color:var(--warn)}
+.vprev-spin{width:20px;height:20px;border-radius:50%; border:2px solid var(--border); border-top-color:var(--accent); animation:vprevspin .8s linear infinite}
+@keyframes vprevspin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){ .vprev-spin{animation:none} }
+/* a photo's preview slot IS the gallery frame — it must not draw a second one */
+.ps-frame .vprev.ps-live{position:absolute; inset:0; min-height:0; border:0; border-radius:0; box-shadow:none; background:transparent}
+.ps-frame .vprev.ps-live .vprev-img{width:100%; height:100%; max-height:none; object-fit:cover}
 
 .vmeta{background:var(--surface); border:1px solid var(--border); border-radius:var(--r); overflow:hidden; position:sticky; top:0}
 .vmeta .mh{padding:13px 15px; border-bottom:1px solid var(--border)}

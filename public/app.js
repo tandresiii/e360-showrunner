@@ -84,6 +84,11 @@ async function renderView(view, arg) {
   closeRosterPicker();
   setNavOpen(false);                       /* mobile drawer closes on navigate */
   var s = $('#scroll'); s.scrollTop = 0;
+  /* Leaving the viewer releases the object URL the stage was holding. Paging
+     inside the viewer is handled by drawViewer(); this is the way OUT — the
+     path that used to be the only one that could strand a blob for the life of
+     the tab. It runs before the await below, so a slow view still frees it. */
+  if (window.__view === 'viewer' && view !== 'viewer' && typeof vPrevRelease === 'function') vPrevRelease();
   window.__view = view; CUR.view = view;
   document.querySelectorAll('#nav a').forEach(function (a) { a.classList.toggle('on', a.dataset.view === view); });
 
@@ -3615,6 +3620,7 @@ var ACTIONS = {
   commitAddFile: function (t, id) { return commitAddFile(id); },
   commitUpload:  function () { return commitUpload(); },
   downloadFile:  function (t, id) { return downloadFile(id); },
+  vOpenTab:      function (t, id) { return vOpenTab(id); },
   specGen:       function (t, id, k) { return specGen(id, k); },
   openChainFile: function (t, id, k) { return openChainFile(id, k); },
   printChainFile: function (t, id, k) { return printChainFile(id, k); },

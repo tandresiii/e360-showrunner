@@ -807,15 +807,34 @@ function manifestBody(g) {
 }
 
 /* ------------------------------------------------------------- files tab -- */
+/* ONE FILE CARD.
+   Two things landed here on 2026-08-28. First, a real uploaded file is created
+   with `meta: ''` (uploadRealFile) — nothing invents a caption for it — so the
+   card's second line was simply BLANK for every genuine upload while the demo
+   fixtures, which carry a hand-written meta, looked fine. Who filed it and when
+   are facts the row already holds; they are printed when there is nothing
+   better to say. Second, the seam pass wired the `downloadFile` action and put
+   the button in the viewer only, so getting a file out meant opening it first.
+
+   The card stays a <button> for the keyboard — there is no generic Enter/Space
+   handler on data-act, so demoting it to a div would silently drop keyboard
+   access — and the Download control is a SIBLING inside the cell rather than a
+   nested button, which the HTML parser would hoist straight back out. */
+function fileCard(f) {
+  var line = f.meta || (uploaderName(f) !== '—'
+    ? 'Filed by ' + uploaderName(f) + ' · ' + fmtDate(f.created_at)
+    : fmtDate(f.created_at));
+  return '<div class="file-cell">' +
+    '<button class="file" ' + act('openViewer', f.id) + '>' +
+    '<div class="thumb">' + icon(fileIcon(f)) + '<span class="ext">' + esc(f.ext) + '</span></div>' +
+    '<div class="fb"><b>' + esc(f.name) + '</b><span>' + esc(line) + '</span></div></button>' +
+    fileDownloadChip(f) + '</div>';
+}
 /* documents only — photos have their own gallery tab next door (photo pass) */
 function tabFiles(show) {
   var docs = show.files.filter(function (f) { return f.kind !== 'photo'; });
   var phN = photoCount(show.id);
-  var cards = docs.map(function (f) {
-    return '<button class="file" ' + act('openViewer', f.id) + '>' +
-      '<div class="thumb">' + icon(fileIcon(f)) + '<span class="ext">' + esc(f.ext) + '</span></div>' +
-      '<div class="fb"><b>' + esc(f.name) + '</b><span>' + esc(f.meta) + '</span></div></button>';
-  }).join('');
+  var cards = docs.map(fileCard).join('');
   return recapFilesBlock(show) +
     '<div class="files-head"><h3>Files · ' + docs.length + '</h3>' +
     '<div style="display:flex;gap:9px;flex-wrap:wrap">' +

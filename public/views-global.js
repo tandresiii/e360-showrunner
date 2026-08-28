@@ -119,16 +119,19 @@ function viewFiles(shows) {
   var cards = shown.map(function (x) {
     var where = x.show.project.single ? x.show.project.name : x.show.name;
     if (x.f.kind === 'photo') return filePhotoCard(x.f, where);
-    return '<button class="file" ' + act('openViewer', x.f.id) + '>' +
+    /* the same cell + chip the folder's Files tab uses, so the Download
+       affordance is in both grids and not just the one somebody walked */
+    return '<div class="file-cell"><button class="file" ' + act('openViewer', x.f.id) + '>' +
       '<div class="thumb">' + icon(fileIcon(x.f)) + '<span class="ext">' + esc(x.f.ext) + '</span></div>' +
-      '<div class="fb"><b>' + esc(x.f.name) + '</b><span>' + esc(where) + '</span></div></button>';
+      '<div class="fb"><b>' + esc(x.f.name) + '</b><span>' + esc(where) + '</span></div></button>' +
+      fileDownloadChip(x.f) + '</div>';
   }).join('');
   var seg = '<div class="seg">' +
     [['docs', 'Documents', docs.length], ['photos', 'Photos', photos.length], ['all', 'All', all.length]].map(function (m) {
       return '<button class="' + (mode === m[0] ? 'on' : '') + '" ' + act('filesMode', null, m[0]) + '>' +
         esc(m[1]) + ' <span class="sc">' + m[2] + '</span></button>';
     }).join('') + '</div>';
-  return '<div class="page-h"><div><h1>Files</h1><div class="sub">Every spec, proof, contract, confirmation — and the event photo galleries — metadata here, bytes on the e360 NAS. Byte-serving from the NAS is a deferred infra dependency; the viewer renders the cached document or thumbnail.</div></div>' + seg + '</div>' +
+  return '<div class="page-h"><div><h1>Files</h1><div class="sub">Every spec, proof, contract, confirmation — and the event photo galleries — metadata here, bytes on the e360 NAS. A file with bytes behind it opens in the viewer as the document itself — streamed from the NAS through the app — and downloads straight off its card.</div></div>' + seg + '</div>' +
     '<div class="stats" style="grid-template-columns:repeat(4,1fr)">' +
     '<div class="stat accent"><div class="rail-c" style="background:var(--accent)"></div><div class="k">Documents</div><div class="v">' + docs.length + '</div></div>' +
     '<div class="stat"><div class="rail-c" style="background:var(--accent)"></div><div class="k">Bound specs</div><div class="v">' + specs + '</div></div>' +
@@ -602,7 +605,13 @@ function drawViewer(show) {
   if (!files.length) return;
   var i = viewerIndex(show), f = files[i];
   VIEWER.fileId = f.id;
+  /* EVERY navigation path lands here — openViewer -> render, vSet from the
+     strip, vGo from the arrows and the keyboard. So this is the one place the
+     previous file's object URL can be released, and one flip cannot leak. */
+  vPrevRelease();
   var isPhoto = f.kind === 'photo';
+  var prevKind = filePreviewKind(f);
+  var hasBytes = fileHasBytes(f);
   var nav = viewerNavList(show), ni = 0;
   nav.forEach(function (x, k) { if (x.id === f.id) ni = k; });
   document.querySelectorAll('.vfile').forEach(function (b, bi) { b.classList.toggle('on', bi === i); });
@@ -614,10 +623,19 @@ function drawViewer(show) {
     '<span class="mono" style="font-size:11px;color:var(--muted);padding:0 6px">' + (ni + 1) + ' / ' + nav.length + (isPhoto ? ' photos' : '') + '</span>' +
     '<button class="iconbtn" title="Next" ' + act('vGo', 1) + '>' + icon('chevR') + '</button></div>' +
     '<button class="btn sm primary" ' + act('printFile') + '>' + icon('print') + 'Print</button></div>' +
-    '<div class="stage-canvas">' + sheetHTML(show, f, show.gear) + '</div>';
+    /* THE STAGE, when there are real bytes behind the row: the document first,
+       the record under it. A photo is the one exception — photoSheet() puts
+       #vPrev inside its own gallery frame, so it must not get a second one. */
+    '<div class="stage-canvas">' +
+      (prevKind && !isPhoto
+        ? '<div class="vstack"><div class="vprev" id="vPrev">' + previewLoadingHTML() + '</div>' +
+          sheetHTML(show, f, show.gear) + '</div>'
+        : sheetHTML(show, f, show.gear)) +
+    '</div>';
+  if (prevKind) drawPreview(f, prevKind);
 
   var title = show.project.single ? show.project.name : show.name;
-  if (isPhoto) { drawPhotoMeta(show, f, title); return; }
+  if (isPhoto) { drawPhotoMeta(show, f, title, hasBytes); return; }
   /* financial docs carry money metadata + (for proposals) the review actions */
   var isFin = !!FIN_KINDS[f.kind];
   var finJob = isFin ? JOBS_BY_ID[fileJobId(f)] : null;
@@ -626,7 +644,7 @@ function drawViewer(show) {
       metaRow('Doc date', fmtDateFull(f.doc_date || f.created_at)) +
       metaRow('Billed to', finJob ? finJob.qb_job_number + (finJob.deal_type ? ' · ' + finJob.deal_type : '') : '—') +
       metaRow('Status', f.status === 'proposed' ? 'Proposed — awaiting review' : 'Filed') +
-      metaRow('Filed by', f.provenance ? actorLabel(null, f.provenance) + ' · ' + Math.round(f.provenance.confidence) + '%' : userName(f.uploaded_by))
+      metaRow('Filed by', f.provenance ? actorLabel(null, f.provenance) + ' · ' + Math.round(f.provenance.confidence) + '%' : uploaderName(f))
     : '';
   /* E5. This used to be `isFin && f.status === 'proposed'`, so a proposed
      transcript, spec, contract, recording or report had confirm/reject nowhere
@@ -642,9 +660,13 @@ function drawViewer(show) {
     metaRow('Type', fileTypeLabel(f, show)) +
     finRows +
     metaRow('Version', f.ver) + metaRow('Size', fmtSize(f.size)) + metaRow('Dimensions', f.dim) +
-    (isFin ? '' : metaRow('Uploaded by', userName(f.uploaded_by))) + metaRow('Uploaded', fmtDateFull(f.created_at)) +
+    (isFin ? '' : metaRow('Uploaded by', uploaderName(f))) + metaRow('Uploaded', fmtDateFull(f.created_at)) +
     (!isFin && show.job ? metaRow('Job', show.job.qb_job_number) : '') +
     '<div class="acts">' + reviewActs + '<button class="btn primary" ' + act('printFile') + '>' + icon('print') + 'Print this file</button>' +
+    /* The two byte affordances, spelled out. They appear for ANY row with real
+       bytes — including the .xlsx and .dwg the browser cannot preview, which is
+       precisely when a person needs them most. */
+    (hasBytes ? '<button class="btn" ' + act('vOpenTab', f.id) + '>' + icon('link') + 'Open in new tab</button>' : '') +
     '<button class="btn" ' + act('downloadFile', f.id) + '>' + icon('download') + 'Download</button>' +
     '<button class="btn ghost" ' + toastAttrs('Bound', 'Spec re-bound to ' + title) + '>' + icon('link') + 'Re-bind to folder</button></div>' +
     '<div class="note-meta-lock">' + icon('lock') + '<span>Bound to ' + esc(title) + ' — ' + esc(show.venue) + '. Anyone with folder access can view and print; the approved version stays locked.</span></div>' +
@@ -656,7 +678,7 @@ function drawViewer(show) {
 /* ---- photo meta panel (photo pass): taken/shot-by/tags · inline caption
    edit (pm+ or the uploader) · NAS path · provenance · confirm/reject on
    proposals · the recap-pick toggle. Notes thread mounts exactly as for docs. */
-function drawPhotoMeta(show, f, title) {
+function drawPhotoMeta(show, f, title, hasBytes) {
   var canCap = canEditPhoto(f);
   var capBlock;
   if (PH_UI.editCap === f.id && canCap) {
@@ -678,7 +700,7 @@ function drawPhotoMeta(show, f, title) {
     metaRow('Shot by', f.shot_by ? userName(f.shot_by) : '—') +
     metaRow('Dimensions', (f.width && f.height) ? f.width + ' × ' + f.height + ' px' : f.dim) +
     metaRow('Size', fmtSize(f.size)) +
-    metaRow('Filed by', f.provenance ? actorLabel(null, f.provenance) + ' · ' + Math.round(f.provenance.confidence) + '%' : userName(f.uploaded_by)) +
+    metaRow('Filed by', f.provenance ? actorLabel(null, f.provenance) + ' · ' + Math.round(f.provenance.confidence) + '%' : uploaderName(f)) +
     metaRow('Status', f.status === 'proposed' ? 'Proposed — awaiting review' : 'Filed' + (f.recap_pick ? ' · recap pick' : ''));
   var acts = [];
   if (f.status === 'proposed') {
@@ -688,11 +710,18 @@ function drawPhotoMeta(show, f, title) {
     acts.push('<button class="btn ' + (f.recap_pick ? '' : 'primary') + '" ' + act('photoPick', f.id) + '>' + icon('star') +
       (f.recap_pick ? 'Recap pick — remove' : 'Star for the recap') + '</button>');
   }
+  if (hasBytes) acts.push('<button class="btn" ' + act('vOpenTab', f.id) + '>' + icon('link') + 'Open in new tab</button>');
   acts.push('<button class="btn" ' + act('downloadFile', f.id) + '>' + icon('download') + 'Download original</button>');
   var provNote = f.provenance
     ? 'Organized by ' + actorLabel(null, f.provenance) + ' from ' + (f.provenance.source_label || 'a camera-roll sync') +
       ' — proposals ride the same review flow as documents.'
-    : 'Uploaded by ' + userName(f.uploaded_by) + '. The original lives on the NAS; the record here is metadata + a thumbnail.';
+    /* Two different sentences because they are two different facts. With bytes
+       on the NAS the frame above IS the photograph; without them the record is
+       metadata and a generated placeholder, and saying "a thumbnail" over a
+       real photo would be the same small lie in the other direction. */
+    : 'Uploaded by ' + uploaderName(f) + '. ' + (hasBytes
+        ? 'The frame above is the original, streamed from the NAS through the app.'
+        : 'The original lives on the NAS; the record here is metadata + a thumbnail.');
   $('#vMeta').innerHTML = '<div class="mh"><b>Photo details</b></div>' +
     '<div class="bound"><div class="bi">' + icon('cam') + '</div><div class="bt"><span>Tagged to</span><b>' + esc(title) + '</b></div></div>' +
     capBlock + tagRow + rows +
@@ -701,4 +730,103 @@ function drawPhotoMeta(show, f, title) {
     '<div class="note-meta-lock">' + icon(f.provenance ? 'bolt' : 'lock') + '<span>' + esc(provNote) + '</span></div>' +
     '<div class="vnotes"><div class="vh">Notes' + (noteCount('file', f.id) ? ' · ' + noteCount('file', f.id) : '') + '</div>' +
     notesThread('file', f.id) + '</div>';
+}
+
+/* ============================================================================
+   THE INLINE PREVIEW — the bytes, on the stage  (2026-08-28)
+   ----------------------------------------------------------------------------
+   Tom uploaded a real PDF to Show 1, opened it in the viewer, and got the
+   honest metadata card and nothing else — while GET /api/files/:id/content was
+   already serving those bytes. The card was not wrong; it was alone, and alone
+   it reads as "there is no way to see this from here."
+
+   Why it cannot be a plain <embed src="/api/files/1/content">: this app
+   authenticates with an `x-auth-token` HEADER, not a cookie (SR.bytes(), see
+   api.js). A naive iframe/embed src arrives unauthenticated and comes back
+   401 — a blank grey frame with no explanation, which is worse than the card.
+   So the bytes are FETCHED with the session in hand and handed to the browser
+   as an object URL, exactly as downloadFile() already does.
+
+   ONE object URL is alive at a time. VPREV holds it, drawViewer() releases it
+   before every navigation, and renderView() releases it on the way out of the
+   viewer, so paging fourteen photos does not strand fourteen blobs.
+   ========================================================================== */
+var VPREV = { gen: 0, url: null, blob: null, fileId: null };
+
+/* Release whatever the stage is currently holding. Safe to call when it holds
+   nothing, and it BUMPS the generation — so a fetch still in flight for the
+   file we just left resolves into a stale check and drops its result instead
+   of drawing over the new one. */
+function vPrevRelease() {
+  VPREV.gen += 1;
+  if (VPREV.url) { try { URL.revokeObjectURL(VPREV.url); } catch (_) {} }
+  VPREV.url = null; VPREV.blob = null; VPREV.fileId = null;
+}
+
+async function drawPreview(f, kind) {
+  var gen = VPREV.gen;                       /* the ticket this run holds */
+  var host = $('#vPrev');
+  if (!host) return;
+  var stale = function () { return gen !== VPREV.gen; };
+  try {
+    /* Ask the deployment before asking the NAS. A server with no storage
+       configured answers this from a cached GET /api/config, so the honest
+       sentence costs nothing and the pointless 502 never happens. */
+    var canStore = await api.uploadsEnabled();
+    if (stale()) return;
+    if (!canStore) {
+      host.innerHTML = previewFailHTML('This server has no NAS storage configured, so nothing can serve the bytes.');
+      return;
+    }
+    var blob = await api.downloadFileBytes(f.id);
+    /* Navigated away mid-transfer. Return BEFORE createObjectURL: a URL that
+       is never minted is a URL that cannot leak. */
+    if (stale()) return;
+    var url = URL.createObjectURL(blob);
+    VPREV.url = url; VPREV.blob = blob; VPREV.fileId = f.id;
+    host.innerHTML = kind === 'img'
+      ? '<img class="vprev-img" src="' + esc(url) + '" alt="' + esc(f.caption || f.name || '') + '">'
+      /* <embed>, not <iframe>: it is the element browsers hand straight to the
+         built-in PDF viewer, and it is not subject to the frame-ancestors and
+         sandbox rules a framed document inherits. */
+      : '<embed class="vprev-frame" type="application/pdf" src="' + esc(url) + '">';
+  } catch (e) {
+    if (stale()) return;
+    host.innerHTML = previewFailHTML(e && e.message ? e.message : e);
+  }
+}
+
+/* "Open in new tab". If the stage already holds these bytes the URL is minted
+   and the window opened SYNCHRONOUSLY inside the click — which is the only way
+   a browser will not treat it as a pop-up. Only a file we have not fetched yet
+   pays the async round trip, and if the pop-up blocker eats that one we say so
+   rather than leaving a button that appears to do nothing.
+
+   Its object URL is deliberately NOT the stage's: the new tab owns its copy and
+   keeps it after the viewer has paged on. It is revoked on a timer, long after
+   the tab has finished loading — the same trade downloadFile() makes. */
+var VPREV_TAB_MS = 60000;
+function viewerFileName(f) {
+  return String((f && f.name) || 'file') + (f && f.ext ? '.' + String(f.ext).replace(/^\./, '') : '');
+}
+function vPrevOpenBlob(blob, f) {
+  var url = URL.createObjectURL(blob);
+  var w = null;
+  try { w = window.open(url, '_blank', 'noopener'); } catch (_) { w = null; }
+  setTimeout(function () { try { URL.revokeObjectURL(url); } catch (_) {} }, VPREV_TAB_MS);
+  if (w) toast('Opened in a new tab', viewerFileName(f));
+  else toast('Your browser blocked the new tab', 'Allow pop-ups for Showrunner, or use Download.');
+  return !!w;
+}
+async function vOpenTab(fileId) {
+  var f = await api.getFile(fileId);
+  if (!f) return;
+  if (VPREV.blob && VPREV.fileId === f.id) return vPrevOpenBlob(VPREV.blob, f);
+  try {
+    var blob = await api.downloadFileBytes(f.id);
+    vPrevOpenBlob(blob, f);
+  } catch (e) {
+    /* the server's own sentence, verbatim — same rule as downloadFile() */
+    toast('Could not open ' + viewerFileName(f), String(e && e.message || e));
+  }
 }

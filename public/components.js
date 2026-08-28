@@ -473,6 +473,77 @@ function showLabel(s) {
 }
 
 /* ---------------- files ---------------- */
+/* THE PERSON ON THE ROW, NAMED.
+   userName() answers '' for anybody who is not on the loaded roster, and the
+   server's own default `admin` account is exactly that on a fresh deployment —
+   which is how a real uploaded PDF came up "Filed by —" with a perfectly good
+   `uploaded_by: 'admin'` sitting in the row. A bare username is worse than a
+   full name and far better than a blank. `by` is the DEMO store's field name;
+   it is checked last so a live row can never be shadowed by a fixture. */
+function uploaderName(f) {
+  if (!f) return '—';
+  return userName(f.uploaded_by) || f.uploaded_by || f.by || '—';
+}
+
+/* ── THE BYTES, SHOWN ──────────────────────────────────────────────────────
+   Tom uploaded a real PDF, opened it, and got a metadata card telling him the
+   document lives somewhere else — while `GET /api/files/:id/content` was
+   serving those exact bytes the whole time. The card was honest and it was
+   also the ONLY thing on the stage, which made it read as a dead end.
+
+   These three predicates decide when the viewer can do better. They are
+   deliberately conservative:
+     · API mode only — a demo row has a plausible `size` and no bytes anywhere,
+       and that is the pair this has to tell apart.
+     · a real, positive file id and a server-derived nas_path — the bell renders
+       agent PROPOSALS as synthetic file rows with a negative id and no path,
+       and fetching one of those would 404.
+     · a size the server owns. A client may still POST a size it does not have
+       (the route accepts one), so this is a strong hint and not a promise —
+       which is why the loader below reports the failure verbatim instead of
+       pretending the file is missing. */
+function fileExtLower(f) { return String((f && f.ext) || '').replace(/^\./, '').toLowerCase(); }
+function fileHasBytes(f) {
+  return !!(f && typeof SR !== 'undefined' && SR.isApi() &&
+            Number(f.id) > 0 && f.nas_path && Number(f.size) > 0);
+}
+/* What a BROWSER renders natively off a blob URL, and nothing else. .heic and
+   .tif are deliberately absent: Chrome cannot draw either, and an <img> that
+   silently fails is worse than an honest "no preview". */
+var PREVIEW_IMG_EXT = { jpg: 1, jpeg: 1, png: 1, gif: 1, webp: 1, bmp: 1, svg: 1 };
+function filePreviewKind(f) {
+  if (!fileHasBytes(f)) return null;
+  var e = fileExtLower(f);
+  if (e === 'pdf') return 'pdf';
+  if (PREVIEW_IMG_EXT[e]) return 'img';
+  return null;
+}
+/* The card-corner Download chip. It is a real <button>, so it must live OUTSIDE
+   the card's own <button> — a nested one is hoisted out by the HTML parser and
+   lands wherever it likes. Both grids therefore wrap the card in `.file-cell`
+   and hang this off it. Rendered only where there are bytes to fetch: a chip
+   over a demo fixture would be a promise the NAS cannot keep. */
+function fileDownloadChip(f) {
+  if (!fileHasBytes(f)) return '';
+  return '<button class="file-dl" ' + act('downloadFile', f.id) +
+    ' title="Download ' + esc(f.name) + '">' + icon('download') + 'Download</button>';
+}
+
+/* The three states the stage can be in while the bytes are in flight. They are
+   markup only — drawPreview() owns the transitions, so the loading state is
+   never a lie the renderer told itself. */
+function previewLoadingHTML() {
+  return '<div class="vprev-msg"><span class="vprev-spin"></span>' +
+    '<b>Fetching the document</b><span>Streaming the bytes from the NAS through the app…</span></div>';
+}
+/* A failure says the SERVER's sentence. "the NAS is unreachable" is the answer
+   the person needs; a friendlier invention here would hide it. */
+function previewFailHTML(msg) {
+  return '<div class="vprev-msg fail">' + icon('alert') +
+    '<b>The bytes did not come back</b><span>' + esc(String(msg || 'Unknown error')) + '</span>' +
+    '<span class="vprev-sub">The record below is intact — this is a storage problem, not a missing file.</span></div>';
+}
+
 /* one place that turns (kind, spec_type, artifact) into a render class */
 function fileClass(f) {
   if (f.kind === 'photo') return 'photo';
@@ -742,7 +813,7 @@ function moneySheet(show, f) {
     ['Doc date', fmtDateFull(f.doc_date || f.created_at)],
     ['Billed to', job ? job.qb_job_number + ' · ' + job.client : '—'],
     ['Category', exp ? (BUDGET_CATS[exp.budget_line_category] || exp.budget_line_category) : '—'],
-    ['Filed by', pr ? actorLabel(null, pr) + ' · ' + Math.round(pr.confidence) + '% match' : userName(f.uploaded_by)],
+    ['Filed by', pr ? actorLabel(null, pr) + ' · ' + Math.round(pr.confidence) + '% match' : uploaderName(f)],
     ['Status', f.status === 'proposed' ? 'Proposed — awaiting review' : 'Filed']
   ].map(function (r) { return '<tr><td>' + esc(r[0]) + '</td><td>' + esc(r[1]) + '</td></tr>'; }).join('');
   var stamp = f.status === 'proposed'
@@ -765,15 +836,24 @@ function moneySheet(show, f) {
 /* event photo — the lightbox frame (photo pass). Unlike the white document
    sheets, a photo stages in a fixed-dark gallery frame (its own artwork, like
    .sheet hardcodes light): the image large, caption + credit beneath, the
-   proposed stamp and recap star riding the frame. */
+   proposed stamp and recap star riding the frame.
+
+   `f.thumb` is a DETERMINISTIC PLACEHOLDER against a real server — A.file()
+   mints one because nothing served photo bytes over HTTP at the time. Now
+   something does, so when the row has real bytes the frame is handed to
+   drawPreview() as `#vPrev` and it drops the actual photograph in. There is
+   exactly ONE image in the frame either way: the placeholder is not rendered
+   underneath the real one. */
 function photoSheet(show, f) {
   var w = Number(f.width) || 3, hh = Number(f.height) || 2;
   var when = f.taken_at ? fmtTs(f.taken_at) : fmtDateFull(f.created_at);
   var credit = when + (f.shot_by ? ' · ' + userName(f.shot_by) : '') +
     ' · ' + (f.width && f.height ? f.width + ' × ' + f.height : f.dim);
+  var art = filePreviewKind(f) === 'img'
+    ? '<div class="vprev ps-live" id="vPrev">' + previewLoadingHTML() + '</div>'
+    : '<img src="' + esc(f.thumb) + '" alt="' + esc(f.caption || f.name) + '">';
   return '<div class="photo-stage">' +
-    '<div class="ps-frame" style="aspect-ratio:' + w + '/' + hh + '">' +
-    '<img src="' + esc(f.thumb) + '" alt="' + esc(f.caption || f.name) + '">' +
+    '<div class="ps-frame" style="aspect-ratio:' + w + '/' + hh + '">' + art +
     (f.status === 'proposed' ? '<span class="ps-stamp">PROPOSED</span>' : '') +
     (f.recap_pick ? '<span class="ps-pick" title="Recap pick — feeds the client recap">' + icon('star') + '</span>' : '') +
     '</div>' +
@@ -794,18 +874,34 @@ function photoSheet(show, f) {
    So in API mode the viewer shows what it actually KNOWS: the file's own
    metadata, and where the drawing really lives. Rendering the cached bundle
    (GET /api/shows/:id/spec-render/:node — it carries svg/html/png) is the right
-   long answer and wants an async viewer; this is the honest short one. */
+   long answer and wants an async viewer; this is the honest short one.
+
+   2026-08-28 — and it stopped being the ONLY thing. When the row has real bytes
+   the stage now streams them in above this card (drawPreview() in
+   views-global.js) and the card goes back to being what its name says: the
+   info panel. The caption below says which of the two worlds you are in, so
+   "we do not redraw this" is never printed over a document we just drew. */
 function boundDocSheet(show, f, doctype, kicker) {
+  /* `f.by` is the demo store's field and a live row does not carry it, so this
+     table printed "—" over a perfectly good uploaded_by. uploaderName() reads
+     both, and the size/date rows below are the two facts a person actually
+     asked for when they opened the file. */
   var rows = [['File', f.name || '—'], ['Revision', f.ver || '—'],
     ['Type', (f.spec_type ? '.' + f.spec_type : (f.ext ? '.' + f.ext : '—'))],
-    ['Dimensions', f.dim || '—'], ['Filed by', f.by || '—'], ['Notes', f.meta || '—']]
+    ['Dimensions', f.dim || '—'], ['Size', fmtSize(f.size)],
+    ['Filed by', uploaderName(f)], ['Uploaded', fmtDateFull(f.created_at)],
+    ['Notes', f.meta || '—']]
     .map(function (r) { return '<tr><td>' + esc(r[0]) + '</td><td>' + esc(r[1]) + '</td></tr>'; }).join('');
   return '<div class="sheet">' + sheetTop(doctype) + '<div class="sh-body">' +
     '<div class="sh-kick">' + esc(kicker) + '</div><h2>' + esc(show.name) + '</h2>' + boundLine(show) + '<hr>' +
     '<table class="spec-tbl">' + rows + '</table><hr>' +
-    '<div class="sh-cap">Showrunner does not redraw this document. The drawing lives in the ' +
-    'render bundle the tool bound, and in the source file on the NAS — open it there. ' +
-    'Nothing on this page is inferred.</div></div></div>';
+    '<div class="sh-cap">' + (fileHasBytes(f)
+      ? 'The document above is this file, streamed from the NAS through the app — not a ' +
+        'redrawing of it. Every row on this card is the file’s own record. Nothing here is inferred.'
+      : 'Showrunner does not redraw this document. The drawing lives in the ' +
+        'render bundle the tool bound, and in the source file on the NAS — open it there. ' +
+        'Nothing on this page is inferred.') +
+    '</div></div></div>';
 }
 
 /* gear is required only for pullsheet / manifest classes */
@@ -821,6 +917,19 @@ function sheetHTML(show, f, gear) {
   if (live && (c === 'pullsheet' || c === 'manifest')) {
     return boundDocSheet(show, f, c === 'pullsheet' ? 'FLEX · PULL SHEET' : 'FLEX · CASE MANIFEST',
       c === 'pullsheet' ? 'Gear pull sheet' : 'Case manifest');
+  }
+  /* The same line, extended to the three sheets nobody had walked yet.
+     proofSheet() draws a MIAMI MARLINS perimeter wrap with an APPROVED stamp
+     and imgSheet() draws invented concept artwork — for ANY proof and ANY
+     image, whatever is actually in the row. docSheet() draws grey placeholder
+     text lines. Against a real server all three are the .e360 failure wearing
+     different clothes, and the file the person uploaded now renders above this
+     card for real, which makes the fabrication both wrong AND redundant. */
+  if (live && (c === 'proof' || c === 'image' || c === 'doc')) {
+    return boundDocSheet(show, f,
+      '.' + String(f.ext || 'file').toUpperCase() + ' · ' +
+        (c === 'proof' ? 'CLIENT PROOF' : c === 'image' ? 'ARTWORK' : 'DOCUMENT'),
+      c === 'proof' ? 'Client proof' : c === 'image' ? 'Artwork' : 'Document');
   }
   if (c === 'e360') return show.type === 'print' ? printSpecSheet(show, f) : ledSpecSheet(show, f);
   if (c === 'nsf') return nsfSpecSheet(show, f);
