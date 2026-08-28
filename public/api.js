@@ -178,6 +178,53 @@ var SR = (function () {
     });
   }
 
+  /* ---- the BYTES path ---------------------------------------------------
+     req() above JSON-encodes everything, which is exactly wrong for a 364 KB
+     PDF. This is the second, deliberately separate path: no JSON, no notify
+     staging, no absorb — a raw body up, a Blob down. It still funnels the 401
+     handling, the busy counter and the offline detection through the same
+     hooks, because a dropped connection during an upload is the same event as
+     a dropped connection during a read and the banner must not disagree.
+
+     The DOWNLOAD is a fetch and not an <a href> for one reason: this app
+     authenticates with an `x-auth-token` HEADER, not a cookie. A plain link
+     would arrive at the server unauthenticated and come back 401, so the
+     bytes are fetched with the session in hand and handed to the browser as
+     an object URL. */
+  function bytes(method, path, payload, opts) {
+    opts = opts || {};
+    var headers = {};
+    if (st.token) headers['x-auth-token'] = st.token;
+    if (payload != null) headers['Content-Type'] = 'application/octet-stream';
+    bump(1);
+    return fetch(path, { method: method, headers: headers, body: payload == null ? undefined : payload })
+      .then(function (res) {
+        bump(-1);
+        if (!st.online) { st.online = true; if (st.hooks.network) st.hooks.network(true); }
+        if (res.status === 401) {
+          setToken(null);
+          if (st.hooks.unauthorized && !opts.quiet) { try { st.hooks.unauthorized(); } catch (_) {} }
+          throw err('Your session has expired — sign in again', 401);
+        }
+        if (!res.ok) {
+          /* the server's own message, verbatim — "the NAS is unreachable" is
+             information the person needs, and inventing a friendlier sentence
+             here would hide it */
+          return res.text().then(function (t) {
+            var msg = t;
+            try { var j = JSON.parse(t); if (j && j.error) msg = j.error; } catch (_) {}
+            throw err(msg || ('Request failed (' + res.status + ')'), res.status);
+          });
+        }
+        return res;
+      }, function (e) {
+        bump(-1);
+        st.online = false;
+        if (st.hooks.network && !opts.quiet) { try { st.hooks.network(false, e); } catch (_) {} }
+        throw err('Cannot reach the Showrunner server', 0);
+      });
+  }
+
   function isArr(v) { return Object.prototype.toString.call(v) === '[object Array]'; }
   function shallow(o) { var c = {}; for (var k in o) if (has(o, k)) c[k] = o[k]; return c; }
   function has(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
@@ -437,6 +484,10 @@ var SR = (function () {
     put: function (p, b, o) { return req('PUT', p, b === undefined ? {} : b, o); },
     del: function (p, b, o) { return req('DELETE', p, b, o); },
     qs: qs,
+
+    /* bytes — the NAS layer's two verbs (see bytes() above) */
+    putBytes: function (p, body, o) { return bytes('PUT', p, body, o).then(function (r) { return r.json(); }); },
+    getBlob: function (p, o) { return bytes('GET', p, null, o).then(function (r) { return r.blob(); }); },
 
     /* store */
     absorb: A,
@@ -768,6 +819,31 @@ var api = (function () {
     return DEMO_COLORS[USERS.length % DEMO_COLORS.length];
   }
   function demoIsAdmin() { return CURRENT_USER && CURRENT_USER.role === 'admin'; }
+  /* The mirror of routes/auth.js EMAIL_RE / EMAIL_RULE / assertEmailFree.
+     Verbatim, on purpose: the demo's whole claim is that the RULES are the real
+     ones even though the data is fictional, and an email field that accepts
+     "tom@" here and is refused by the server teaches the wrong thing. */
+  var DEMO_EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>.]+(\.[^\s@,;<>.]+)+$/;
+  function demoEmail(v) {
+    var e = String(v == null ? '' : v).trim().toLowerCase();
+    if (e && !DEMO_EMAIL_RE.test(e)) {
+      throw new Error('That does not look like an email address — it needs a name, an @, and a domain with a dot.');
+    }
+    return e;
+  }
+  /* Unique among ACTIVE users only — somebody who left keeps their row, and
+     their address, forever. */
+  function demoEmailFree(email, excludeId) {
+    if (!email) return;
+    var clash = USERS.filter(function (u) {
+      return u.active !== false && u.id !== excludeId &&
+             String(u.email || '').toLowerCase() === email;
+    })[0];
+    if (clash) {
+      throw new Error(email + ' is already on ' + clash.username + '’s account. ' +
+        'Two active people cannot share an address — the outbox would not know who it was writing to.');
+    }
+  }
   function demoActiveAdmins() {
     return USERS.filter(function (u) { return u.role === 'admin' && u.active !== false; });
   }
@@ -786,6 +862,10 @@ var api = (function () {
       throw new Error('Username must be 2–32 characters: a letter, then letters, digits, _ . or -');
     }
     if (ROSTER[username]) throw new Error('That username is already taken');
+    /* Validated and collision-checked BEFORE anybody is created, so a refused
+       address leaves the roster exactly as it was — same ordering as the route. */
+    var email = demoEmail(b.email);
+    demoEmailFree(email, null);
     var id = 1;
     USERS.forEach(function (u) { if (u.id >= id) id = u.id + 1; });
     var name = String(b.name || '').trim();
@@ -794,7 +874,8 @@ var api = (function () {
               color: String(b.color || '').trim() || demoNextColor(),
               role: ROLE_ORDER.indexOf(b.role) >= 0 ? b.role : 'viewer',
               title: String(b.title || ''), discipline: String(b.discipline || ''),
-              phone: String(b.phone || ''), email: String(b.email || ''),
+              phone: String(b.phone || ''), email: email,
+              staffing_name: String(b.staffing_name || '').trim() || null,
               finance: !!b.finance, active: true, must_change: true };
     USERS.push(u); ROSTER[username] = u; USERS_BY_ID[id] = u;
     MENTION_LOOKUP = null;             /* a new name has to resolve in @mentions */
@@ -815,9 +896,19 @@ var api = (function () {
     if (wasActive && !nextActive) demoLastAdminCheck(u, 'deactivating them');
     if (u.role === 'admin' && nextRole !== 'admin') demoLastAdminCheck(u, 'changing their role');
 
-    ['name', 'initials', 'color', 'title', 'discipline', 'phone', 'email'].forEach(function (k) {
+    /* Checked against the state the row is being moved TO — reactivating
+       somebody whose address is now on a live account is the collision. */
+    var nextEmail = patch.email !== undefined ? demoEmail(patch.email)
+                  : String(u.email || '').toLowerCase();
+    if (nextEmail && nextActive) demoEmailFree(nextEmail, u.id);
+
+    ['name', 'initials', 'color', 'title', 'discipline', 'phone'].forEach(function (k) {
       if (patch[k] !== undefined) u[k] = String(patch[k] || '');
     });
+    u.email = nextEmail;
+    if (patch.staffing_name !== undefined) {
+      u.staffing_name = String(patch.staffing_name || '').trim() || null;
+    }
     if (isAdmin && patch.finance !== undefined) u.finance = !!patch.finance;
     u.role = nextRole; u.active = nextActive;
     MENTION_LOOKUP = null;
@@ -848,9 +939,12 @@ var api = (function () {
     /* ---- mode / session (API mode only; inert in demo) ------------------ */
     mode: function () { return SR.mode(); },
     isDemo: function () { return !SR.isApi(); },
-    login: function (username, password) {
+    /* `identifier` is a USERNAME OR AN EMAIL ADDRESS — the server decides which
+       lookup to run on the '@'. It still travels on the `username` field,
+       which is the wire name and stays the wire name. */
+    login: function (identifier, password) {
       if (!API()) return fail('Demo mode has no sign-in — the roster is fictional');
-      return SR.post('/api/auth/login', { username: username, password: password },
+      return SR.post('/api/auth/login', { username: identifier, password: password },
                      { noAuth: true, quiet: true, noNotify: true })
         .then(function (r) {
           SR.setToken(r.token);
@@ -917,7 +1011,7 @@ var api = (function () {
         username: username, name: b.name || '', initials: b.initials || '',
         role: b.role || 'viewer', finance: !!b.finance, title: b.title || '',
         discipline: b.discipline || '', phone: b.phone || '', email: b.email || '',
-        color: b.color || ''
+        staffing_name: b.staffing_name || '', color: b.color || ''
       }).then(function (r) {
         /* The temp password is lifted OFF the record before it is absorbed.
            A.user merges every key it is handed into the canonical roster
@@ -1167,6 +1261,38 @@ var api = (function () {
         return f;
       });
     },
+    /* ---- bytes (the NAS) -----------------------------------------------
+       The two-tier model, from the browser's side: addFile() registers the
+       METADATA and returns a row with an `upload_url`; uploadFileBytes()
+       sends the bytes to it. Two calls on purpose — a failed upload leaves a
+       resolvable record instead of a ghost (AGENT_API §3), and the person can
+       retry the second half without re-typing the first.
+
+       `dims` is the file's REAL measured size in pixels or nothing at all. It
+       is never guessed (HARDENING 21): the server clears `dim` on any upload
+       that does not carry one. */
+    uploadFileBytes: function (fileId, blob, dims) {
+      if (!API()) return fail('byte uploads need the Showrunner server');
+      var q = (dims && dims.w && dims.h)
+        ? '?w=' + Number(dims.w) + '&h=' + Number(dims.h) : '';
+      return SR.putBytes('/api/files/' + Number(fileId) + '/content' + q, blob);
+    },
+    /* Pull the bytes back down THROUGH the app — the whole reason a tech in a
+       truck can open a spec she has no route to the NAS for. */
+    downloadFileBytes: function (fileId) {
+      if (!API()) return fail('downloads need the Showrunner server');
+      return SR.getBlob('/api/files/' + Number(fileId) + '/content');
+    },
+    /* Is there anywhere to PUT bytes on this deployment? Env-driven, cached
+       with the rest of GET /api/config. Fails CLOSED: an unreachable config
+       endpoint means "no upload backend", which is the honest answer. */
+    uploadsEnabled: function () {
+      if (!API()) return ok(false);
+      return SR.serverConfig().then(function (c) {
+        return !!(c && c.features && c.features.fileUpload);
+      }, function () { return false; });
+    },
+
     replaceChainFile: function (showId, chainKey, body) {
       if (!API()) {
         var s = SHOWS_BY_ID[Number(showId)];

@@ -38,14 +38,20 @@ var TODAY_ISO = isoDate(TODAY);
 /* Admins = Tom, Tony, Jim (Tom's decision, 2026-08-21). Jim Mercer is the
    management third — appended LAST so '@jim' resolves to him, not the Marlins
    client stakeholder Jim Eaton (mentionLookup: last write wins). */
+/* `staffing_name` is the identity link to the staffing app, which keys its
+   roster, its travel keys and its crew lists on a DISPLAY NAME and has never
+   heard of a Showrunner username. Set only where the two systems disagree —
+   Showrunner shows the techs by first name, the staffing roster carries their
+   full one — which is exactly the case the column exists for. Everybody else
+   leaves it unset and travels under the name shown here. */
 var USERS = [
   { id: 1, username: 'tandres',  name: 'Tom Andres',     initials: 'TA', color: '#F4B740', role: 'admin',   title: 'Owner · Engineer',           discipline: 'both', finance: true, phone: '(414) 555-0114' },
   { id: 2, username: 'tvigon',   name: 'Tony Vigon',     initials: 'TV', color: '#59A9F0', role: 'admin',   title: 'Ops / Project Lead',         discipline: 'led',   phone: '(414) 555-0127' },
   { id: 3, username: 'bsawyer',  name: 'Brendon Sawyer', initials: 'BS', color: '#35E0A1', role: 'manager', title: 'Field Ops / On-site POC',    discipline: 'led',   phone: '(414) 555-0139' },
   { id: 4, username: 'lfarkos',  name: 'Larry Farkos',   initials: 'LF', color: '#F0616B', role: 'pm',      title: 'Print Production Lead',      discipline: 'print', phone: '(414) 555-0142' },
   { id: 5, username: 'jhawk',    name: 'Josh Hawk',      initials: 'JH', color: '#B98CF0', role: 'pm',      title: 'Content / Graphic Design',   discipline: 'print', phone: '(414) 555-0158' },
-  { id: 6, username: 'dvargas',  name: 'Devin',          initials: 'DV', color: '#4ADEDE', role: 'tech',    title: 'Gear / Prep Tech',           discipline: 'led',   phone: '(262) 555-0161' },
-  { id: 7, username: 'aramos',   name: 'Aaron',          initials: 'AR', color: '#F08C59', role: 'tech',    title: 'Install / Field Tech',       discipline: 'both',  phone: '(262) 555-0175' },
+  { id: 6, username: 'dvargas',  name: 'Devin',          initials: 'DV', color: '#4ADEDE', role: 'tech',    title: 'Gear / Prep Tech',           discipline: 'led',   phone: '(262) 555-0161', staffing_name: 'Devin Vargas' },
+  { id: 7, username: 'aramos',   name: 'Aaron',          initials: 'AR', color: '#F08C59', role: 'tech',    title: 'Install / Field Tech',       discipline: 'both',  phone: '(262) 555-0175', staffing_name: 'Aaron Ramos' },
   { id: 8, username: 'jeaton',   name: 'Jim Eaton',      initials: 'JE', color: '#8ED14A', role: 'viewer',  title: 'Client Stakeholder',         discipline: 'print', phone: '(305) 555-0188' },
   { id: 9, username: 'candice',  name: 'Candice Wren',   initials: 'CW', color: '#E36FBE', role: 'manager', title: 'Accounting · QuickBooks',    discipline: 'both', finance: true, phone: '(414) 555-0196' },
   { id: 10, username: 'jmercer', name: 'Jim Mercer',     initials: 'JM', color: '#7C9FF2', role: 'admin',   title: 'General Manager',            discipline: 'both', phone: '(414) 555-0106' }

@@ -1233,6 +1233,19 @@ router.post('/shows/:id/push-to-scheduler', requireRole('pm'), asyncH(async (req
   }
   const steps = (await pool.query('SELECT * FROM steps WHERE show_id=$1', [show.id])).rows;
   const crew = (await pool.query('SELECT * FROM crew_assignments WHERE show_id=$1', [show.id])).rows;
+  // The Showrunner roster, for the identity link: steps.owner and
+  // crew_assignments.username are Showrunner handles, and the staffing app
+  // knows people only by display name. users.staffing_name is how a person
+  // whose two systems disagree still matches (lib/scheduler staffingNameFor).
+  // Everyone, not the working roster: somebody deactivated last week can still
+  // be the owner of a step on a show that is being pushed today.
+  //
+  // THREE COLUMNS, not `SELECT *`. The resolver needs exactly these, and the
+  // dry run echoes its payloads back to the caller — so a row that never
+  // carried password_hash into this function cannot ever be leaked out of it by
+  // some later refactor that decides to include the roster in the response.
+  const users = (await pool.query(
+    'SELECT username, name, staffing_name FROM users')).rows;
 
   // ── DRY RUN ───────────────────────────────────────────────────────────────
   // Shows EXACTLY what live would send, including the travel legs that used to
@@ -1248,7 +1261,7 @@ router.post('/shows/:id/push-to-scheduler', requireRole('pm'), asyncH(async (req
       catch (e) { rosterNote = 'Roster lookup failed, so crew names are unchecked: ' + e.message; }
     }
     const payloads = buildSchedulerPayloads(project, show, steps, crew,
-      { roster, eventId: show.scheduler_event_id || null });
+      { roster, users, eventId: show.scheduler_event_id || null });
     const problems = validateForPush(project, show, payloads, roster);
     const base = process.env.SCHEDULER_BASE_URL || '<SCHEDULER_BASE_URL>';
     return res.json({
@@ -1310,7 +1323,7 @@ router.post('/shows/:id/push-to-scheduler', requireRole('pm'), asyncH(async (req
   }
 
   const result = await pushShowToScheduler({
-    project, show, steps, crew,
+    project, show, steps, crew, users,
     tracked: show.pushed_child_ids || null,
     // Persist the link the MOMENT the event exists. The fan-out is resumable,
     // not atomic (§2.7): a failure past this point leaves a linked, partly

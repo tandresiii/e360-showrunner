@@ -765,13 +765,218 @@ async function openAddFile(showId, ctx) {
   var title = show.project.single ? show.project.name : show.name;
   var ctxLine = ctx && ctx.label
     ? '<div class="callout" style="margin-bottom:14px"><div class="ci">' + icon('link') + '</div><div><b>Attaching in context</b><p>Lands on <b>' + esc(ctx.label) + '</b> and also shows in this show’s Files tab.</p></div></div>'
-    : '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px">Pick a file type to model an upload. It binds to <b>' + esc(title) + '</b>, appears in the Files grid, and opens in the viewer.</p>';
+    : '';
+
+  /* ══════════════════════════════════════════════════════════════════════
+     API MODE — a REAL file picker, because there is now a real place to put
+     the bytes. The prototype's "pick a type to model an upload" card grid is
+     kept for DEMO mode and only for demo mode: with a server attached, a
+     button that invents a 6.7 MB proof nobody uploaded is exactly the disease
+     HARDENING 21 was about.
+     ══════════════════════════════════════════════════════════════════════ */
+  if (apiMode()) {
+    var canStore = await api.uploadsEnabled();
+    var kinds = ['other', 'spec', 'proof', 'contract', 'invoice', 'receipt', 'quote', 'photo'];
+    var kindOpts = kinds.map(function (k) {
+      return '<option value="' + k + '">' + esc(fileKindLabel(k)) + '</option>';
+    }).join('');
+    /* Fail LOUD and fail EARLY. Collecting a file the server has nowhere to
+       put, and only saying so after the person waited for the transfer, is
+       worse than refusing at the top. */
+    var storageNote = canStore
+      ? '<div class="hint" style="margin-top:12px">' + icon('server') +
+        'Bytes go to the e360 NAS: <span class="mono">\\\\e360-nas\\showrunner\\P{id}-{slug}\\S{id}-{slug}\\{kind}</span>. ' +
+        'The record here is metadata; the file itself lives there.</div>'
+      : '<div class="callout" style="margin:12px 0 0"><div class="ci">' + icon('alert') + '</div><div>' +
+        '<b>No storage on this server</b><p>This Showrunner has no NAS connection configured, so the ' +
+        'file can be <b>registered</b> — name, type, folder, who filed it — but the bytes stay on your ' +
+        'machine. Ask Tom to finish the storage wiring.</p></div></div>';
+    openModal('Add file' + (ctx && ctx.label ? ' · ' + ctx.label : ''),
+      ctxLine +
+      '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">Uploads to <b>' + esc(title) + '</b>. ' +
+      'The file name, extension and size are read from the file itself — nothing here is typed in twice.</p>' +
+      '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+      finLabelWrap('File', '<input type="file" id="upFile" class="cell-in">') + '</div>' +
+      '<div class="fin-inputs">' +
+      finLabelWrap('Type', '<select id="upKind" class="cell-in">' + kindOpts + '</select>') +
+      finLabelWrap('Name', '<input id="upName" class="cell-in" placeholder="leave blank to use the file name">') +
+      '</div>' +
+      notifyRow() + storageNote +
+      '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
+      '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+      '<button class="btn primary" id="upGo" ' + act('commitUpload') + '>' + icon('send') +
+      (canStore ? 'Upload' : 'Register (no bytes)') + '</button></div>');
+    /* pre-select the type from the extension the moment a file is chosen */
+    var inp = $('#upFile');
+    if (inp && inp.addEventListener) {
+      inp.addEventListener('change', function () {
+        var f = inp.files && inp.files[0];
+        if (!f) return;
+        var g = guessFileKind(f.name);
+        var sel = $('#upKind');
+        if (sel) sel.value = g.kind;
+      });
+    }
+    return;
+  }
+
   var opts = ADD_TYPES.map(function (t, i) {
     return '<button class="tpl-card" style="text-align:left" ' + act('commitAddFile', i) + '><div class="ti">' + icon(t.ic) + '</div><b>' + esc(t.label) + '</b><div class="td">.' + esc(t.ext) + ' · ' + esc(t.desc) + '</div></button>';
   }).join('');
-  openModal('Add file' + (ctx && ctx.label ? ' · ' + ctx.label : ''), ctxLine + notifyRow() +
+  openModal('Add file' + (ctx && ctx.label ? ' · ' + ctx.label : ''), ctxLine +
+    (ctx && ctx.label ? '' : '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px">Pick a file type to model an upload. It binds to <b>' + esc(title) + '</b>, appears in the Files grid, and opens in the viewer.</p>') +
+    notifyRow() +
     '<div class="tpl-cards" style="margin:0">' + opts + '</div>' +
     '<div class="hint" style="margin-top:14px">' + icon('server') + 'Modeled — no upload backend. Bytes store on the e360 NAS: <span class="mono">\\\\e360-nas\\showrunner\\P{id}-{slug}\\S{id}-{slug}\\{kind}</span>.</div>');
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   THE REAL UPLOAD — one function, used by the picker AND by drag-and-drop
+   ------------------------------------------------------------------------
+   Two calls, in this order, and the order is the contract:
+     1. POST /api/files            metadata. The server derives nas_path; a
+                                   client that could name its own path could
+                                   write into somebody else's folder.
+     2. PUT  /api/files/:id/content bytes, to the row that already exists.
+   If (2) fails the row survives and says so. That is deliberately not a
+   rollback: the person can retry the bytes, and a metadata row with no bytes
+   is a visible, fixable state — a silently discarded upload is not.
+
+   NOTHING here invents a number. `size` is not sent at all (the server sets
+   it from what actually arrived) and `dim` is sent only when the image was
+   really decoded and measured.
+   ══════════════════════════════════════════════════════════════════════ */
+var FILE_KIND_LABELS = {
+  other: 'Document', spec: 'Spec', proof: 'Proof', contract: 'Contract / confirmation',
+  invoice: 'Invoice', receipt: 'Receipt', quote: 'Quote', photo: 'Photo'
+};
+function fileKindLabel(k) { return FILE_KIND_LABELS[k] || k; }
+
+/* Everything derivable from a real filename, and nothing that is not. */
+function guessFileKind(fileName) {
+  var nm = String(fileName || '');
+  var ext = (nm.match(/\.([a-z0-9]+)$/i) || [])[1] || '';
+  ext = ext.toLowerCase();
+  var out = { ext: ext, kind: 'other', spec_type: null, artifact: null,
+              base: nm.replace(/\.[a-z0-9]+$/i, '') || nm || 'Untitled' };
+  if (/^(jpg|jpeg|png|gif|webp|heic|bmp|tif|tiff)$/.test(ext)) out.artifact = 'image';
+  if (/^(e360|nsf|pcfg)$/.test(ext)) { out.kind = 'spec'; out.spec_type = ext; }
+  return out;
+}
+
+/* Real pixels or nothing. Resolves to null for anything that is not an image
+   the browser can actually decode — a .heic on a desktop Chrome, say. */
+function measureImage(file) {
+  return new Promise(function (resolve) {
+    if (!file || !/^image\//.test(String(file.type || ''))) return resolve(null);
+    if (typeof createImageBitmap !== 'function' || typeof URL === 'undefined') return resolve(null);
+    var done = false;
+    var t = setTimeout(function () { if (!done) { done = true; resolve(null); } }, 4000);
+    createImageBitmap(file).then(function (bmp) {
+      if (done) return;
+      done = true; clearTimeout(t);
+      resolve({ w: bmp.width, h: bmp.height });
+      try { bmp.close(); } catch (_) {}
+    }, function () { if (!done) { done = true; clearTimeout(t); resolve(null); } });
+  });
+}
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+/* The one place bytes actually go up. Returns the file row either way; the
+   caller decides what to say about it. */
+async function uploadRealFile(showId, file, opts) {
+  opts = opts || {};
+  var g = guessFileKind(file.name);
+  var kind = opts.kind || g.kind;
+  var dims = await measureImage(file);
+  var f = await api.addFile(showId, {
+    name: opts.name || g.base,
+    ext: g.ext,
+    kind: kind,
+    spec_type: g.spec_type,
+    artifact: g.artifact,
+    ver: 'v1',
+    /* NO size, NO dim — the server owns both once real bytes land */
+    meta: '',
+    attached_to: opts.attachedTo || null
+  });
+  var canStore = await api.uploadsEnabled();
+  if (!canStore) return { file: f, stored: false, reason: 'not-configured' };
+  try {
+    var r = await api.uploadFileBytes(f.id, file, dims);
+    return { file: f, stored: true, size: r && r.size, sha256: r && r.sha256 };
+  } catch (e) {
+    return { file: f, stored: false, reason: e && e.message ? e.message : 'upload failed' };
+  }
+}
+
+async function commitUpload() {
+  if (!PENDING_ADD) return;
+  var showId = PENDING_ADD.showId, ctx = PENDING_ADD.ctx;
+  var inp = $('#upFile');
+  var file = inp && inp.files && inp.files[0];
+  if (!file) { toast('Pick a file first', 'Nothing was selected.'); return; }
+  var btn = $('#upGo');
+  if (btn) { btn.disabled = true; btn.innerHTML = 'Uploading…'; }
+  var kind = ($('#upKind') && $('#upKind').value) || null;
+  var name = ($('#upName') && $('#upName').value || '').trim() || null;
+  var show = await api.getShow(showId);
+  var title = show.project.single ? show.project.name : show.name;
+  stageNotifies();
+  var res;
+  try {
+    res = await uploadRealFile(showId, file, {
+      kind: kind, name: name || (ctx && ctx.name) || null,
+      attachedTo: ctx ? ctx.attachedTo : null
+    });
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.innerHTML = 'Upload'; }
+    toast('Upload failed', String(e && e.message || e));
+    return;
+  }
+  closeM();
+  var suffix = await sendNotifies('file', res.file.id, 'added a file: ' + res.file.name + ' — ' + title);
+  if (res.stored) {
+    toast('File uploaded', res.file.name + ' → ' + title + ' · ' + fmtBytes(res.size) + suffix);
+  } else if (res.reason === 'not-configured') {
+    toast('Registered — bytes not stored',
+      res.file.name + ' is on the record, but this server has no NAS storage configured.');
+  } else {
+    /* The row exists and the bytes did not land. Say BOTH halves. */
+    toast('Filed, but the bytes did not land', res.file.name + ' — ' + res.reason);
+  }
+  return openViewer(res.file.id);
+}
+
+/* Pull a file back down through the app and hand it to the browser. */
+async function downloadFile(fileId) {
+  var f = await api.getFile(fileId);
+  if (!f) return;
+  if (!apiMode()) {
+    toast('Download', (f.name || 'file') + '.' + (f.ext || '') + ' from the NAS');
+    return;
+  }
+  var name = String(f.name || 'file') + (f.ext ? '.' + String(f.ext).replace(/^\./, '') : '');
+  try {
+    var blob = await api.downloadFileBytes(fileId);
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    /* revoke on a tick — revoking synchronously races the download in Safari */
+    setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (_) {} }, 2000);
+    toast('Downloading', name);
+  } catch (e) {
+    /* the server's message, verbatim: "the NAS is unreachable" is the answer */
+    toast('Could not download ' + name, String(e && e.message || e));
+  }
 }
 async function commitAddFile(i) {
   if (!PENDING_ADD) return;
@@ -798,17 +1003,41 @@ async function attachToBooking(bookingId) {
   var b = await api.getBooking(bookingId); if (!b) return;
   return openAddFinDoc(b.show_id, { bookingId: b.id });
 }
-async function dropFile(showId, fileName) {
+/* Drag-and-drop. `dropped` is the real File the browser handed us in API mode
+   (the drop listener passes the File object, not just its name) — so a drop is
+   a genuine upload and not a differently-shaped fabricator. In DEMO mode there
+   are no bytes to send and the modeled row is kept, as everywhere else.
+   The (showId, "name.pdf") signature still works: a string means demo. */
+async function dropFile(showId, dropped) {
   var show = await api.getShow(showId);
-  var nm = fileName || 'Dropped file.pdf';
-  var ext = (String(nm).match(/\.([a-z0-9]+)$/i) || [])[1] || 'pdf';
-  var kind = 'other', spec_type = null, artifact = null;
-  if (/jpg|jpeg|png|gif/i.test(ext)) artifact = 'image';
-  else if (/e360|nsf|pcfg/i.test(ext)) { kind = 'spec'; spec_type = ext.toLowerCase(); }
-  var name = String(nm).replace(/\.[a-z0-9]+$/i, '') || 'Dropped file';
-  await api.addFile(showId, { name: name, ext: ext, kind: kind, spec_type: spec_type, artifact: artifact,
+  var title = show.project.single ? show.project.name : show.name;
+  var isFile = dropped && typeof dropped === 'object' && typeof dropped.name === 'string';
+
+  if (apiMode() && isFile) {
+    var res = await uploadRealFile(showId, dropped, {});
+    if (res.stored) {
+      toast('File uploaded', res.file.name + ' → ' + title + ' · ' + fmtBytes(res.size));
+    } else if (res.reason === 'not-configured') {
+      toast('Registered — bytes not stored',
+        res.file.name + ' is on the record, but this server has no NAS storage configured.');
+    } else {
+      toast('Filed, but the bytes did not land', res.file.name + ' — ' + res.reason);
+    }
+    if (CUR.view === 'show') await refreshShowTab(showId, 'files');
+    return;
+  }
+  if (apiMode()) {
+    /* a drop the browser gave us no File for — nothing real to file */
+    toast('Nothing to upload', 'The browser did not hand over a file. Use “Add file” instead.');
+    return;
+  }
+
+  var nm = (isFile ? dropped.name : dropped) || 'Dropped file.pdf';
+  var g = guessFileKind(nm);
+  await api.addFile(showId, { name: g.base, ext: g.ext || 'pdf', kind: g.kind,
+    spec_type: g.spec_type, artifact: g.artifact,
     ver: 'v1', size: 0, dim: '—', by: ME, meta: 'dropped ' + fmtDate(TODAY_ISO) + ' · modeled' });
-  toast('File added', name + ' → ' + (show.project.single ? show.project.name : show.name));
+  toast('File added', g.base + ' → ' + title);
   if (CUR.view === 'show') await refreshShowTab(showId, 'files');
 }
 
@@ -1231,8 +1460,17 @@ var FIN_DOC_KINDS = [
   { kind: 'confirmation', label: 'Confirmation', desc: 'booked — reservation held', ic: 'checkC' }
 ];
 var PENDING_FIN = null;
-function finLabelWrap(text, inner) {
-  return '<label style="display:flex;flex-direction:column;gap:5px;font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;font-weight:600">' + text + inner + '</label>';
+/* `hint` is optional helper text under the field. It has to undo the label's
+   own uppercase/tracking/weight — the label is a caps micro-heading and a
+   sentence set in it is unreadable — which is the same little reset the Add-a-
+   person username field writes inline. One place now, not two. */
+function finLabelWrap(text, inner, hint) {
+  return '<label style="display:flex;flex-direction:column;gap:5px;font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;font-weight:600">' + text + inner +
+    (hint
+      ? '<span style="text-transform:none;letter-spacing:0;font-weight:400;font-size:11px;color:var(--muted)">' +
+        hint + '</span>'
+      : '') +
+    '</label>';
 }
 function guessCategory(label) {
   var s = String(label || '').toLowerCase();
@@ -2207,6 +2445,25 @@ function personFields(u) {
     finLabelWrap('Title', '<input id="puTitle" class="cell-in" value="' + esc(u.title || '') + '" placeholder="Gear / Prep Tech">') +
     finLabelWrap('Phone', '<input id="puPhone" class="cell-in" value="' + esc(u.phone || '') + '" placeholder="(414) 555-0100">') +
     '</div>' +
+    /* Optional, and the helper text says WHY you want it anyway: with no
+       address every notification this person is owed is marked "skipped — no
+       email address on file" and only ever reaches the bell. */
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Email',
+      '<input id="puEmail" class="cell-in" type="email" autocapitalize="off" spellcheck="false" ' +
+        'value="' + esc(u.email || '') + '" placeholder="dvargas@e360sport.com">',
+      'Optional — but needed for email notifications, and it is a second thing they can sign in with. ' +
+      'Two active people cannot share one.') +
+    '</div>' +
+    /* The identity link to the staffing app. Its roster, its travel keys and
+       its crew lists are all keyed on a DISPLAY NAME, so a person the two
+       systems spell differently silently gets no packet on a push. */
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Name in staffing app',
+      '<input id="puStaffingName" class="cell-in" value="' + esc(u.staffing_name || '') + '" ' +
+        'placeholder="' + esc(u.name || 'same as their name above') + '">',
+      'Only if it differs from their name here — used to match travel, hotels and crew on push.') +
+    '</div>' +
     '<label class="pu-cap"><input type="checkbox" id="puFinance"' + (u.finance ? ' checked' : '') + '>' +
     '<span><b>Finance capability</b> — sees margin and approves purchase orders, without being an admin. ' +
     'This is how accounting gets accounting rights.</span></label>';
@@ -2216,6 +2473,7 @@ function personFromForm() {
   var c = function (id) { var el = document.getElementById(id); return !!(el && el.checked); };
   return { name: v('puName'), initials: v('puInitials'), role: v('puRole'),
            discipline: v('puDiscipline'), title: v('puTitle'), phone: v('puPhone'),
+           email: v('puEmail'), staffing_name: v('puStaffingName'),
            finance: c('puFinance') };
 }
 
@@ -2276,7 +2534,9 @@ function openAddPerson() {
     '<div class="fin-inputs" style="grid-template-columns:1fr"><label style="display:flex;flex-direction:column;gap:5px;font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;font-weight:600">Username' +
     '<input id="puUsername" class="cell-in" autocapitalize="off" spellcheck="false" placeholder="dvargas">' +
     '<span style="text-transform:none;letter-spacing:0;font-weight:400;font-size:11px;color:var(--muted)">' +
-    'What they sign in with. 2–32 characters: a letter, then letters, digits, _ . or - · it cannot be changed later.' +
+    'Their @mention handle, and one of the two things they can sign in with (the other is their email). ' +
+    '2–32 characters: a letter, then letters, digits, _ . or - · it cannot be changed later, because every ' +
+    'step, note and activity line points at it.' +
     '</span></label></div>' +
     personFields({ role: 'tech' }) +
     '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:14px">' +
@@ -2551,6 +2811,8 @@ var ACTIONS = {
   attachBooking: function (t, id) { return attachToBooking(id); },
   addFile:       function (t, id) { return openAddFile(id); },
   commitAddFile: function (t, id) { return commitAddFile(id); },
+  commitUpload:  function () { return commitUpload(); },
+  downloadFile:  function (t, id) { return downloadFile(id); },
   specGen:       function (t, id, k) { return specGen(id, k); },
   openChainFile: function (t, id, k) { return openChainFile(id, k); },
   printChainFile: function (t, id, k) { return printChainFile(id, k); },
@@ -2732,9 +2994,11 @@ document.addEventListener('drop', function (ev) {
   if (!dz) return;
   ev.preventDefault(); ev.stopPropagation();
   dz.classList.remove('drag');
-  var nm = null;
-  try { if (ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files.length) nm = ev.dataTransfer.files[0].name; } catch (_) {}
-  dropFile(Number(dz.getAttribute('data-drop')), nm);
+  /* Hand dropFile() the FILE, not its name. In API mode that is the whole
+     difference between a real upload and a modeled row. */
+  var dropped = null;
+  try { if (ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files.length) dropped = ev.dataTransfer.files[0]; } catch (_) {}
+  dropFile(Number(dz.getAttribute('data-drop')), dropped);
 });
 
 /* ============================================================================
@@ -2755,8 +3019,12 @@ function loginHTML(msg) {
     '<h1>Sign in</h1>' +
     '<p class="login-sub">Your Showrunner account. Sessions last 12 hours and survive a redeploy.</p>' +
     '<form id="loginForm" autocomplete="on">' +
-      '<label class="login-f"><span>Username</span>' +
-        '<input id="loginUser" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required></label>' +
+      /* Either one. The server decides which lookup to run on the '@' — a
+         username can never contain one — so the person signing in does not
+         have to remember which of the two we decided to call their identity. */
+      '<label class="login-f"><span>Username or email</span>' +
+        '<input id="loginUser" name="username" autocomplete="username" autocapitalize="off" ' +
+          'spellcheck="false" placeholder="username or email" required></label>' +
       '<label class="login-f"><span>Password</span>' +
         '<input id="loginPass" name="password" type="password" autocomplete="current-password" required></label>' +
       '<div class="login-err" id="loginErr"' + (msg ? '' : ' style="display:none"') + '>' + esc(msg || '') + '</div>' +
@@ -2799,7 +3067,7 @@ async function submitLogin() {
     if (!errEl) return;
     errEl.textContent = m; errEl.style.display = '';
   }
-  if (!String(u).trim() || !p) { showErr('Username and password are both required.'); return; }
+  if (!String(u).trim() || !p) { showErr('A username or email, and a password, are both required.'); return; }
   LOGIN.busy = true;
   if (go) { go.classList.add('busy'); go.disabled = true; }
   try {

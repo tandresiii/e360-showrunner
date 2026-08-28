@@ -1,0 +1,12 @@
+# Keep the build context small and, more importantly, keep secrets and scratch
+# state out of the image entirely.
+.git
+.gitignore
+node_modules
+dist
+.storage
+.env
+RAILWAY_ENV.txt
+*.log
+nas-staging
+scripts/flex-probe-output

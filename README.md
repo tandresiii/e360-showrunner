@@ -28,6 +28,19 @@ agent can file documents, propose expenses and draft work — under a hard rule:
 > machine-checked closeout and archiving. See `SCHEMA.md` for the schema, the
 > routes and the env vars.
 
+> **Identity, additively (2026-08-28).** Two nullable columns on `users`, on top
+> of the live build. **`email`** — optional, validated, unique among the *active*
+> (enforced in route logic, never a constraint on a live table); the outbox marks
+> an addressless person's rows `skipped · no email address on file` instead of
+> erroring, so the Graph driver lands behind it unchanged; and `POST
+> /api/auth/login` now takes **a username or an email** on one field, with the
+> `@` picking the lookup and the no-enumeration property asserted and
+> mutation-tested. **`staffing_name`** — the identity half of the cross-system
+> linkage: the staffing app keys people on a *display name* and has never heard
+> of a Showrunner username, so a person the two systems spell differently used to
+> be pushed as a ghost with no packet. Usernames stay slugs and stay the
+> identity. `SCHEMA.md` → *Identity, agents, audit*.
+
 ---
 
 ## What it actually is
@@ -104,8 +117,9 @@ deliverables · proposals · agent`.
 
 ### `scripts/`
 
-`smoke.js` (the full end-to-end suite) · `flex-test.js` (offline, recorded
-shapes) · `flex-probe.js` (needs a real key).
+`smoke.js` (the full end-to-end suite) · `storage-test.js` (the NAS byte layer,
+against an in-process WebDAV server + SOCKS5 proxy — no NAS needed) ·
+`flex-test.js` (offline, recorded shapes) · `flex-probe.js` (needs a real key).
 
 ---
 
@@ -148,9 +162,19 @@ UTF-8**; activity details and note bodies carry `→`, `—` and typographic quo
 
 ```bash
 DATABASE_URL="…" npm run smoke    # scripts/smoke.js — the end-to-end suite
+npm run storage:test              # the NAS byte layer — no NAS, no DB needed
 npm run flex:test                 # offline, no key needed
 npm run flex:probe                # needs FLEX_BASE_URL + FLEX_API_KEY
 ```
+
+`storage:test` stands up its own WebDAV server, its own SOCKS5 proxy and its own
+self-signed certificate in-process, then drives the real `webdav` driver at them
+— deep MKCOL, PUT, streamed GET, MOVE, DELETE, 404/401/timeout/507, TLS
+verification on and off, and the real 364,739-byte Big Ten PDF round-tripped and
+compared by SHA-256 through both the buffered and the streamed path. It never
+touches a real NAS, so it is safe to run anywhere. Add `DATABASE_URL` and it
+also boots the real server with `STORAGE_DRIVER=webdav` and pushes that PDF
+through `PUT`/`GET /api/files/:id/content`.
 
 `smoke.js` boots the real server in-process on an ephemeral port and drives it
 over HTTP exactly as a browser would: `initDB` idempotency, the seed loader,
@@ -168,6 +192,18 @@ real render + action code (demo mode, API mode against a live server, and a
 full live push into a local staffing app). They live in the working scratchpad
 rather than the repo.
 
+### 4. Deploying (Railway)
+
+The repo carries a **`Dockerfile`**, and Railway prefers it over Nixpacks
+automatically. It exists for one reason: the NAS lives on Tom's Tailscale
+tailnet, so the image has to carry `tailscaled` next to Node and start it before
+the app. It pins what Nixpacks left implicit — Node 22 LTS, Tailscale 1.86.2 —
+and `docker-entrypoint.sh` is **inert without `TAILSCALE_AUTHKEY`**: no daemon
+starts, no proxy is used, and the container behaves exactly as it did before.
+`npm start` on a laptop is not in that path at all. Rollback is deleting the two
+files. Full reasoning in the header of `Dockerfile`; the wiring session itself is
+**[WIRING_DAY.md](./WIRING_DAY.md)**.
+
 ### Environment variables
 
 Every variable, with defaults and notes, is in **[SCHEMA.md § Environment](./SCHEMA.md)**
@@ -180,7 +216,8 @@ behaviour rather than tuning it:
 | `SCHEDULER_BASE_URL` | push-to-scheduler dry-run works; **live** push returns a 501 naming the missing var |
 | `FLEX_BASE_URL` / `FLEX_API_KEY` | `features.flex` is false; the SPA greys the Flex actions instead of offering a 501 |
 | `TOOLS_ORIGINS` | the spec-bind allowlist is **empty and fails closed** — every tool message is refused |
-| `STORAGE_DRIVER` | defaults to `local`; `smb`/`webdav` are stubs that throw a clear 501 |
+| `STORAGE_DRIVER` | defaults to `local`. `webdav` is real but needs `NAS_WEBDAV_URL`/`USER`/`PASS` — any one missing is a 501 that **names it**. `smb` is an honest 501 pointing at `webdav`. See [WIRING_DAY.md](./WIRING_DAY.md) |
+| `TAILSCALE_AUTHKEY` | no `tailscaled` starts, no proxy is used — the tailnet feature is entirely inert and the container networks normally |
 
 ---
 
@@ -193,7 +230,7 @@ behaviour rather than tuning it:
 | **The sweep (F2/F6)** | **No scheduler.** Strike detection, report nags, the closeout re-check and auto-archiving run once **on boot** and on `POST /api/admin/sweep`. Idempotent, so both are safe to repeat. A real daily job needs Railway cron or the per-user agents; the app does not fake one with `setInterval`. |
 | **Flex** | **Client ready, probes pending a key.** `lib/flex.js` is written and covered by 67 offline tests against recorded shapes. Nothing in `routes/` calls it yet — the per-show gear state is read/written directly, and the UI labels itself *modeled*. The API is BETA, so none of the recorded shapes are confirmed until `scripts/flex-probe.js` runs with a real key. |
 | **Spec bind** (`?bind-spec=1`) | **Verified both sides.** The popup carries the operator's session so the three spec tools never hold a credential; every inbound message is origin-checked against server-served `TOOLS_ORIGINS` (fail-closed). `bind-complete` carries the `stale` node list and `bind-cancelled` fires when the operator closes the popup — both are implemented in `bind.js` **and** handled in all three tools in `C:\code\e360-tools`. |
-| **NAS** | **Stubbed, pending Tailscale.** The path convention, metadata and cached render bundles are all real, and the `local` driver works. Byte-serving from the E360 NAS is not wired: `smb` and `webdav` are explicit stubs that throw a 501 telling you what to finish. The viewer renders the cached bundle or thumbnail, so nothing in the UI depends on NAS reachability at view time. |
+| **NAS** | **Built and tested end-to-end; one wiring session from live.** The `webdav` driver is real — deep MKCOL, PUT, streamed GET, MOVE, DELETE, PROPFIND against the Synology's WebDAV package — and routes NAS traffic (and *only* NAS traffic) through the Tailscale userspace SOCKS proxy so a Railway container can reach a box that is on the tailnet and nowhere else. `PUT`/`GET /api/files/:id/content` carry the bytes; the browser has a real file picker and a real download. `scripts/storage-test.js` proves all of it against an in-process WebDAV server, an in-process SOCKS5 proxy and a self-signed certificate, round-tripping the real 364,739-byte Big Ten PDF and byte-comparing by SHA-256 — **139 assertions, no NAS required**. What is unproven is only what needs Tom's hardware: that his Synology's WebDAV agrees, that Railway can join the tailnet, and that `svc-showrunner` can write the share. Runbook: **[WIRING_DAY.md](./WIRING_DAY.md)**. `smb` remains an honest 501 pointing at `webdav`. |
 | **M365 / agent API** | Live and enforced server-side — scopes, confidence bands, rate limits, idempotency, and no `DELETE` anywhere under `/api/agent/*`. Agents propose; humans confirm. |
 
 ---

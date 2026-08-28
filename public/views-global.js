@@ -172,6 +172,31 @@ function teamRowActions(u) {
     '</td>';
 }
 
+/* The address, as the roster sees it — and the EMPTY one is the interesting
+   case, which is why it gets a chip rather than a blank cell. With no address
+   every notification this person is owed is marked "skipped — no email address
+   on file" and only ever reaches the bell; a blank cell reads as "nothing to
+   see here", and that is the opposite of true. */
+function teamEmailCell(u) {
+  /* Admin-only, and the whole column disappears for everybody else rather than
+     filling with dashes — which is exactly the server's own disclosure rule
+     (the `email` key is simply ABSENT from a non-admin's roster read, so there
+     would be nothing to put in the cells anyway). */
+  if (!teamCanAdmin()) return '';
+  if (!u.email) {
+    return '<td><span class="pill idle" title="Notifications for this person are marked ' +
+      '&quot;skipped — no email address on file&quot; and only reach the bell.">no email</span></td>';
+  }
+  return '<td class="mono" style="font-size:11.5px;word-break:break-all">' +
+    '<a href="mailto:' + esc(u.email) + '" style="color:var(--text-2)">' + esc(u.email) + '</a>' +
+    (u.staffing_name
+      ? '<div style="color:var(--muted);font-size:10.5px;margin-top:2px" ' +
+        'title="The name the staffing app knows them by — used to match travel, hotels and crew on push.">' +
+        'staffing: ' + esc(u.staffing_name) + '</div>'
+      : '') +
+    '</td>';
+}
+
 function teamRow(u, load, dim) {
   var can = roleDefOf(u.role).can;
   var canChips = can.length
@@ -180,6 +205,7 @@ function teamRow(u, load, dim) {
   return '<tr' + (dim ? ' class="team-off"' : '') + '>' +
     '<td><div class="ev-name"><span class="avatar" style="width:34px;height:34px;background:' + esc(u.color) + '">' +
       esc(u.initials) + '</span><div><b>' + esc(u.name) + '</b><span>' + esc(u.title || u.username) + '</span></div></div></td>' +
+    teamEmailCell(u) +
     '<td>' + rolePill(u.role) +
       (u.finance ? ' <span class="tag fin" title="The finance capability — accounting rights without the admin role. Margin is visible to admins AND finance.">finance</span>' : '') +
       (u.must_change ? ' <span class="tag" title="Still on the temporary password the server minted — they will be asked to change it when they sign in.">temp password</span>' : '') +
@@ -212,8 +238,9 @@ function viewTeam(shows) {
   var admin = teamCanAdmin();
   var demo = api.isDemo();
 
-  var cols = 5 + (admin ? 1 : 0);
-  var head = '<tr><th>Person</th><th>Role</th><th>Discipline</th><th>Can assign</th><th>Shows</th>' +
+  var cols = 5 + (admin ? 2 : 0);
+  var head = '<tr><th>Person</th>' + (admin ? '<th>Email</th>' : '') +
+    '<th>Role</th><th>Discipline</th><th>Can assign</th><th>Shows</th>' +
     (admin ? '<th>Manage</th>' : '') + '</tr>';
   var rows = active.map(function (u) { return teamRow(u, load, false); }).join('') ||
     '<tr><td colspan="' + cols + '"><div class="empty">Nobody on the roster.</div></td></tr>';

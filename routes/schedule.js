@@ -69,7 +69,7 @@ const { notifyTargets } = require('../lib/mentions');
 // endpoints already exist and are unauthenticated (INTEGRATIONS_SPEC.md §4.4).
 // fetchShowTravelBundle NEVER throws: an unreachable scheduler must not stop a
 // call sheet from rendering.
-const { fetchShowTravelBundle, hotelForPerson } = require('../lib/scheduler');
+const { fetchShowTravelBundle, hotelForPerson, crewStaffingName } = require('../lib/scheduler');
 // HARDENING 8: ONE hydrateShow. See the wrapper below.
 const { hydrateShow: hydrateShowCore } = require('./core');
 
@@ -342,7 +342,11 @@ const assembledSheet = asyncH(async (req, res) => {
     return null;
   };
   for (const c of crew) {
-    const name = c.name || (c.user ? (c.user.name || c.user.username) : null);
+    // The name STAFFING filed this person under — users.staffing_name when the
+    // two systems call them different things, their name here otherwise. Same
+    // expression the push builder used to write these rows, so the read-back
+    // cannot look for a spelling the push never sent (lib/scheduler).
+    const name = crewStaffingName(c, c.user);
     const arrival = byPerson(bundle.arrivals, name);
     const departure = byPerson(bundle.departures, name);
     const hotel = hotelForPerson(bundle.hotels, name);
@@ -787,7 +791,9 @@ router.get('/shows/:id/travel', asyncH(async (req, res) => {
   const rows = await crewRows(showId);
   const crew = rows.map((row) => {
     const u = row.username ? roster.get(row.username) : null;
-    const name = row.name || (u ? (u.name || u.username) : null);
+    // The staffing-side name (users.staffing_name, else theirs here) — the same
+    // expression the push wrote these legs under.
+    const name = crewStaffingName(row, u) || null;
     const local = row.travel || null;
     const arrival = pick2(bundle.arrivals, name);
     const departure = pick2(bundle.departures, name);

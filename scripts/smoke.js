@@ -33,6 +33,13 @@
 process.env.SEED_ROSTER = process.env.SEED_ROSTER || '1';
 process.env.STORAGE_ROOT = process.env.STORAGE_ROOT ||
   require('path').join(require('os').tmpdir(), 'showrunner-smoke-storage');
+// The login limiter is 20 attempts per IP per 15 minutes, and this suite is one
+// machine signing in as a dozen fixture identities and then deliberately
+// failing several logins to prove the endpoint is not an account-existence
+// oracle — which is exactly the traffic the limiter exists to stop. Raised HERE
+// and only here: the production ceiling is untouched, and nothing below asserts
+// anything about throttling.
+process.env.LOGIN_RATE_LIMIT = process.env.LOGIN_RATE_LIMIT || '400';
 
 const assert = require('assert');
 const { pool } = require('../lib/db');
@@ -51,7 +58,7 @@ function ok(name, cond, extra) {
 }
 function section(title) { console.log(`\n── ${title} ${'─'.repeat(Math.max(0, 60 - title.length))}`); }
 
-async function call(method, path, { token, key, body, idem, raw, headers = {} } = {}) {
+async function call(method, path, { token, key, body, idem, raw, wantBytes, headers = {} } = {}) {
   const h = { ...headers };
   if (token) h['x-auth-token'] = token;
   if (key) h['x-agent-key'] = key;
@@ -60,6 +67,12 @@ async function call(method, path, { token, key, body, idem, raw, headers = {} } 
   if (raw) { h['Content-Type'] = 'application/octet-stream'; payload = raw; }
   else if (body !== undefined) { h['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
   const res = await fetch(BASE + path, { method, headers: h, body: payload });
+  // `wantBytes` is for the byte routes: GET /api/files/:id/content answers a
+  // stream of octets, and res.text() would mangle it. An error is still JSON,
+  // so a non-2xx falls back to the normal path and the assertions read .body.
+  if (wantBytes && res.ok) {
+    return { status: res.status, bytes: Buffer.from(await res.arrayBuffer()), headers: res.headers };
+  }
   const text = await res.text();
   let json = null;
   if (text) { try { json = JSON.parse(text); } catch { json = text; } }
@@ -258,6 +271,46 @@ const DEL = (p, o) => call('DELETE', p, o);
   const bytes = await call('PUT', `/api/files/${F}/content`, { token: A, raw: Buffer.from('spec bytes') });
   ok('PUT /api/files/:id/content writes through the storage driver',
      bytes.status === 200 && bytes.body.size === 10, bytes.body);
+  // ── the byte pair (storage pass) ─────────────────────────────────────────
+  // The upload returns the SHA of what actually arrived, so a caller can
+  // verify the round trip without a second transfer — this is what the
+  // wiring-day smoke sequence byte-compares against (WIRING_DAY.md §6/S4).
+  ok('...and returns the sha256 of the bytes it stored',
+     bytes.body.sha256 === require('crypto').createHash('sha256')
+       .update(Buffer.from('spec bytes')).digest('hex'), bytes.body.sha256);
+  // HARDENING 21. `size: 4096` and `dim: '2 zones · 1408 x 96'` above were both
+  // CLIENT GUESSES. Once real bytes exist the bytes are the truth: size is
+  // replaced by what arrived, and a dim nobody measured is cleared rather than
+  // left standing as fiction.
+  const afterUp = await GET(`/api/files/${F}`, { token: A });
+  ok('HARDENING 21: a real upload REPLACES the client-declared size',
+     Number(afterUp.body.size) === 10, afterUp.body.size);
+  ok('HARDENING 21: ...and CLEARS a dim nobody measured',
+     !afterUp.body.dim, afterUp.body.dim);
+  const measured = await call('PUT', `/api/files/${F}/content?w=3840&h=1080`,
+    { token: A, raw: Buffer.from('spec bytes v2') });
+  ok('...but a MEASURED dim (?w=&h=) is recorded', measured.body.dim === '3840 x 1080', measured.body);
+
+  const dl = await call('GET', `/api/files/${F}/content`, { token: A, wantBytes: true });
+  ok('GET /api/files/:id/content streams the bytes back',
+     dl.status === 200 && Buffer.isBuffer(dl.bytes) && dl.bytes.toString() === 'spec bytes v2',
+     dl.bytes && dl.bytes.length);
+  ok('...with a Content-Disposition a browser can save',
+     /attachment/.test(String(dl.headers.get('content-disposition'))),
+     dl.headers.get('content-disposition'));
+  ok('...and ?inline=1 flips it for the viewer',
+     /inline/.test(String((await call('GET', `/api/files/${F}/content?inline=1`,
+       { token: A, wantBytes: true })).headers.get('content-disposition'))));
+  const dlAnyone = await call('GET', `/api/files/${F}/content`, { token: TECHT, wantBytes: true });
+  ok('...readable by any signed-in user — this is how a remote user gets a file ' +
+     'THROUGH the app (the NAS is not on the internet; the server is)',
+     dlAnyone.status === 200, dlAnyone.status);
+  ok('...but not without a session', (await call('GET', `/api/files/${F}/content`)).status === 401);
+  const ghostFile = await POST('/api/files',
+    { show_id: S, name: TAG + ' never uploaded', ext: '.pdf', kind: 'other' }, { token: A });
+  const ghostGet = await GET(`/api/files/${ghostFile.body.id}/content`, { token: A });
+  ok('a metadata row with no bytes is a 404 that SAYS so, not a 500',
+     ghostGet.status === 404 && /No bytes at/.test(JSON.stringify(ghostGet.body)), ghostGet.body);
 
   const invoice = await POST('/api/files', {
     show_id: S, name: TAG + " O'Brien freight", ext: '.pdf', kind: 'invoice',
@@ -1114,6 +1167,104 @@ const DEL = (p, o) => call('DELETE', p, o);
      dryNo.status === 200 && dryNo.body.ready === false
      && dryNo.body.problems.some((p) => /load-in/i.test(p)), dryNo.body.problems);
 
+  // ── THE IDENTITY LINK — users.staffing_name (INTEGRATIONS_SPEC §2/§4) ─────
+  // The staffing app keys its roster, its events.staff[], its travel_key
+  // segments and its hotels.staffAssigned on a DISPLAY NAME, and has never
+  // heard of a Showrunner username. So a person the two systems spell
+  // differently silently gets no email, no colour chip and no tech packet (M6).
+  // users.staffing_name is the override. Driven against the builder directly
+  // because these assertions need a STAFFING ROSTER to canonicalize against,
+  // and SCHEDULER_BASE_URL is deliberately unset for the rest of this section.
+  const schedLib = require('../lib/scheduler');
+  const staffRoster = [{ name: 'Devin Vargas' }, { name: 'Aaron Ramos' }, { name: 'Marcus Webb' }];
+  const linkUsers = [
+    // OVERRIDE — Showrunner shows him by first name, staffing carries his full one
+    { username: 'dv', name: 'Devin', staffing_name: 'Devin Vargas' },
+    // FALLBACK — no override, so his Showrunner display name is what crosses
+    { username: 'ar', name: 'Aaron Ramos', staffing_name: null }
+  ];
+  const linkProject = { name: TAG + ' LINK', client: 'C', type: 'led' };
+  const linkShow = { name: TAG + ' LINK show', stage: 'confirmed',
+                     load_in_date: '2026-11-08', event_date: '2026-11-10', strike_date: '2026-11-11' };
+  const linkSteps = [
+    { lane: 'crew', title: 'Lead tech', owner: 'dv', status: 'todo' },
+    { lane: 'crew', title: 'Second tech', owner: 'ar', status: 'todo' },
+    { lane: 'logistics', title: 'Hotel block', owner: 'dv', status: 'todo' }
+  ];
+  const linkCrew = [
+    { username: 'dv', name: null,
+      travel: { out: { flight_num: 'AA1', arrival_date: '2026-11-08' } } },
+    { name: 'Marcus Webb' }                       // a local hire — no Showrunner user at all
+  ];
+  const linked = schedLib.buildSchedulerPayloads(linkProject, linkShow, linkSteps, linkCrew,
+    { roster: staffRoster, users: linkUsers, eventId: 77 });
+  ok('LINK OVERRIDE: a username whose display name is NOT the staffing name still resolves',
+     linked.crewNames.includes('Devin Vargas'), linked.crewNames);
+  ok('LINK FALLBACK: with staffing_name null the person travels under their Showrunner name',
+     linked.crewNames.includes('Aaron Ramos'), linked.crewNames);
+  ok('LINK: a crew row that is nobody\'s Showrunner account still matches by its own name',
+     linked.crewNames.includes('Marcus Webb'), linked.crewNames);
+  ok('LINK: nothing is unmatched, so this show would push',
+     linked.unmatchedCrew.length === 0, linked.unmatchedCrew);
+  ok('LINK: the EVENT payload carries the staffing names, never the usernames',
+     linked.eventPayload.staff.includes('Devin Vargas') &&
+     !linked.eventPayload.staff.includes('dv'), linked.eventPayload.staff);
+  ok('LINK: a booking\'s staffAssigned goes through the SAME resolution',
+     (linked.bookings || []).some((b) => (b.staffAssigned || []).includes('Devin Vargas')),
+     (linked.bookings || []).map((b) => b.staffAssigned));
+  const linkArr = (linked.travel || []).find((t) => t.leg === 'arrival');
+  ok('LINK: the TRAVEL KEY is built from the staffing name — the read-back looks it up by that',
+     !!linkArr && linkArr.person === 'Devin Vargas' && linkArr.key === 'Devin Vargas|77|inbound',
+     linkArr && { person: linkArr.person, key: linkArr.key });
+
+  // ADDITIVE: omit `users` entirely and the builder is exactly what it was.
+  // The link can only ADD a way for a name to match, never take one away.
+  const unlinked = schedLib.buildSchedulerPayloads(linkProject, linkShow, linkSteps, linkCrew,
+    { roster: staffRoster, eventId: 77 });
+  ok('LINK ADDITIVE: with no users supplied a plain roster-name crew row still matches',
+     unlinked.crewNames.includes('Marcus Webb'), unlinked.crewNames);
+  ok('LINK ADDITIVE: ...and the usernames go unmatched, exactly as they did before',
+     unlinked.unmatchedCrew.includes('dv') && unlinked.unmatchedCrew.includes('ar'),
+     unlinked.unmatchedCrew);
+
+  // M6's 422 has to name WHICH user and WHICH name form failed — "these names
+  // do not match" does not tell you which field to go and fix.
+  const missUsers = linkUsers.concat([{ username: 'jt', name: 'Jamie Torres',
+                                        staffing_name: 'J. Torres' }]);
+  const missSteps = linkSteps.concat([
+    { lane: 'crew', title: 'Third tech', owner: 'jt', status: 'todo' },
+    { lane: 'crew', title: 'Ghost', owner: 'lead_tech', status: 'todo' }
+  ]);
+  const missed = schedLib.buildSchedulerPayloads(linkProject, linkShow, missSteps, linkCrew,
+    { roster: staffRoster, users: missUsers, eventId: 77 });
+  const m6 = schedLib.validateForPush(linkProject, linkShow, missed, staffRoster)
+    .find((p) => /do not match the staffing roster/.test(p));
+  ok('M6: an unmatched crew name is still a refusal', !!m6, m6);
+  ok('M6: ...and the refusal NAMES THE USER it belongs to',
+     /@jt/.test(m6 || ''), m6);
+  ok('M6: ...and BOTH name forms it tried on their behalf, each labelled',
+     /J\. Torres/.test(m6 || '') && /their staffing-app name/.test(m6 || '') &&
+     /Jamie Torres/.test(m6 || '') && /their name in Showrunner/.test(m6 || ''), m6);
+  ok('M6: ...while a token that is nobody\'s account says so instead of inventing a user',
+     /lead_tech/.test(m6 || '') && /not a Showrunner user/.test(m6 || ''), m6);
+  ok('M6: ...and the message names the field that fixes it',
+     /Name in staffing app/.test(m6 || ''), m6);
+  ok('M6: a matched person is NOT dragged into the refusal',
+     !/@dv/.test(m6 || '') && !/@ar/.test(m6 || ''), m6);
+
+  // The read-back asks the SAME question the push answered — one expression, so
+  // a leg can never be filed under one spelling and looked up under another.
+  ok('LINK READ-BACK: staffing_name wins, then the crew row\'s own name, then the user\'s',
+     schedLib.crewStaffingName({ name: 'Devin' }, { name: 'Devin', staffing_name: 'Devin Vargas' })
+       === 'Devin Vargas' &&
+     schedLib.crewStaffingName({ name: 'Marcus Webb' }, null) === 'Marcus Webb' &&
+     schedLib.crewStaffingName({ name: null }, { name: 'Aaron Ramos' }) === 'Aaron Ramos');
+  ok('LINK: staffingNameFor falls back staffing_name -> name -> username, in that order',
+     schedLib.staffingNameFor({ username: 'x', name: 'X Y', staffing_name: 'Z' }) === 'Z' &&
+     schedLib.staffingNameFor({ username: 'x', name: 'X Y' }) === 'X Y' &&
+     schedLib.staffingNameFor({ username: 'x' }) === 'x' &&
+     schedLib.staffingNameFor(null) === '');
+
   const live = await POST(`/api/shows/${S}/push-to-scheduler`, { live: true }, { token: A });
   ok('the LIVE path is 501 while SCHEDULER_BASE_URL is unset — the safe default',
      live.status === 501, live.body && live.body.error);
@@ -1936,6 +2087,55 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('F3: the log driver is a REAL delivery — it records where it went',
      logAct.rows[0].n >= 1, logAct.rows[0]);
 
+  // ── F3 NO ADDRESS: the seam the Graph driver will land on ────────────────
+  // users.email is OPTIONAL, and somebody without one is not an error. The
+  // outbox has to say so in the row — `skipped: no email address on file`,
+  // permanently, with sent_at stamped — rather than throwing, or worse leaving
+  // the row queued to be retried forever against an address that does not
+  // exist. That distinction is the whole reason the wiring can go in before the
+  // driver does: `queued` means "we could not send this YET" and is the state a
+  // backlog lives in, `skipped` means "we will never send this", and getting
+  // them the wrong way round is how turning MAIL_* on later either discovers a
+  // discarded backlog or floods a retry loop.
+  const noAddr = TAG + 'noaddr';
+  const noAddrUser = await POST('/api/users',
+    { username: noAddr, password: 'smokepass123', role: 'tech', name: 'NO ADDRESS' }, { token: A });
+  ok('F3 NO ADDRESS: a person can be created with NO email — it is optional',
+     noAddrUser.status === 200 && noAddrUser.body.email === '', noAddrUser.body);
+  const noAddrStep = await POST('/api/steps',
+    { show_id: S, lane: 'crew', title: TAG + ' addressless task', status: 'todo' }, { token: A });
+  await PUT(`/api/steps/${noAddrStep.body.id}/assign`, { owner: noAddr }, { token: A });
+  const noAddrQueued = await pool.query(
+    `SELECT * FROM notification_outbox WHERE username=$1 ORDER BY id DESC LIMIT 1`, [noAddr]);
+  ok('F3 NO ADDRESS: the row is still QUEUED like anybody else’s — nothing is skipped at write time',
+     noAddrQueued.rows.length === 1 && noAddrQueued.rows[0].status === 'queued',
+     noAddrQueued.rows[0]);
+  const noAddrFlush = await POST('/api/admin/notifications/flush', {}, { token: A });
+  const noAddrRow = await pool.query('SELECT * FROM notification_outbox WHERE id=$1',
+    [noAddrQueued.rows[0].id]);
+  ok('F3 NO ADDRESS: the flush marks it `skipped` with the reason NAMED, not "failed"',
+     noAddrRow.rows[0].status === 'skipped' &&
+     noAddrRow.rows[0].skipped_reason === 'no email address on file', noAddrRow.rows[0]);
+  ok('F3 NO ADDRESS: ...permanently — sent_at is stamped so it is never retried',
+     !!noAddrRow.rows[0].sent_at && noAddrRow.rows[0].attempts >= 1, noAddrRow.rows[0]);
+  ok('F3 NO ADDRESS: ...and the flush counted it as skipped, never as failed',
+     noAddrFlush.body.skipped >= 1 && noAddrFlush.body.failed === 0, noAddrFlush.body);
+  const noAddrBell = await GET('/api/me/inbox/count',
+    { token: (await POST('/api/auth/login', { username: noAddr, password: 'smokepass123' })).body.token });
+  ok('F3 NO ADDRESS: the APP still told them — no address silences the email, never the bell',
+     noAddrBell.status === 200, noAddrBell.body);
+  // ...and the moment they have one, the same seam delivers. The marking is
+  // about the ADDRESS and not about the person, which is what makes it safe for
+  // the Graph driver to be dropped in behind it unchanged.
+  await PUT(`/api/users/${noAddrUser.body.id}`, { email: noAddr + '@e360sport.test' }, { token: A });
+  await PUT(`/api/steps/${noAddrStep.body.id}/assign`, { owner: null }, { token: A });
+  await PUT(`/api/steps/${noAddrStep.body.id}/assign`, { owner: noAddr }, { token: A });
+  await POST('/api/admin/notifications/flush', {}, { token: A });
+  const nowSent = await pool.query(
+    `SELECT * FROM notification_outbox WHERE username=$1 ORDER BY id DESC LIMIT 1`, [noAddr]);
+  ok('F3 NO ADDRESS: give them an address and the very next row is SENT — same seam',
+     nowSent.rows[0].status === 'sent' && nowSent.rows[0].driver === 'log', nowSent.rows[0]);
+
   // 'off' silences the email and NEVER the bell
   await PUT('/api/me/notification-prefs', { notify: 'off' }, { token: TECHT });
   const bellBefore = (await GET('/api/me/inbox/count', { token: TECHT })).body;
@@ -2733,6 +2933,159 @@ const DEL = (p, o) => call('DELETE', p, o);
      actAfterCreate.rows.some((r) => r.action === 'user.create' && r.detail.includes(newHire))
      && !actAfterCreate.rows.some((r) => (r.detail || '').includes(TEMP1)),
      actAfterCreate.rows.slice(0, 3));
+
+  // ── EMAIL — optional, validated, unique among the ACTIVE ─────────────────
+  // The address is not the identity. The USERNAME is: it is the @mention
+  // handle and the string sitting in steps.owner, notes.author and a dozen
+  // other columns, and it never changes. The address is where we send things,
+  // it is optional, and it is editable — which is precisely why login accepts
+  // either and why the two rules below are different rules.
+  ok('17 EMAIL: a person created without one simply has none — it is OPTIONAL',
+     created.body.email === '', created.body);
+  const mailUser = TAG + 'mail';
+  const MAIL_ADDR = mailUser + '@e360sport.test';
+  const withMail = await POST('/api/users',
+    { username: mailUser, password: 'smokepass123', role: 'tech', name: 'MAIL USER',
+      email: '  ' + MAIL_ADDR.toUpperCase() + '  ' }, { token: A });
+  ok('17 EMAIL: an address is accepted, TRIMMED and stored lowercase — one form to compare',
+     withMail.status === 200 && withMail.body.email === MAIL_ADDR, withMail.body);
+  const MAIL_ID = withMail.body.id;
+  for (const badAddr of ['nope', 'no@dot', 'two@@at.com', 'has space@x.com',
+                         '@nolocal.com', 'trailing@dot.', 'comma@x.com,y@x.com']) {
+    const r = await POST('/api/users',
+      { username: TAG + 'badmail', email: badAddr }, { token: A });
+    ok(`17 EMAIL: "${badAddr}" is refused as an address, in the caller's words`,
+       r.status === 400 && /email address/i.test(r.body.error || ''), r.body);
+  }
+  const badMailRow = await pool.query('SELECT id FROM users WHERE username=$1', [TAG + 'badmail']);
+  ok('17 EMAIL: ...and every one of those refusals created NOBODY — checked before the write',
+     badMailRow.rows.length === 0);
+  const okAddr = await POST('/api/users',
+    { username: TAG + 'plus', email: 'tom.andres+showrunner@e360sport.co.uk' }, { token: A });
+  ok('17 EMAIL: the rule is RFC-lite, not RFC-pedantic — a +tag and a two-part TLD are fine',
+     okAddr.status === 200 && okAddr.body.email === 'tom.andres+showrunner@e360sport.co.uk',
+     okAddr.body);
+
+  const dupMail = await POST('/api/users',
+    { username: TAG + 'dupmail', email: MAIL_ADDR.toUpperCase() }, { token: A });
+  ok('17 EMAIL: a second ACTIVE person cannot take the same address, case-insensitively',
+     dupMail.status === 400 && /already on/i.test(dupMail.body.error || '')
+     && dupMail.body.error.includes(mailUser), dupMail.body);
+  const dupMailRow = await pool.query('SELECT id FROM users WHERE username=$1', [TAG + 'dupmail']);
+  ok('17 EMAIL: ...and that refusal created nobody either', dupMailRow.rows.length === 0);
+  const selfSave = await PUT(`/api/users/${MAIL_ID}`,
+    { email: MAIL_ADDR, title: 'Still theirs' }, { token: A });
+  ok('17 EMAIL: saving your OWN address back is not a collision with yourself',
+     selfSave.status === 200 && selfSave.body.email === MAIL_ADDR
+     && selfSave.body.title === 'Still theirs', selfSave.body);
+  const clearMail = await PUT(`/api/users/${okAddr.body.id}`, { email: '' }, { token: A });
+  ok('17 EMAIL: sending a blank CLEARS it — an address can be taken away again',
+     clearMail.status === 200 && clearMail.body.email === '', clearMail.body);
+
+  // ── LOGIN ACCEPTS EITHER ─────────────────────────────────────────────────
+  const byUsername = await POST('/api/auth/login', { username: mailUser, password: 'smokepass123' });
+  ok('17 LOGIN: the username still signs them in',
+     byUsername.status === 200 && !!byUsername.body.token, byUsername.body);
+  const byEmail = await POST('/api/auth/login', { username: MAIL_ADDR, password: 'smokepass123' });
+  ok('17 LOGIN: and so does the EMAIL — one field, and the "@" picks the lookup',
+     byEmail.status === 200 && !!byEmail.body.token && byEmail.body.username === mailUser,
+     byEmail.body);
+  const byEmailCase = await POST('/api/auth/login',
+    { username: '  ' + MAIL_ADDR.toUpperCase() + '  ', password: 'smokepass123' });
+  ok('17 LOGIN: ...case-insensitively, and trimmed', byEmailCase.status === 200, byEmailCase.body);
+  const byIdentifier = await POST('/api/auth/login',
+    { identifier: MAIL_ADDR, password: 'smokepass123' });
+  ok('17 LOGIN: `identifier` is accepted as a synonym, so a caller need not lie about the field',
+     byIdentifier.status === 200, byIdentifier.body);
+  const emailSession = await GET('/api/auth/me', { token: byEmail.body.token });
+  ok('17 LOGIN: a session minted by an email login is an ORDINARY full session',
+     emailSession.body.loggedIn === true && emailSession.body.username === mailUser,
+     emailSession.body);
+
+  // ── THE NO-ENUMERATION PROPERTY ──────────────────────────────────────────
+  // Adding a second way in is exactly how an endpoint accidentally becomes an
+  // account-existence oracle: "wrong password" for an address we hold and "no
+  // such user" for one we do not is a free directory of everyone who works
+  // here. So all three failures below must be INDISTINGUISHABLE — same status,
+  // same body, byte for byte — and this is the assertion that says so.
+  const wrongPwRealEmail = await POST('/api/auth/login',
+    { username: MAIL_ADDR, password: 'definitely-wrong' });
+  const unknownEmail = await POST('/api/auth/login',
+    { username: 'nobody.at.all@e360sport.test', password: 'definitely-wrong' });
+  const unknownUsername = await POST('/api/auth/login',
+    { username: TAG + 'ghost', password: 'definitely-wrong' });
+  ok('17 ENUM: a WRONG PASSWORD against a real address is a generic 401',
+     wrongPwRealEmail.status === 401, wrongPwRealEmail.body);
+  ok('17 ENUM: an address NOBODY HOLDS is a generic 401',
+     unknownEmail.status === 401, unknownEmail.body);
+  ok('17 ENUM: ...and the two bodies are BYTE-IDENTICAL — no oracle',
+     JSON.stringify(wrongPwRealEmail.body) === JSON.stringify(unknownEmail.body),
+     { real: wrongPwRealEmail.body, unknown: unknownEmail.body });
+  ok('17 ENUM: ...and an unknown USERNAME says the very same thing as both',
+     unknownUsername.status === 401 &&
+     JSON.stringify(unknownUsername.body) === JSON.stringify(unknownEmail.body),
+     unknownUsername.body);
+  ok('17 ENUM: ...and none of the three says "no such", "unknown" or "not found"',
+     [wrongPwRealEmail, unknownEmail, unknownUsername].every(
+       (r) => !/no such|not found|unknown|does not exist|deactivated/i.test(JSON.stringify(r.body))),
+     [wrongPwRealEmail.body, unknownEmail.body, unknownUsername.body]);
+
+  // ── UNIQUE AMONG THE ACTIVE, AND ONLY THE ACTIVE ─────────────────────────
+  // Somebody who leaves keeps their row — and their address — forever, because
+  // that is the whole offboarding story. Blocking a re-hire, or the re-use of a
+  // company address, on a row nobody can sign in as would be the rule doing
+  // real damage for no gain.
+  await PUT(`/api/users/${MAIL_ID}`, { active: false }, { token: A });
+  const reuse = await POST('/api/users',
+    { username: TAG + 'reuse', password: 'smokepass123', email: MAIL_ADDR }, { token: A });
+  ok('17 EMAIL: once the holder is DEACTIVATED the address frees up',
+     reuse.status === 200 && reuse.body.email === MAIL_ADDR, reuse.body);
+  const deadEmailLogin = await POST('/api/auth/login',
+    { username: MAIL_ADDR, password: 'smokepass123' });
+  ok('17 EMAIL: ...and that address now signs in as the LIVE account, not the dead one',
+     deadEmailLogin.status === 200 && deadEmailLogin.body.username === TAG + 'reuse',
+     deadEmailLogin.body);
+  const backOn = await PUT(`/api/users/${MAIL_ID}`, { active: true }, { token: A });
+  ok('17 EMAIL: reactivating the FIRST holder is refused, naming the clash — caught here, '
+     + 'not at 3am in the outbox',
+     backOn.status === 400 && /already on/i.test(backOn.body.error || ''), backOn.body);
+  const stillOff = await pool.query('SELECT active FROM users WHERE id=$1', [MAIL_ID]);
+  ok('17 EMAIL: ...and the refusal wrote NOTHING — they are still deactivated',
+     stillOff.rows[0].active === false, stillOff.rows[0]);
+  await PUT(`/api/users/${reuse.body.id}`, { email: '' }, { token: A });
+  const backOn2 = await PUT(`/api/users/${MAIL_ID}`, { active: true }, { token: A });
+  ok('17 EMAIL: free the address and the reactivation goes straight through',
+     backOn2.status === 200 && backOn2.body.active === true, backOn2.body);
+  await PUT(`/api/users/${MAIL_ID}`, { active: false }, { token: A });   // park them off again
+
+  // ── THE STAFFING-APP NAME — the identity half of the linkage ─────────────
+  const staffName = await PUT(`/api/users/${HIRE_ID}`,
+    { staffing_name: '  New A. Hire  ' }, { token: A });
+  ok('17 LINK: staffing_name is stored, trimmed, and comes back on the record',
+     staffName.status === 200 && staffName.body.staffing_name === 'New A. Hire', staffName.body);
+  const staffCleared = await PUT(`/api/users/${HIRE_ID}`, { staffing_name: '' }, { token: A });
+  ok('17 LINK: blank clears it to NULL — "they are called the same thing in both systems"',
+     staffCleared.status === 200 && staffCleared.body.staffing_name === null, staffCleared.body);
+  const staffUntouched = await PUT(`/api/users/${HIRE_ID}`, { title: 'Field Tech' }, { token: A });
+  ok('17 LINK: an edit that does not mention it leaves it alone',
+     staffUntouched.status === 200 && staffUntouched.body.staffing_name === null, staffUntouched.body);
+
+  // ── WHO MAY SEE AN ADDRESS ───────────────────────────────────────────────
+  // Phone numbers ride on call sheets by design; addresses do not, and the
+  // roster is read by everybody.
+  const rosterAsTech = await GET('/api/users', { token: TECHT });
+  const meAsTech = rosterAsTech.body.find((u) => u.username === techUser);
+  const otherAsTech = rosterAsTech.body.find((u) => u.username === pmUser);
+  ok('17 EMAIL PRIVACY: a non-admin sees their OWN address on the roster',
+     !!meAsTech && typeof meAsTech.email === 'string' && meAsTech.email.length > 0, meAsTech);
+  ok('17 EMAIL PRIVACY: ...and the key is simply ABSENT for everybody else — not empty, absent',
+     !!otherAsTech && !('email' in otherAsTech), otherAsTech);
+  const rosterAsAdmin = await GET('/api/users?all=1', { token: A });
+  ok('17 EMAIL PRIVACY: an admin sees every address — they are the only one who can edit them, '
+     + 'and the only one who needs to know who has not got one',
+     rosterAsAdmin.body.every((u) => 'email' in u), rosterAsAdmin.body.length);
+  ok('17 EMAIL PRIVACY: staffing_name is NOT gated — it is a name, published in staffing anyway',
+     rosterAsTech.body.every((u) => 'staffing_name' in u), rosterAsTech.body.length);
 
   // ── THE must_change FLOW ─────────────────────────────────────────────────
   const hireLogin = await POST('/api/auth/login', { username: newHire, password: TEMP1 });

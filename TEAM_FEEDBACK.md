@@ -95,4 +95,10 @@ Core principle, Tom's words: "Why do I have to make an event folder in multiple 
 - Probes must confirm: Flex contact/venue creation endpoints + the event-folder create path (the existing staffing flexCreate flow is the proven base; the survey's probe plan covers the rest).
 - Propagation is explicit and per-facet (a button/action per target with status chips: "In scheduler ✓ · In Flex ✓ · NAS ✓"), not silent — same file-don't-fire posture, human sees what exists where.
 
+## THE NORTH STAR (Tom, 2026-08-28 — grade everything against this)
+"We have a big problem with people who talk to the client not informing everyone of what needs to happen. Or changes, or whatever. **This needs to bind us all together. It needs to make our tasks transparent. It needs to keep things from falling through the cracks.**"
+The test for every feature: *a change made anywhere becomes visible to everyone it affects, without the person who made it having to remember to tell anyone.*
+- **Resolves the notify tension deliberately:** Tony's rule (sender picks who gets pinged; routine edits silent) governs *ad-hoc* pings. Tom's rule governs *material changes* (dates, scope, specs, schedule, confirm/stage, budget): the show's assigned team is AUTO-informed — subscription by assignment, not by the changer's memory. Digest-friendly so it binds without spamming.
+- Needs (candidate mechanisms, coherence review to refine): a per-show **"What changed" feed/changelog** everyone on the crew sees; material-change classification on mutations; assignment = subscription; the client-facing person's inputs (calls, emails, meetings) becoming tasks via the agent pipeline (the transcript toggle is upstream of this); "waiting on me" generalized beyond finance (everyone has a cracks-list).
+
 ## (more team wishes to be added here as responses come in)

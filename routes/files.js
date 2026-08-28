@@ -16,12 +16,13 @@
 'use strict';
 
 const express = require('express');
+const crypto = require('crypto');
 const { pool, withTx, loadProject, loadShow, projectForRow } = require('../lib/db');
 const { requireAuth, requireRole, canEditProject } = require('../lib/auth');
 const { asyncH, badRequest, forbidden, notFound, conflict, idParam, limitOf } = require('../lib/http');
 const { logActivity } = require('../lib/activity');
 const { notifyTargets } = require('../lib/mentions');
-const { storage, buildNasPath, MAX_BYTES } = require('../lib/storage');
+const { storage, buildNasPath, MAX_BYTES, contentTypeFor, fileName } = require('../lib/storage');
 const {
   pick, has, dbToFile, dbToBooking, dbToProof, dbToProofRound, dbToChainNode,
   dbToFlexState, dbToExpense
@@ -270,8 +271,29 @@ router.put('/files/:id', asyncH(async (req, res) => {
   res.json(dbToFile(r.rows[0]));
 }));
 
-// Bytes. Metadata-first means a failed upload leaves a resolvable record, not
-// a ghost row (AGENT_API §3).
+// ════════════════════════════════════════════════════════════════════════════
+// BYTES — the two routes that make the two-tier model real
+// ────────────────────────────────────────────────────────────────────────────
+// Metadata-first means a failed upload leaves a resolvable record, not a ghost
+// row (AGENT_API §3): the `files` row is created by POST /api/files, and the
+// bytes follow on PUT here. Both halves are separately retryable.
+//
+// The DOWNLOAD route is what makes Showrunner usable off the office LAN. The
+// NAS is not on the internet and never will be; the app is. A tech in a truck
+// at Wrigley gets the spec because the SERVER can reach the NAS over the
+// tailnet and streams it out over the session she already has — she never
+// touches a UNC path, a VPN client, or a share password.
+// ════════════════════════════════════════════════════════════════════════════
+
+// HARDENING 21. `commitAddFile`/`dropFile` used to stamp a fabricated
+// `size`/`dim` on a row a human asked for. The front end no longer invents
+// them — but this route is the backstop, and it is the right place for one:
+// once real bytes exist, the bytes ARE the truth.
+//   · size — always replaced by the real byte count.
+//   · dim  — a guess about pixels. Either the uploader MEASURED it (?w=&h=,
+//            which the browser fills in from the decoded image itself) and it
+//            is recorded, or it is cleared. What it may never be is a number
+//            somebody's ADD_TYPES table made up.
 router.put('/files/:id/content',
   express.raw({ type: () => true, limit: MAX_BYTES }),
   asyncH(async (req, res) => {
@@ -282,10 +304,78 @@ router.put('/files/:id/content',
       throw forbidden('Not allowed to upload to this file');
     }
     if (!Buffer.isBuffer(req.body) || !req.body.length) throw badRequest('Empty body');
+    if (!cur.nas_path) throw badRequest('This file row has no nas_path — re-create it');
+
+    // The byte write happens BEFORE the metadata update, and its failure is
+    // reported as its own status. A NAS that is down must not leave the row
+    // claiming a size it does not have.
     const result = await storage.put(cur.nas_path, req.body);
-    await pool.query('UPDATE files SET size=$1 WHERE id=$2', [result.size, cur.id]);
-    res.json({ ok: true, size: result.size, nas_path: cur.nas_path });
+
+    const w = intOrNull(pick(req.query, 'w')) || intOrNull(pick(req.query, 'width'));
+    const h = intOrNull(pick(req.query, 'h')) || intOrNull(pick(req.query, 'height'));
+    const measured = w && h ? `${w} x ${h}` : null;
+    await pool.query(
+      `UPDATE files SET size=$1, dim=$2,
+         width = COALESCE($3, width), height = COALESCE($4, height)
+       WHERE id=$5`,
+      [result.size, measured, w, h, cur.id]);
+
+    await logActivity(pool, {
+      projectId: project ? project.id : null, showId: cur.show_id, actor: req.actor,
+      action: 'file.upload',
+      detail: `${cur.name}${cur.ext ? '.' + cur.ext : ''} — ${result.size.toLocaleString()} bytes`
+    });
+    res.json({
+      ok: true, size: result.size, nas_path: cur.nas_path,
+      // So a caller can verify the round trip without a second transfer. This
+      // is what the wiring-day smoke sequence byte-compares against.
+      sha256: crypto.createHash('sha256').update(req.body).digest('hex'),
+      dim: measured
+    });
   }));
+
+// Stream the bytes back out. Any signed-in user may read a file they can
+// already see the metadata for — the folder gates are on WRITING, and a
+// download that needed a second permission model would be a different app.
+//
+// STREAMED, never buffered: a 400 MB show render must not sit in the server's
+// heap on its way to a browser, and Railway's memory limit is the reason the
+// driver has getStream() at all.
+router.get('/files/:id/content', asyncH(async (req, res) => {
+  const cur = (await pool.query('SELECT * FROM files WHERE id=$1', [idParam(req)])).rows[0];
+  if (!cur) throw notFound();
+  if (!cur.nas_path) throw notFound('This file row has no nas_path');
+
+  // Throws before a byte is written to the socket, so a 404/502 is still a
+  // clean JSON error the SPA can show — not a truncated download.
+  const { stream, size } = await storage.getStream(cur.nas_path);
+
+  res.setHeader('Content-Type', contentTypeFor(cur.ext));
+  if (size != null) res.setHeader('Content-Length', String(size));
+  res.setHeader('Content-Disposition', contentDisposition(
+    fileName({ name: cur.name, ext: cur.ext }),
+    String(pick(req.query, 'inline') || '') === '1'));
+  // These bytes are somebody's contract or client proof. Nothing caches them.
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+
+  stream.on('error', (e) => {
+    // Headers are already out; the only honest signal left is an aborted body.
+    console.error(`[files/${cur.id}/content] transfer failed:`, e.message);
+    res.destroy(e);
+  });
+  req.on('aborted', () => { try { stream.destroy(); } catch (_) {} });
+  stream.pipe(res);
+}));
+
+// RFC 6266 / 5987. `filename` for the ASCII-only clients, `filename*` for the
+// em dashes and accented vendor names that are in half of e360's real file
+// names — without both, "E360 — Big Ten.pdf" downloads as garbage.
+function contentDisposition(name, inline) {
+  const ascii = String(name).replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+  return `${inline ? 'inline' : 'attachment'}; filename="${ascii}"; ` +
+         `filename*=UTF-8''${encodeURIComponent(name)}`;
+}
 
 router.delete('/files/:id', asyncH(async (req, res) => {
   const cur = (await pool.query('SELECT * FROM files WHERE id=$1', [idParam(req)])).rows[0];

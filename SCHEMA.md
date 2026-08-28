@@ -373,10 +373,105 @@ key **by FK, not by regex**.
 
 ### Identity, agents, audit
 
-**`users`** — `id · username (unique) · password_hash · pw_algo · role · name · initials · color · title · discipline · phone · email · finance BOOL · active BOOL · must_change_password BOOL · created_at`
+**`users`** — `id · username (unique) · password_hash · pw_algo · role · name · initials · color · title · discipline · phone · email · staffing_name · finance BOOL · active BOOL · must_change_password BOOL · created_at`
 Passwords are **bcrypt**; a legacy `sha256+salt` hash still verifies and is
 re-hashed in place on the next successful login. `finance` is a **capability,
 not a rank**: it grants margin visibility and PO approval without changing role.
+
+#### `username` vs `email` — a slug and an address, and they stay different things
+
+The **username is the identity**. It is the `@mention` handle, and it is the
+literal string sitting in `steps.owner`, `notes.author`,
+`crew_assignments.username`, `activity.actor`, `tech_reports.username`,
+`notification_outbox.username` and a dozen other columns. It is a **slug**
+(`/^[a-z][a-z0-9_.-]{1,31}$/`) and it **never changes**, because changing it
+would mean rewriting every one of those columns. Nothing in the app offers to.
+
+The **email is a contact address**: `TEXT`, **nullable, optional, editable**, and
+owned by whichever mail provider the person is on this year. It is *where we
+send things*, not *who they are*. "No address" is stored as the empty string
+(the column's own default); `NULL` is read as the same thing everywhere, so a
+row written by hand either way behaves identically.
+
+| | rule | where it lives |
+|---|---|---|
+| **format** | RFC-*lite* — a local part, an `@`, a domain with a dot. Deliberately not the full grammar: a regex that admits quoted local parts and IP literals admits almost anything, and one that rejects them rejects addresses that work. The mail server is the only thing that can really answer "is this deliverable?" | `routes/auth.js` `EMAIL_RE` |
+| **case** | matched case-insensitively everywhere, so **stored lowercased** — one form to compare | `normEmail()` |
+| **uniqueness** | unique among **ACTIVE** users only, enforced in **route logic and not by a DB constraint** — this table is upgraded in place on a live database and nothing here ever drops, rewrites or constrains a column that already has rows in it. Among the *active* on purpose: somebody who leaves keeps their row and their address forever, and blocking a re-hire (or the re-use of a company address) on a row nobody can sign in as would be the rule doing damage for no gain. Checked again on **reactivation**, against the state the row is moving to | `assertEmailFree()` |
+| **disclosure** | returned to the person themselves and to an **admin**; the key is **absent** from a non-admin's roster read. Phone numbers ride on call sheets by design — addresses do not, and the roster is read by everybody | `dbToUser(row, { self, admin })` |
+
+**Login accepts either.** `POST /api/auth/login` takes one identifier on the
+`username` field (`identifier` is accepted as a synonym) and the **`@` decides
+the lookup** — a username can never contain one, so the two namespaces cannot
+collide and there is no "try one, then the other" ambiguity. The email branch
+*prefers the active row*, so when a departed teammate and a live account share
+an address the live one wins, and when only the dead one exists it is still
+found — which is what lets a deactivated person typing their address get the
+same plain 403 they get typing their username.
+
+**The no-enumeration property survives the addition, and is asserted.** Wrong
+password against a real address, an address nobody holds, and an unknown
+username all return **the identical 401 body, byte for byte**. This is the
+failure mode a second login path invites — "wrong password" for an address we
+hold and "no such user" for one we do not is a free directory of everyone who
+works here — so `scripts/smoke.js` §17 compares the three bodies with
+`JSON.stringify`, and both branches have been **mutation-tested**.
+
+**No address is not an error.** The notification outbox marks that person's rows
+`skipped · no email address on file` — permanently, with `sent_at` stamped, so
+they are never retried — rather than throwing or leaving them queued. `queued`
+means *"we could not send this yet"* and is the state a backlog lives in;
+`skipped` means *"we will never send this"*. Getting the two the wrong way round
+is how turning `MAIL_*` on later either discovers a discarded backlog or opens a
+retry loop against an address that does not exist. The bell is unaffected: the
+app always tells them.
+
+#### `staffing_name` — the identity half of the cross-system linkage
+
+Showrunner links to two other systems, and the two linkages are different
+shapes because the far sides are different:
+
+| | linked by | stored as |
+|---|---|---|
+| **Flex** (contacts, elements) | an **id** the far side minted — resolved once against the contact directory and then held | `flex_state.element_id`, the contact ids the create path resolves |
+| **the staffing app** (people) | a **display name** — it has no id we can hold and no notion of a Showrunner username | `users.staffing_name` |
+
+The staffing app keys its roster on `name.toLowerCase().trim()`, and so does
+every `events.staff[]` entry, every `travel_key` segment (§4.2) and every
+`hotels.staff_assigned` name (§4.3). A Showrunner user the two systems spell
+differently — *"Devin"* here, *"Devin Vargas"* there — is therefore the M6
+ghost: pushed, accepted, and silently given **no email, no colour chip and no
+tech packet**.
+
+`staffing_name` is the override, and it is `NULL` for almost everybody.
+**`NULL` means "the same name in both systems"**, and the fallback is expressed
+**once** — `lib/scheduler.js staffingNameFor()` — so the push builder, the
+travel-key builder, the booking `staffAssigned` list and the travel/hotel
+read-back matcher cannot answer the question differently from one another. A leg
+can never be filed under one spelling and looked up under another.
+
+Resolution is an ordered candidate list, most authoritative first, and the
+**first form the staffing roster knows wins**:
+
+1. `users.staffing_name`
+2. the user's Showrunner display name
+3. the raw token exactly as it was typed
+
+With no linked user that list is just (3), which is what `resolveCrewNames()`
+did before the column existed — so the link can only **add** a way for a name to
+match and never take one away.
+
+**M6's refusal names the person and the forms.** `validateForPush` no longer says
+only *"these crew names do not match"*, because that does not tell you which
+field to go and fix. It renders, per unmatched token, either
+`"dfields" — Showrunner user @dfields; tried "Dana F" (their name in Showrunner), then "dfields" (the name as typed)`
+or `"lead_tech" — not a Showrunner user; tried …`, and closes by naming the
+**"Name in staffing app"** field that fixes it.
+
+This is the **name-level** linkage, which is what the staffing app's current API
+can carry. Id-level linkage between the two rosters arrives with the
+staffing-absorption phase; until then a name is what crosses the wire, and this
+column is how it is made the right one.
 
 **`active` is the whole offboarding story — nothing here ever deletes a person.**
 A row that goes inactive is refused at login (a *clear* 403 saying so, returned
@@ -537,7 +632,17 @@ Steps       GET /api/steps · GET /api/steps/:id · GET /api/my-steps · POST /a
 Templates   GET /api/templates · GET /api/templates/:idOrType · GET /api/event-types
             POST /api/templates · POST /api/shows/:id/instantiate-template
 Files       GET /api/files · GET /api/files/:id · POST /api/files
-            PUT /api/files/:id · PUT /api/files/:id/content · DELETE /api/files/:id
+            PUT /api/files/:id · DELETE /api/files/:id
+            PUT /api/files/:id/content   raw bytes up   (pm+ on the folder, or the uploader)
+            GET /api/files/:id/content   raw bytes down (any signed-in user; ?inline=1)
+            (the byte pair. POST /api/files makes the row and returns `upload_url`;
+             the PUT sends the bytes to it. Two calls on purpose — a failed upload
+             leaves a resolvable record, not a ghost. The PUT sets `size` from what
+             actually arrived and returns its `sha256`; `dim` is set only from real
+             measured pixels (?w=&h=) and otherwise CLEARED, never guessed
+             (HARDENING 21). The GET streams — a 400 MB show file never lands in
+             the server's heap — and is how a remote user gets a file THROUGH the
+             app: the NAS is not on the internet, the server is.)
 Chain/Gear  GET/PUT /api/shows/:id/chain[/:node] · GET/PUT /api/shows/:id/gear
 Flex        POST /api/shows/:id/flex/create-element · DELETE /api/shows/:id/flex/element
             GET  /api/shows/:id/flex/gear-lists · GET /api/shows/:id/flex/pull-sheet?listId=
@@ -647,6 +752,9 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | `updateStep` / `setStepStatus` / `assignStep` | `PUT /api/steps/:id` · `/status` · `/assign` |
 | `myOpenSteps(u)` | `GET /api/my-steps[?username=]` |
 | `listFiles` / `getFile` / `addFile` | `GET /api/files?show_id=` · `GET /api/files/:id` · `POST /api/files` |
+| `uploadFileBytes(id, blob, dims)` | `PUT /api/files/:id/content` (raw body; `?w=&h=` only when the image was really decoded) |
+| `downloadFileBytes(id)` | `GET /api/files/:id/content` → a Blob. Fetched rather than linked because auth is an `x-auth-token` **header**, not a cookie |
+| `uploadsEnabled()` | `GET /api/config` → `features.fileUpload`. Fails **closed** |
 | `replaceChainFile(sid, key, body)` | `POST /api/files` with `{chain_key, replace_chain:true}` |
 | `listBookings` / `getBooking` | `GET /api/bookings?show_id=` / `:id` |
 | `listProofs(sid)` | `GET /api/proofs?show_id=` |
@@ -820,7 +928,7 @@ here. `SCHEDULER_API_TOKEN` is **retired**; do not reintroduce it.
 | `setup` / `breakdown` | `show.load_in_date` / `show.strike_date` |
 | `setupTime` / `eventTime` | `show.load_in_time` / `show.event_time` (the call-sheet header) |
 | `location` | `show.venue` |
-| `staff[]` | crew-lane step owners (status ≠ `na`) + `crew_assignments`, **resolved to canonical staffing roster names** |
+| `staff[]` | crew-lane step owners (status ≠ `na`) + `crew_assignments`, **resolved to canonical staffing roster names** through `users.staffing_name` → display name → the raw token (see *the identity half of the cross-system linkage*). Never a Showrunner username |
 | `notes` | `project.description` |
 | `clientId` | resolved live from staffing `/api/clients` by `project.client`; a `400 already exists` means re-GET and match, not fail |
 | `eventType` | `project.type` → `LED` / `Print` / `Both` |
@@ -883,7 +991,11 @@ answers **422** with the reasons:
   opaque 502 from `/flex/create-element`;
 - **any crew name that does not match the staffing roster.** A miss silently
   yields no email, no colour chip and no tech packet, so a ghost is worse than a
-  refusal.
+  refusal. The message names **which user** and **which of their name forms**
+  was tried (`"dfields" — Showrunner user @dfields; tried "Dana F" (their name
+  in Showrunner), then "dfields" (the name as typed)`), and points at the
+  **"Name in staffing app"** field that fixes it — because "these names do not
+  match" does not tell you which field to go and edit.
 
 ### Idempotency — children are DELETE-then-INSERT
 
@@ -926,6 +1038,12 @@ each crew line as **`booked: {arrival, departure, hotel}`**, alongside the local
 `travel` mirror. Both are **graceful by contract**: an unreachable or
 unconfigured scheduler yields `scheduler.unavailable` and the sheet still
 renders from local data. A travel lookup failure must never fail a call sheet.
+
+Both match on the **same name the push wrote the row under** —
+`crewStaffingName(row, user)`: an explicit `users.staffing_name` wins, else the
+crew row's own name, else the linked user's. It is the *same expression* the
+builder used, deliberately, so a leg can never be filed under one spelling and
+looked up under another.
 
 ---
 
@@ -1017,10 +1135,53 @@ surfaces the one real operator edit (field width 225 vs 222).
 | `CORS_ORIGINS` | *(unset)* | comma-separated allowlist. Unset = same-origin only |
 | `JSON_BODY_LIMIT` | `1mb` | JSON is metadata, never bytes |
 | `SPEC_BIND_BODY_LIMIT` | `25mb` | scoped to `POST /api/shows/:id/spec-bind` only |
-| `MAX_UPLOAD_BYTES` | `104857600` | the raw byte-upload cap (100 MB) |
-| `STORAGE_DRIVER` | `local` | `local` · `smb` · `webdav` (the latter two are stubs) |
-| `STORAGE_ROOT` | `./.storage` | where the local driver writes bytes |
-| `SHOWRUNNER_NAS_ROOT` | `\\E360-NAS\Showrunner` | the logical root every `nas_path` is expressed against |
+| `MAX_UPLOAD_BYTES` | `104857600` | the raw byte-upload cap (100 MB). Enforced by both drivers *before* a byte leaves the process |
+| `STORAGE_DRIVER` | `local` | `local` · `webdav` · `smb`. **`webdav` is real** (Synology, see below); `smb` is still an honest 501 that points at `webdav` |
+| `STORAGE_ROOT` | `./.storage` | where the **local** driver writes bytes |
+| `SHOWRUNNER_NAS_ROOT` | `\\E360-NAS\Showrunner` | the logical root every `nas_path` is expressed against. A **label**, not a route — operators read it out of the UI and paste it into Explorer; nothing dials it |
+
+### Storage — the NAS byte layer (`lib/storage.js`)
+
+Two-tier by design: **metadata in Postgres, bytes on the NAS.** Nothing in the
+app opens a UNC path; every byte goes through a driver, so which NAS and how it
+is reached are env decisions rather than code.
+
+The `webdav` driver talks to the Synology's WebDAV Server package over HTTPS,
+optionally through the Tailscale userspace SOCKS5 proxy so a Railway container
+can reach a NAS that exists only on the tailnet. It implements `mkdirs` (deep
+MKCOL), `put`, `get`, `getStream`, `exists`, `stat`, `move` and `remove` against
+node's own `http`/`https`/`tls`/`net` — **no new npm dependency**, deliberately:
+this is the one code path that holds a credential and opens a tunnel into the
+office, and its whole surface should be readable.
+
+The full runbook is **`WIRING_DAY.md`**.
+
+| Var | Default | Notes |
+|---|---|---|
+| `NAS_WEBDAV_URL` | *(unset)* | e.g. `https://e360-nas.tail1a2b3.ts.net:5006/showrunner`. The path is the **share** name. **Unset with `STORAGE_DRIVER=webdav` is a 501 naming this variable** — never a silent failure |
+| `NAS_WEBDAV_USER` / `NAS_WEBDAV_PASS` | *(unset)* | the `svc-showrunner` service account. Both required; either one missing is a 501 |
+| `NAS_WEBDAV_TIMEOUT_MS` | `30000` | per-request deadline. On expiry: **504**, with "the record is intact; the bytes did not move" |
+| `NAS_WEBDAV_ALLOW_SELF_SIGNED` | *(off)* | `1` disables certificate verification **for this driver only**. Not `NODE_TLS_REJECT_UNAUTHORIZED` — every other TLS client in the process (Flex, Graph, staffing) keeps full verification. Acceptable *because* the transport is already an authenticated WireGuard tunnel; reported as `storageTls: "self-signed-allowed"` so nobody mistakes the deployment for a verified one |
+| `NAS_WEBDAV_CA` | *(unset)* | a PEM (literal, `\n`-escaped ok) or a path to one. Pins the NAS certificate with verification **on**; reported as `storageTls: "pinned-ca"` |
+| `TAILSCALE_AUTHKEY` | *(unset)* | **the switch.** Set, `docker-entrypoint.sh` starts `tailscaled --tun=userspace-networking` and the driver routes the NAS host through `localhost:1055`. Unset, no daemon starts and the driver uses ordinary sockets — the whole feature is inert |
+| `TAILSCALE_SOCKS` | *(implied)* | `host:port` or `socks5://user:pass@host:port`. Overrides the `localhost:1055` implied by `TAILSCALE_AUTHKEY` |
+| `TAILSCALE_SOCKS_DISABLE` | *(off)* | `1` wins over everything — the escape hatch for "the NAS is reachable directly today" |
+| `TAILSCALE_HOSTNAME` | `showrunner` | the node name in the Tailscale admin console |
+| `TAILSCALE_REQUIRED` | *(off)* | `1` makes a failed tailnet join a hard deploy failure. Default is a loud warning and a normal boot: schedules, budgets, notes, POs and the agent surface do not need the NAS, and taking the whole app down because a file server is unreachable is the wrong trade |
+| `TAILSCALE_SOCKS_PORT` · `TAILSCALE_UP_TIMEOUT` · `TAILSCALE_STATE` | `1055` · `45` · `/var/lib/tailscale/tailscaled.state` | read by `docker-entrypoint.sh` only |
+
+**The proxy is a whitelist of exactly one hostname.** `proxyForHost(host, env)`
+returns a proxy only when `host` equals `NAS_WEBDAV_URL`'s host. Sending the
+app's other outbound traffic through a tailnet proxy would be a silent outage
+the first time `tailscaled` was slow to start, so it is a pure, unit-tested
+function rather than a global agent.
+
+**Two error codes, one distinction.** `501` = *there is no NAS configured* — a
+deployment decision, and naming the missing variable is the whole message.
+`502` = *there is a NAS and it did not answer* — an operational event; nothing
+was lost, the record is intact, the bytes can be re-sent. Byte failures never
+roll back a committed DB write (`routes/proposals.js` has moved bytes *after*
+the transaction since punch 46, for the same reason).
 | `ADMIN_PASSWORD` | `e360admin` | the first-boot admin password |
 | `SEED_ROSTER` | *(off)* | `1` seeds the prototype's 9-person demo roster |
 | `SEED_ROSTER_PASSWORD` | `e360demo` | |

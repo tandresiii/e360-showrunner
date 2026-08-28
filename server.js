@@ -46,7 +46,7 @@ const { pool, initDB } = require('./lib/db');
 const { seedAll } = require('./lib/seed');
 const { apiRateLimit, purgeExpiredSessions } = require('./lib/auth');
 const { purgeIdempotency, expireStaleProposals } = require('./lib/agent');
-const { STORAGE_ROOT, NAS_ROOT, storage } = require('./lib/storage');
+const { STORAGE_ROOT, NAS_ROOT, storage, storageInfo, storageReady } = require('./lib/storage');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -142,7 +142,14 @@ app.get('/api/config', (req, res) => {
       // yet" instead of implying mail that will never arrive. Public and
       // secret-free — a driver NAME and a boolean, never a credential.
       mail: require('./lib/mail').mailConfigured(),
-      mailDriver: require('./lib/mail').driverName()
+      mailDriver: require('./lib/mail').driverName(),
+      // Same argument again, for bytes. With the NAS unreachable the Add-file
+      // flow must say "storage is not configured on this server" up front
+      // instead of collecting a file the server cannot store. A driver NAME
+      // and a boolean — the host and credentials stay in /api/health's
+      // operator view and out of the public bootstrap.
+      fileUpload: storageReady(),
+      storageDriver: storage.name
     },
     // F5. The stage vocabulary, published so the SPA never hardcodes it.
     stages: {
@@ -156,8 +163,15 @@ app.get('/api/config', (req, res) => {
 app.get('/api/health', async (req, res) => {
   try {
     const r = await pool.query('SELECT 1 AS ok');
+    // The storage block is the first thing wiring day reads (WIRING_DAY.md §6).
+    // A NAME, a BOOLEAN and a HOST — never a credential; anything that can
+    // reach the app can read this.
+    const si = storageInfo();
     res.json({ ok: r.rows[0].ok === 1, app: 'e360-showrunner', version: APP_VERSION,
-               storage: storage.name, nasRoot: NAS_ROOT });
+               storage: storage.name, nasRoot: NAS_ROOT,
+               storageReady: si.ready, storageTarget: si.target,
+               storageVia: si.via, storageTls: si.tls || null,
+               storageError: si.error || null });
   } catch (e) {
     res.status(503).json({ ok: false, error: e.message });
   }
@@ -300,7 +314,11 @@ async function boot() {
   return new Promise((resolve) => {
     const server = app.listen(PORT, () => {
       console.log(`E360 Showrunner ${APP_VERSION} running on port ${PORT}`);
-      console.log(`  storage driver : ${storage.name}  (root ${STORAGE_ROOT})`);
+      const si = storageInfo();
+      console.log(`  storage driver : ${storage.name}  ->  ${si.target || STORAGE_ROOT}` +
+                  `${si.via && si.via !== 'filesystem' ? '  via ' + si.via : ''}` +
+                  `${si.ready ? '' : '  [NOT CONFIGURED]'}`);
+      if (si.error) console.log(`  storage WARN   : ${si.error}`);
       console.log(`  NAS path root  : ${NAS_ROOT}`);
       console.log(`  CORS origins   : ${ORIGINS.length ? ORIGINS.join(', ') : '(same-origin only)'}`);
       resolve(server);

@@ -151,10 +151,23 @@ Every suite run fresh; no test touches the live Flex tenant.
     and says "bind from the tool" instead.
     **Mutation-tested:** removing the `specGen` guard turns five harness-api
     assertions red, including the row count on a bare show.
-    *Not yet swept (deliberate, next session):* `commitAddFile` / `dropFile` still
-    stamp a fabricated `size`/`dim`/`meta:'modeled'` on a row a human asked for —
-    user-initiated, so it does not violate the rule, but the numbers are fiction
-    and there IS a real byte-upload route to point them at.
+    *Swept (storage pass, 2026-08-28).* The follow-up below is done: there is now
+    a real byte-upload route and the front end points at it.
+    · In **API mode** the Add-file dialog is a REAL file picker — the ADD_TYPES
+      card grid (with its 6.7 MB proof and its `2160 x 864`) survives in demo
+      mode only, where there are no bytes to invent a size for.
+      `commitUpload()` sends **no** `size` and **no** `dim`; drag-and-drop hands
+      `dropFile()` the actual `File` object rather than its name.
+    · `PUT /api/files/:id/content` is the backstop, and the right place for one:
+      once real bytes exist the bytes are the truth. It replaces `size` with the
+      byte count that actually arrived, and **clears `dim`** unless the caller
+      measured it (`?w=&h=`, filled in from a decoded image, never a guess). It
+      also returns the stored `sha256`, so a round trip is verifiable without a
+      second transfer.
+    · **Tested:** `scripts/storage-test.js` §13 and `scripts/smoke.js` both
+      create a row with a deliberately WRONG `size`/`dim` and assert the upload
+      corrects one and clears the other; the front-end path is covered against a
+      real server + real WebDAV backend in the upload harness.
 
 ## Noted, deliberate — do NOT "fix"  *(untouched by the pass)*
 - Photo curation is rank-only (no ownership term) BY DESIGN — mutation-tested.

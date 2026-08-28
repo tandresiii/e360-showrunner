@@ -47,4 +47,34 @@ under each item; the detail lives in `SCHEMA.md` and `INTEGRATIONS_SPEC.md`.
   It was undocumented, and spec-bind **fails closed** without it: the allowlist
   is `[]`, the popup trusts only its own origin, and every tool bind is refused.
 
+---
+
+## Open handoff — two buttons in `public/views-global.js`  *(storage pass, 2026-08-28)*
+
+The NAS byte layer is live: `GET /api/files/:id/content` streams a file back,
+`api.downloadFileBytes(id)` fetches it with the session in hand, and
+`downloadFile(fileId)` in `public/app.js` turns that into a saved file. It is
+registered in the action map as **`downloadFile`** and covered by the upload
+harness.
+
+`views-global.js` was owned by another pass at the time and was deliberately not
+touched, so its **two Download buttons are still `toastAttrs(...)` placeholders**.
+Both are one-line swaps:
+
+```js
+// drawViewer() — the document meta panel
+'<button class="btn" ' + toastAttrs('Download', f.name + '.' + f.ext + ' from the NAS') + '>'
+// becomes
+'<button class="btn" ' + act('downloadFile', f.id) + '>'
+
+// drawPhotoMeta() — "Download original"
+acts.push('<button class="btn" ' + toastAttrs('Download', …) + '>' + icon('download') + 'Download original</button>');
+// becomes
+acts.push('<button class="btn" ' + act('downloadFile', f.id) + '>' + icon('download') + 'Download original</button>');
+```
+
+`downloadFile()` already degrades correctly in demo mode (it emits the same
+toast those placeholders do), so the swap is safe in both modes. Nothing else in
+the viewer needs to change.
+
 (more items as the tour continues)
