@@ -634,6 +634,11 @@ Templates   GET /api/templates · GET /api/templates/:idOrType · GET /api/event
             POST /api/templates · POST /api/shows/:id/instantiate-template
 Files       GET /api/files · GET /api/files/:id · POST /api/files
             PUT /api/files/:id · DELETE /api/files/:id
+            (all three WRITE routes read the SAME sentence — pm+ on the folder,
+             or the uploader. DELETE used to read canEditProject only, so the
+             person who filed the wrong document could rename it and could
+             replace its bytes and could not remove it; closed 2026-09-01 with
+             the rest of HARDENING 21.)
             PUT /api/files/:id/content   raw bytes up   (pm+ on the folder, or the uploader)
             GET /api/files/:id/content   raw bytes down (any signed-in user; ?inline=1)
             (the byte pair. POST /api/files makes the row and returns `upload_url`;
@@ -650,6 +655,11 @@ Flex        POST /api/shows/:id/flex/create-element · DELETE /api/shows/:id/fle
             (the two GETs are the READ path — tech+, live every call, cached nowhere,
              and they write nothing to Flex OR to the database)
 Bookings    GET /api/bookings[/:id] · POST /api/bookings · PUT/DELETE /api/bookings/:id
+            (one gate on all three writes: pm+ AND canEditProject. The DELETE
+             carried a `manager` rank floor while its neighbours carried `pm`,
+             so the pm who owned the folder could book the truck and correct the
+             booking and then had to find a manager to cancel it. Levelled
+             2026-09-01; ownership is still what decides.)
 Proofs      GET /api/proofs · POST /api/proofs · POST /api/proofs/:id/rounds
             PUT/DELETE /api/proofs/:id
 Jobs        GET /api/jobs[/:id] · POST /api/jobs · PUT/DELETE /api/jobs/:id

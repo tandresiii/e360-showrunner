@@ -49,6 +49,11 @@
 .btn.primary:hover{background:color-mix(in srgb,var(--accent) 88%, #fff)}
 .btn.ghost{background:transparent}
 .btn.sm{padding:5px 10px; font-size:12px}
+/* the destructive variant. Quiet at rest — a delete control that shouts before
+   you have decided anything makes every panel look dangerous — and unmistakable
+   the moment the pointer is on it. */
+.btn.danger{color:var(--crit); border-color:color-mix(in srgb,var(--crit) 40%,transparent)}
+.btn.danger:hover{background:var(--crit-ghost); border-color:var(--crit)}
 .pill{display:inline-flex; align-items:center; gap:6px; font-size:11.5px; font-weight:600; padding:3px 9px; border-radius:20px; white-space:nowrap; border:1px solid transparent}
 .pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
 .pill.go{color:var(--go);background:var(--go-ghost)}
@@ -428,6 +433,30 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
 .vprev-bar i.sweep{width:38%; animation:vprevsweep 1.15s ease-in-out infinite}
 @keyframes vprevsweep{from{transform:translateX(-110%)} to{transform:translateX(320%)}}
 .vprev-note{color:var(--text-2)}
+/* the same waiting room, inside a MODAL — the stage version's 34px of air is
+   most of a dialog's height (vaultSendingHTML, the financial-attach upload) */
+.vprev-msg.compact{padding:16px 14px; gap:6px}
+/* the financial-attach file well: the Add-file dropzone, one notch tighter,
+   and it says out loud when it is still empty because it is REQUIRED */
+.fin-dz{margin-bottom:12px; padding:16px}
+.fin-dz.has-file{border-style:solid; border-color:var(--go); background:var(--go-ghost)}
+.fin-dz.has-file .dzi{color:var(--go)}
+.fin-dz .fd-name{font-family:var(--font-mono); font-size:11.5px; color:var(--text-2); word-break:break-all}
+/* the doc-kind cards, once they SELECT rather than commit (API mode) */
+.tpl-card.fin-kind.on{border-color:var(--accent); background:var(--accent-ghost)}
+/* THE DELETE CHIP — the download chip's twin on the other side of the thumb.
+   Same chip vocabulary so the pair reads as one row of card affordances; it
+   only turns crit on hover, because a destructive control that shouts at rest
+   makes the whole grid look like a minefield. Renders only where the person is
+   actually allowed to press it (canDeleteFile). */
+.file-del{position:absolute; top:78px; right:8px; z-index:2; display:inline-flex; align-items:center; gap:5px;
+  font-family:var(--font-mono); font-size:9.5px; font-weight:600; letter-spacing:.04em; text-transform:uppercase;
+  padding:4px 8px; border-radius:6px; cursor:pointer;
+  background:var(--bg); color:var(--text-2); border:1px solid var(--border)}
+.file-del svg{width:12px; height:12px}
+.file-del:hover{color:var(--crit); border-color:var(--crit); background:var(--crit-ghost)}
+.file-del:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+.file-cell:hover .file-del{transform:translateY(-2px)}
 /* Encrypted TRANSFER — see the note in components.js before touching this copy */
 .vprev-sec{display:inline-flex; align-items:center; gap:5px; margin-top:11px; font-size:10.5px;
   font-family:var(--font-mono); color:var(--muted); opacity:.85; letter-spacing:.01em}

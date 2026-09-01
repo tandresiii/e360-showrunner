@@ -828,7 +828,7 @@ function fileCard(f) {
     '<button class="file" ' + act('openViewer', f.id) + '>' +
     '<div class="thumb">' + icon(fileIcon(f)) + '<span class="ext">' + esc(f.ext) + '</span></div>' +
     '<div class="fb"><b>' + esc(f.name) + '</b><span>' + esc(line) + '</span></div></button>' +
-    fileDownloadChip(f) + '</div>';
+    fileDownloadChip(f) + fileDeleteChip(f) + '</div>';
 }
 /* documents only — photos have their own gallery tab next door (photo pass) */
 function tabFiles(show) {
@@ -841,7 +841,12 @@ function tabFiles(show) {
     (phN ? '<button class="btn ghost" ' + act('gotoTab', null, 'photos') + '>' + icon('cam') + phN + ' photo' + (phN === 1 ? '' : 's') + '</button>' : '') +
     '<button class="btn primary" ' + act('addFile', show.id) + '>' + icon('plus') + 'Add file</button></div></div>' +
     '<div class="dz" ' + act('addFile', show.id) + ' data-drop="' + show.id + '">' +
-    '<div class="dzi">' + icon('download') + '</div><b>Drop files here or click to browse</b><span>PDF · proof · contract · image · spec — modeled, stored on the e360 NAS</span></div>' +
+    /* "modeled" was true of the whole grid once and is now true only of demo
+       mode: with a server attached a drop is a genuine PUT of genuine bytes
+       (dropFile -> uploadRealFile). Saying "modeled" over a real upload is the
+       same small lie as inventing a size, pointed the other way. */
+    '<div class="dzi">' + icon('download') + '</div><b>Drop files here or click to browse</b><span>PDF · proof · contract · image · spec — ' +
+    (typeof SR !== 'undefined' && SR.isApi() ? 'uploaded to the e360 NAS' : 'modeled, stored on the e360 NAS') + '</span></div>' +
     '<div class="file-grid">' + cards +
     '<button class="file" ' + act('addFile', show.id) + ' style="border-style:dashed"><div class="thumb">' + icon('plus') + '</div><div class="fb"><b>Add file</b><span>click to browse</span></div></button></div>' +
     '<div class="hint">' + icon('bolt') + 'Click any file to open it in the Multimedia Viewer. Files also land here when attached in context — from a Bookings row or a Deliverables / Proof step.</div>';
@@ -860,13 +865,28 @@ function tabBookings(show) {
       '<td>' + esc(b.vendor) + '</td>' +
       '<td><span class="pill ' + esc(STATUS[s].pill) + '"><span class="dot"></span>' + esc(lbl) + '</span></td>' +
       '<td style="text-align:right"><span style="display:inline-flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">' +
-      '<button class="btn sm ghost" ' + act('attachBooking', b.id) + '>' + icon('link') + 'Attach</button>' +
+      /* "Attach" named the mechanism; this names the DOCUMENT, which is what
+         the person is holding. One flow behind it: pick the file → it uploads →
+         the booking's file_id is set → the exception clears → the toast names
+         what landed. Once the paperwork is on, the button says so. */
+      '<button class="btn sm ghost" ' + act('attachBooking', b.id) + '>' + icon('link') +
+      (b.file_id ? 'Replace confirmation' : 'Attach confirmation') + '</button>' +
       /* The two buttons that used to sit here — "Paperwork" and "Assign" — were
          toastAttrs fakes, on a table of rows that could not be created in the
          first place. One real edit affordance replaces both. */
       (canEditFolderOf(show)
         ? '<button class="btn sm ghost" ' + act('editBooking', b.id, String(show.id)) + '>' +
           icon('pencil') + 'Edit</button>'
+        : '') +
+      /* DELETE, at PARITY WITH EDIT — same row, same gate, same rank. It used
+         to live only inside the edit modal, so cancelling a booking meant
+         opening the correction dialog for a row you did not want to correct.
+         The server floor moved from manager to pm to match (routes/files.js
+         DELETE /bookings/:id): the pm who owns the folder books the truck and
+         is the one who cancels it. */
+      (canEditFolderOf(show)
+        ? '<button class="btn sm ghost" ' + act('bkDelete', b.id) + '>' +
+          icon('trash') + 'Delete</button>'
         : '') +
       '</span></td></tr>';
   }).join('');

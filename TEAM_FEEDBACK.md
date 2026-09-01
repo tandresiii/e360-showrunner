@@ -10,6 +10,33 @@ Running log of requirements gathered from the team's responses to the "first loo
 > exists, and the Graph `sendMail` driver is skeletoned pending the `showrunner@`
 > mailbox + app registration. Everything else on this page is still open.
 
+## THE FIRST REAL-USER BUG REPORT (Brendon Sawyer, manager · `bsawyer`, 2026-08-31)
+
+The first teammate to actually work in production, on Show 1, filing his own
+booking paperwork. Via Tom, verbatim: **"weird form, and it's wrong, and he
+can't delete it."** Three sentences, three separate defects, all in one motion —
+and worth keeping on this page rather than only in `HARDENING_TODO`, because the
+*shape* of the report is the lesson.
+
+| What he said | What was actually wrong |
+|---|---|
+| "weird form" | The financial attach-doc modal asked for a **vendor, an amount and a doc type — and never for the document.** Nobody notices a missing field on a form they have never seen do the right thing; they just feel it. |
+| "and it's wrong" | It stamped every row **245,760 bytes** — a constant that looks like a PDF — and uploaded nothing. The viewer then told him, correctly, the bytes were not there, so the app contradicted itself on two screens. |
+| "and he can't delete it" | `DELETE /api/files/:id` had existed since the wiring pass, transactional and cascade-correct, and **nothing in the product called it.** Built, tested, unreachable — `DESIGN_GAPS` P1 exactly. |
+
+**All three fixed 2026-09-01** (`HARDENING_TODO` 21b): the form carries the file
+and moves real bytes or creates nothing; a Delete affordance on every file card,
+the viewer, and booking rows; two permission gates levelled so the person who
+filed a thing can retract it. His three empty rows were removed from production
+after the deploy; his bookings were left alone.
+
+**The standing lesson, for every pass after this one:** the disease is not the
+constant, it is *a screen that collects less than it claims to*. Grade a form by
+asking what it would write if the person filled in every visible field and
+nothing else — and if the answer contains a number nobody typed or measured, the
+form is lying. `persona-walk.mjs` §12b now enforces that mechanically over every
+file-creating call in `app.js`.
+
 ## Accounting / Finance — CONFIRMED requirement (from Accounting, 2026-08-21)
 Accounting doesn't need the PM tool itself, but needs the **financial/accounting workflow to flow to them from every project** — orders, bookings, reservations, scheduling, invoices, receipts, confirmations — so they can stay ahead instead of finding out after the fact ("a lot of stuff isn't communicated to me until after the fact").
 

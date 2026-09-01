@@ -169,6 +169,75 @@ Every suite run fresh; no test touches the live Flex tenant.
       corrects one and clears the other; the front-end path is covered against a
       real server + real WebDAV backend in the upload harness.
 
+    ### 21b — THE LINE, ACTUALLY CLOSED (2026-09-01, found in production again)
+    The 2026-08-28 storage pass wired **only the picker path**. The
+    **financial attach-doc modal** was untouched, and it is the one a manager
+    uses every day. Brendon Sawyer (`bsawyer`, first real teammate) attached
+    booking confirmations through it on Show 1 and got exactly the disease
+    above, one layer down: the form asked for a **vendor, an amount and a doc
+    TYPE and never for the document**, and `api.addFinancialDoc`'s API branch
+    carried `size: body.size || 245760` — a constant that looks like a PDF. Two
+    rows landed at 245,760 bytes with nothing behind them (`files` 4 and 5); the
+    viewer told him, correctly, that the bytes were not there. A third row
+    (`files` 6, the WI2941 quote) came in through the *fixed* picker path at
+    `size: 0` — honest, but its `PUT` never landed — **and there was no delete
+    affordance anywhere in the product**, so he could not clear any of it. His
+    words, via Tom: *"weird form, and it's wrong, and he can't delete it."*
+
+    **FIXED, all three parts.**
+    1. **The form carries the document.** In API mode the attach-doc modal opens
+       with a required `<input type="file">` and a drop well of its own
+       (`data-findrop` — a document dropped there must land on the *booking*,
+       not loose on the show), and commits through `commitFinDocReal()`: the
+       same two-call contract as `uploadRealFile()` — POST metadata carrying
+       **no** `size` and **no** `dim`, then `PUT /content` with the real bytes,
+       whose response is where `size` comes from. Committing with no file
+       creates **nothing**. `api.addFinancialDoc`'s API branch no longer sends a
+       size at all. Demo mode keeps its four-card modeled commit, labelled
+       `modeled`. Vendor prefills from the booking, the number on the paper has
+       a human label (*Estimate / conf #*) and lands on
+       `bookings.confirmation_number`, and the toast names the file and its
+       real byte count.
+    2. **Delete exists.** `api.deleteFile()` (seam) → `ACTIONS.deleteFile` →
+       a chip on every file card in all four grids and a **Delete file** button
+       on the viewer's meta panel (and *Delete photo* on the photo panel), each
+       behind a plain `confirm()` and `canDeleteFile()` — *the uploader, or
+       pm+/manager on the folder*, which is the mirror of the route's gate.
+       Booking rows gained **Delete at parity with Edit** instead of hiding it
+       inside the correction modal.
+    3. **Two gates levelled.** `DELETE /api/files/:id` read `canEditProject`
+       only while its two neighbours (`PUT /files/:id`, `PUT /files/:id/content`)
+       both read *"canEditProject OR the uploader"* — so the person who filed the
+       wrong document could rename it and replace its bytes and not remove it.
+       `DELETE /api/bookings/:id` carried a `manager` rank floor while POST and
+       PUT carried `pm`. Both now state the same sentence as their neighbours;
+       ownership is still what decides, and a pm who owns nothing is refused.
+
+    **The class, not the instance.** A source scan in `persona-walk.mjs` §12b
+    extracts the payload of **every** `api.addFile` / `api.addFinancialDoc` /
+    `api.replaceChainFile` call in `app.js` by balanced-paren scan and fails the
+    suite if any payload carrying `size:`/`dim:` sits outside a demo-guarded
+    function — so a future pass cannot reintroduce one quietly. `commitAddFile`
+    gained the third lock (a `demoOnly()` guard on the *writer*, not only on the
+    renderer). Audited and clean: the add-file modal, both drop paths,
+    `bindChainFile`/`bindGearFiles`/`specGen` (already guarded), spec-bind
+    (`bytes.length`, real), and photos (no UI creation path exists at all).
+
+    **Suites: walk 157 → 186 · upload 129 → 161 · smoke 689 → 698.**
+    **Mutation-tested, six ways**, each watched going red and restored:
+    putting `245760` back in the seam · reinstating the whole old commit (the
+    modal files with no document → a row named *"Vendor TBD — confirmation"* at
+    245,760 bytes, Brendon's symptom exactly) · removing the uploader term from
+    the file DELETE · restoring the manager floor on the booking DELETE ·
+    dropping `fileCache.invalidatePath` from the file DELETE · removing the
+    Delete chip from the cards.
+
+    **Production cleaned after deploy:** `files` 4, 5 and 6 on Show 1 verified
+    byte-less (`GET /content` → 404 "No bytes at …") and deleted via the API as
+    admin. Bookings 1 and 2 are Brendon's real rows and were left alone; the
+    Rhino expense keeps its $5,100 and loses its (never-real) evidence, which
+    puts it back on accounting's chase list — the honest state.
+
 ## Noted, deliberate — do NOT "fix"  *(untouched by the pass)*
 - Photo curation is rank-only (no ownership term) BY DESIGN — mutation-tested.
 - Schedule gates on the FOLDER's owner; recap gates on the SHOW's owner —

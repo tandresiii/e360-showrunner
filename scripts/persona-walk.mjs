@@ -530,6 +530,166 @@ async function main() {
   ok('…and flags no ephemeral risk outside a container', probed.risk === false, probed);
 
   // ══════════════════════════════════════════════════════════════════════════
+  section('12b · THE FABRICATION LINE, CLOSED — Brendon’s attach, and the delete');
+  // ══════════════════════════════════════════════════════════════════════════
+  // 2026-08-31, production, Show 1. Brendon Sawyer attached three booking
+  // confirmations through the FINANCIALS attach-doc modal. It asked for a
+  // vendor, an amount and a document TYPE and never once for the document; the
+  // seam then stamped `size: 245760` on each row — a constant that looks like a
+  // PDF — and no byte ever left his laptop. Then he found there was no way to
+  // delete any of it. HARDENING_TODO 21, the half the NAS pass left open.
+  //
+  // The BYTE half of this path is proven in harness-upload.mjs against a real
+  // WebDAV backend. This suite runs in PRODUCTION SHAPE with no storage at all
+  // (§12 is the assertion that it says so), so what it proves here is the two
+  // things that do not need a NAS and are exactly what broke:
+  //   1. the affordance a person uses EXISTS and is reachable, and
+  //   2. no UI creation path can stamp a size it did not measure — enforced
+  //      MECHANICALLY over the source, so a future pass cannot reintroduce one.
+  reach('Attach a confirmation to a booking', {
+    seam: ['addFinancialDoc', 'uploadFileBytes', 'uploadsEnabled'],
+    action: ['attachBooking', 'addFinDoc', 'commitFinDoc', 'finPickFile'] });
+  reach('Delete a file', { seam: 'deleteFile', action: 'deleteFile' });
+  reach('Delete a booking', { seam: 'deleteBooking', action: 'bkDelete' });
+
+  // ── the mechanical half ───────────────────────────────────────────────────
+  // Every `api.addFile` / `api.addFinancialDoc` / `api.replaceChainFile` call
+  // in app.js, with its payload extracted by balanced-paren scan. A payload
+  // carrying `size:` or `dim:` is only allowed inside a function that is DEMO
+  // GUARDED (`apiMode()` / `demoOnly()`), because demo mode has no bytes to
+  // measure and says "modeled" on the row's face. Anywhere else it is the bug.
+  const fnMarks = [];
+  {
+    const fnRe = /^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm;
+    let fm;
+    while ((fm = fnRe.exec(APP_JS))) fnMarks.push({ name: fm[1], at: fm.index });
+  }
+  const fnBody = (name) => {
+    const i = fnMarks.findIndex((x) => x.name === name);
+    if (i < 0) return '';
+    return APP_JS.slice(fnMarks[i].at,
+      i + 1 < fnMarks.length ? fnMarks[i + 1].at : APP_JS.length);
+  };
+  const fnAt = (pos) => {
+    let n = '(top level)';
+    for (const mk of fnMarks) { if (mk.at <= pos) n = mk.name; else break; }
+    return n;
+  };
+  const payloads = [];
+  {
+    const callRe = /api\.(addFile|addFinancialDoc|replaceChainFile)\s*\(/g;
+    let cm;
+    while ((cm = callRe.exec(APP_JS))) {
+      let i = callRe.lastIndex, depth = 1;
+      while (i < APP_JS.length && depth > 0) {
+        const ch = APP_JS[i];
+        if (ch === '(') depth += 1; else if (ch === ')') depth -= 1;
+        i += 1;
+      }
+      payloads.push({ fn: cm[1], at: cm.index, owner: fnAt(cm.index),
+                      text: APP_JS.slice(callRe.lastIndex, i - 1) });
+    }
+  }
+  ok('the file-creating call sites in app.js are found at all', payloads.length >= 6,
+     payloads.map((p) => p.owner + '->api.' + p.fn).join(', '));
+  const demoGuarded = (name) => /apiMode\(\)|demoOnly\(/.test(fnBody(name));
+  const stripComments = (s) =>
+    s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const stampers = payloads
+    .filter((p) => /(^|[{,\s])(size|dim)\s*:/.test(stripComments(p.text)))
+    .filter((p) => !demoGuarded(p.owner));
+  ok('HARDENING 21 · NO UI creation path stamps a size or a dim it did not measure',
+     stampers.length === 0,
+     stampers.map((p) => p.owner + '() -> api.' + p.fn).join(' · '));
+  for (const fn of ['commitAddFile', 'dropFile', 'bindChainFile', 'bindGearFiles', 'specGen']) {
+    ok(`…and ${fn}() still carries its demo guard`, demoGuarded(fn), fn + ' is UNGUARDED');
+  }
+  // The one that actually bit him, in the seam rather than the view: the API
+  // branch of addFinancialDoc must send no size at all — not a default, not a
+  // fallback. The demo branch keeps its modeled constant, and says "modeled".
+  {
+    const seamAt = API_JS.indexOf('addFinancialDoc: function');
+    const seamEnd = API_JS.indexOf('confirmDoc: function', seamAt);
+    const seam = API_JS.slice(seamAt, seamEnd > 0 ? seamEnd : seamAt + 6000);
+    const apiHalf = seam.slice(seam.indexOf('/* API: POST /api/files'));
+    // Comments are stripped before the test, on purpose: the comment that
+    // replaced the bug QUOTES the bug ("this branch used to carry
+    // `size: body.size || 245760`"), and a scan that could not tell prose from
+    // code would force the fix to be silent about what it fixed.
+    const apiCode = apiHalf.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    ok('the API branch of api.addFinancialDoc() exists and is findable',
+       seamAt > 0 && apiCode.length > 200, { seamAt, half: apiCode.length });
+    ok('HARDENING 21 · it sends NO size — the fabricated 245760 is gone from the CODE',
+       apiCode.indexOf('245760') < 0 && !/[{,]\s*size\s*:/.test(apiCode),
+       apiCode.slice(0, 300));
+    ok('…while the DEMO branch keeps its modeled row, labelled modeled',
+       seam.indexOf('245760') > 0 && /modeled/.test(seam.slice(0, seam.indexOf('/* API:'))));
+  }
+
+  // ── the API-contract half, against the route the modal actually posts to ──
+  const attach = await POST('/api/files', {
+    show_id: SHOW, name: 'Midwest Freight — conf 88231', ext: 'pdf', kind: 'confirmation',
+    vendor: 'Midwest Freight', amount: 4200, category: 'freight', booking_id: BOOK
+  }, { token: T.brenden });
+  ok('POST /api/files files a confirmation against the booking', attach.status === 200, attach.body);
+  ok('HARDENING 21 · a row created with no size claims ZERO, not 245760',
+     Number(attach.body.size) === 0, attach.body.size);
+  ok('…and it hands back the upload_url the modal PUTs the bytes to',
+     attach.body.upload_url === `/api/files/${attach.body.id}/content`, attach.body.upload_url);
+  const bkLinked = await GET(`/api/bookings/${BOOK}`, { token: T.brenden });
+  ok('…the booking now carries the file — its "waiting on me" exception clears',
+     bkLinked.body.file_id === attach.body.id, bkLinked.body);
+  const expRows = await GET(`/api/expenses?show_id=${SHOW}`, { token: T.candice });
+  ok('…and the cost is on the books with that document as its evidence',
+     (expRows.body || []).some((e) => e.file_id === attach.body.id && Number(e.amount) === 4200),
+     (expRows.body || []).map((e) => e.vendor + ':' + e.amount + ':' + e.file_id));
+
+  // ── the DELETE gate, against discriminating identities ────────────────────
+  // The route read canEditProject ONLY, while its two neighbours (PUT /files/:id
+  // and PUT /files/:id/content) both read "canEditProject OR the uploader". So
+  // the person who filed the wrong document could rename it and replace its
+  // bytes, and could not remove it. omar is the discriminating identity: a tech,
+  // so canEditProject is false for him, and the uploader of his own row.
+  const omarDoc = await POST('/api/files',
+    { show_id: SHOW, name: 'omar filed this by mistake', ext: 'pdf', kind: 'other' },
+    { token: T.omar });
+  ok('a tech may file a document (they upload confirmations and photos)',
+     omarDoc.status === 200, omarDoc.body);
+  ok('…a pm who owns nothing and did not upload it is REFUSED the delete',
+     (await DEL(`/api/files/${omarDoc.body.id}`, { token: T.pat })).status === 403);
+  const omarDel = await DEL(`/api/files/${omarDoc.body.id}`, { token: T.omar });
+  ok('…and the UPLOADER may take their own mistake back off the record, without ' +
+     'hunting down a manager', omarDel.status === 200, omarDel.body);
+  ok('…the row is really gone',
+     (await GET(`/api/files/${omarDoc.body.id}`, { token: T.omar })).status === 404);
+
+  const delAttach = await DEL(`/api/files/${attach.body.id}`, { token: T.brenden });
+  ok('the folder’s pm deletes the confirmation he filed', delAttach.status === 200, delAttach.body);
+  const bkUnpicked = await GET(`/api/bookings/${BOOK}`, { token: T.brenden });
+  ok('…and the booking’s file_id is UNPICKED, never left dangling at a dead row',
+     !bkUnpicked.body.file_id, bkUnpicked.body);
+  ok('…deleting a file that does not exist is a 404, not {ok:true}',
+     (await DEL('/api/files/999999', { token: T.tom })).status === 404);
+
+  // ── booking delete: parity with edit, on the row and in the gate ──────────
+  // The floor here was `manager` while POST and PUT next door were `pm`, so the
+  // pm who owned the folder could book the truck and correct the booking, and
+  // then had to find a manager to cancel it. pat still cannot: the OWNERSHIP
+  // term is what decides, exactly as it does on the other two.
+  const bk2 = await POST('/api/bookings',
+    { show_id: SHOW, category: 'Forklift', vendor: 'Chicago Lift', status: 'todo' },
+    { token: T.brenden });
+  ok('a second booking, to cancel', bk2.status === 200, bk2.body);
+  ok('a pm who owns nothing cannot cancel somebody else’s booking',
+     (await DEL(`/api/bookings/${bk2.body.id}`, { token: T.pat })).status === 403);
+  const bk2Del = await DEL(`/api/bookings/${bk2.body.id}`, { token: T.brenden });
+  ok('…the folder’s own pm can cancel the booking he made — the floor was manager',
+     bk2Del.status === 200, bk2Del.body);
+  ok('…and the cancellation is on the activity trail with a diff',
+     (await activityFor(SHOW, 'booking.delete')).length === 1,
+     (await activityFor(SHOW, 'booking.delete')).length);
+
+  // ══════════════════════════════════════════════════════════════════════════
   section('13 · strike — and the report obligation finally has fuel  (F2)');
   // ══════════════════════════════════════════════════════════════════════════
   await PUT(`/api/steps/${TASK1}/status`, { status: 'done' }, { token: T.omar });

@@ -1618,6 +1618,48 @@ const DEL = (p, o) => call('DELETE', p, o);
      delFile.status === 200 && rendersBefore === 1 && rendersAfter === 0,
      { before: rendersBefore, after: rendersAfter });
 
+  // ── 7b. HARDENING 21 (delete half). The gate on DELETE /files/:id was
+  // canEditProject ONLY, while its two immediate neighbours — PUT /files/:id and
+  // PUT /files/:id/content — both read "canEditProject OR the uploader". So the
+  // person who filed the wrong document could rename it and could replace its
+  // bytes, and could not remove it: they had to find a manager. The tech is the
+  // discriminating identity, because canEditProject is false for every tech.
+  const techDoc = await POST('/api/files',
+    { show_id: S, name: TAG + '-tech-filed-this', ext: 'pdf', kind: 'other' }, { token: TECHT });
+  ok('7b: a tech may FILE a document — they upload confirmations and photos',
+     techDoc.status === 200, techDoc.body);
+  ok('7b: ...and the row records who filed it', techDoc.body.uploaded_by === techUser,
+     techDoc.body.uploaded_by);
+  const otherDoc = await POST('/api/files',
+    { show_id: S, name: TAG + '-admin-filed-this', ext: 'pdf', kind: 'other' }, { token: A });
+  const techDelOther = await DEL(`/api/files/${otherDoc.body.id}`, { token: TECHT });
+  ok('7b: a tech may NOT delete a document somebody else filed',
+     techDelOther.status === 403, techDelOther.body);
+  const techDelOwn = await DEL(`/api/files/${techDoc.body.id}`, { token: TECHT });
+  ok('7b: ...but the UPLOADER may take their own mistake back off the record',
+     techDelOwn.status === 200, techDelOwn.body);
+  ok('7b: ...and it is really gone',
+     (await GET(`/api/files/${techDoc.body.id}`, { token: A })).status === 404);
+  ok('7b: deleting a file that never existed is a 404, not {ok:true}',
+     (await DEL('/api/files/987654', { token: A })).status === 404);
+  await DEL(`/api/files/${otherDoc.body.id}`, { token: A });
+
+  // ── 7c. the fabrication line, at the route. A financial doc filed with no
+  // size claims ZERO — the front end no longer sends one (HARDENING 21) and the
+  // row must not invent one on its behalf. `upload_url` is the other half of
+  // the contract: the bytes follow, and PUT /content is what sets the size.
+  const finRow = await POST('/api/files', {
+    show_id: S, name: TAG + '-vendor-confirmation', ext: 'pdf', kind: 'confirmation',
+    vendor: 'Midwest Freight', amount: 4200, doc_date: '2026-09-10'
+  }, { token: A });
+  ok('7c: a financial doc filed with NO size claims zero, never a plausible constant',
+     finRow.status === 200 && Number(finRow.body.size) === 0, finRow.body.size);
+  ok('7c: ...and it hands back the upload_url the browser PUTs the bytes to',
+     finRow.body.upload_url === `/api/files/${finRow.body.id}/content`, finRow.body.upload_url);
+  ok('7c: ...with the expense created in the same transaction, evidenced by the doc',
+     finRow.body.created && finRow.body.created.expense_id > 0, finRow.body.created);
+  await DEL(`/api/files/${finRow.body.id}`, { token: A });
+
   // ── 8. one hydrateShow — the call sheet and the dashboard agree on RAG ───
   // The call sheet used to build its own show object with no derived rag, so it
   // reported the STORED column while every other route reported the derivation.

@@ -11,7 +11,7 @@ failed. It brings up **its own throwaway Postgres** (devDependency
 npm run walk
 ```
 
-**157 assertions.** It boots the real server against an **empty** database in
+**186 assertions.** It boots the real server against an **empty** database in
 **production shape** (no `SEED_ROSTER`, no `STORAGE_ROOT`, no
 `SCHEDULER_BASE_URL`), creates six people, and walks a real month: Tom opens an
 event and fixes a date he got wrong → Brenden puts four people on the crew (one
@@ -45,7 +45,7 @@ turns the walk red at the assertion that names it.
 
 `scripts/smoke.js` boots the real server in-process on an ephemeral port and
 drives it over HTTP, exactly as a browser or an agent would. It is the wiring
-pass's proof of work: **679 assertions**, covering initDB idempotency, the
+pass's proof of work: **698 assertions**, covering initDB idempotency, the
 templates.json seed loader, auth, one representative call per route family, the
 whole agent-API happy path, the confidence bands, idempotent replay, the §9
 guardrails, the recap content firewall, cascade integrity, and — since

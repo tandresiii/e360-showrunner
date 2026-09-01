@@ -506,11 +506,23 @@ function contentDisposition(name, inline) {
          `filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
+// HARDENING 21 (delete half, 2026-09-01). The gate here was rank-and-ownership
+// ONLY, while its two immediate neighbours — PUT /files/:id and
+// PUT /files/:id/content — both read "canEditProject OR the uploader". So the
+// person who filed a document could rename it and could replace its bytes, and
+// could not remove it. That is the wrong asymmetry: the uploader is exactly who
+// discovers their own mistake, and a row nobody can retract is why Brendon's
+// three empty confirmations sat on Show 1 for four days.
+// The gate is now stated the same way as the other two: uploader OR pm-with-
+// ownership / manager+ (canEditProject). Mutation-tested both directions.
 router.delete('/files/:id', asyncH(async (req, res) => {
   const cur = (await pool.query('SELECT * FROM files WHERE id=$1', [idParam(req)])).rows[0];
   if (!cur) throw notFound();
   const project = await projectForRow(cur);
-  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to delete this file');
+  const isUploader = cur.uploaded_by === req.session.username;
+  if (!canEditProject(req.session, project) && !isUploader) {
+    throw forbidden('Not allowed to delete this file');
+  }
   await withTx(async (c) => {
     await c.query(`DELETE FROM notes WHERE anchor_type='file' AND anchor_id=$1`, [cur.id]);
     await c.query(`DELETE FROM note_reads WHERE note_id NOT IN (SELECT id FROM notes)`);
@@ -1226,7 +1238,13 @@ router.put('/bookings/:id', requireRole('pm'), asyncH(async (req, res) => {
   res.json(dbToBooking(r.rows[0]));
 }));
 
-router.delete('/bookings/:id', requireRole('manager'), asyncH(async (req, res) => {
+// The rank floor was `manager` while POST and PUT next door are `pm` — so the
+// pm who owned the folder could create a booking and correct it, and then had
+// to go and find a manager to cancel it. Aligned to `pm`: the OWNERSHIP term
+// below (canEditProject) is what actually decides, exactly as it does on the
+// other two, and a pm who owns nothing is still refused. Mutation-tested with
+// a pm-who-owns-nothing (403) against the folder's own pm (200).
+router.delete('/bookings/:id', requireRole('pm'), asyncH(async (req, res) => {
   const id = idParam(req);
   // H3. This answered {ok:true} for ANY id, including one that never existed,
   // so a stale screen reported a successful delete of nothing.

@@ -2953,6 +2953,22 @@ function canEditFolder(project, user) {
   if (!project) return true;                    /* rank alone — see above */
   return project.owner === u.username;
 }
+/* WHO MAY TAKE A FILE BACK OFF THE RECORD.
+   The mirror of the gate on `DELETE /api/files/:id` (routes/files.js), which is
+   itself the same sentence as PUT /files/:id and PUT /files/:id/content:
+
+       the UPLOADER, or anyone who can edit the folder (pm-owner / manager+).
+
+   The uploader term is the one that matters in practice. The person who files
+   the wrong document is the person who notices, usually within the minute, and
+   before this they had to go and find a manager. Show-not-in-hand falls back to
+   canEditFolderOf's permissive rank-alone answer for the same reason it does
+   there: the server is the gate, this only decides what to offer. */
+function canDeleteFile(f, show) {
+  if (!f) return false;
+  if (f.uploaded_by && CURRENT_USER && f.uploaded_by === CURRENT_USER.username) return true;
+  return canEditFolderOf(show || SHOWS_BY_ID[f.show_id]);
+}
 /* pm+ AND the SHOW-owner predicate — matches assertCanDraft() server-side,
    which composes roleRank >= pm with canApproveRecap (manager+ OR show.owner).
 

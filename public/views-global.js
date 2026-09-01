@@ -124,7 +124,7 @@ function viewFiles(shows) {
     return '<div class="file-cell"><button class="file" ' + act('openViewer', x.f.id) + '>' +
       '<div class="thumb">' + icon(fileIcon(x.f)) + '<span class="ext">' + esc(x.f.ext) + '</span></div>' +
       '<div class="fb"><b>' + esc(x.f.name) + '</b><span>' + esc(where) + '</span></div></button>' +
-      fileDownloadChip(x.f) + '</div>';
+      fileDownloadChip(x.f) + fileDeleteChip(x.f) + '</div>';
   }).join('');
   var seg = '<div class="seg">' +
     [['docs', 'Documents', docs.length], ['photos', 'Photos', photos.length], ['all', 'All', all.length]].map(function (m) {
@@ -700,6 +700,13 @@ function drawViewer(show) {
        precisely when a person needs them most. */
     (hasBytes ? '<button class="btn" ' + act('vOpenTab', f.id) + '>' + icon('link') + 'Open in new tab</button>' : '') +
     '<button class="btn" ' + act('downloadFile', f.id) + '>' + icon('download') + 'Download</button>' +
+    /* THE DELETE, where a person is already looking at the thing they want
+       gone. The viewer is the screen that TOLD Brendon the bytes were missing,
+       and until now it was also the screen with no way to act on that. Offered
+       to the uploader or to pm+/manager on the folder (canDeleteFile — the
+       mirror of the route's gate); it takes a plain confirm on the way out. */
+    (canDeleteFile(f, show) ? '<button class="btn danger" ' + act('deleteFile', f.id) + '>' +
+      icon('trash') + 'Delete file</button>' : '') +
     '<button class="btn ghost" ' + toastAttrs('Bound', 'Spec re-bound to ' + title) + '>' + icon('link') + 'Re-bind to folder</button></div>' +
     '<div class="note-meta-lock">' + icon('lock') + '<span>Bound to ' + esc(title) + ' — ' + esc(show.venue) + '. Anyone with folder access can view and print; the approved version stays locked.</span></div>' +
     /* the file's anchored thread (notes pass) — agents read it when filing */
@@ -744,6 +751,12 @@ function drawPhotoMeta(show, f, title, hasBytes) {
   }
   if (hasBytes) acts.push('<button class="btn" ' + act('vOpenTab', f.id) + '>' + icon('link') + 'Open in new tab</button>');
   acts.push('<button class="btn" ' + act('downloadFile', f.id) + '>' + icon('download') + 'Download original</button>');
+  /* A photo is a `files` row like any other and gets the same retraction — the
+     wrong frame lands in a show's gallery exactly as often as the wrong PDF
+     lands in its financials. Same predicate, same confirm, same route. */
+  if (canDeleteFile(f, show)) {
+    acts.push('<button class="btn danger" ' + act('deleteFile', f.id) + '>' + icon('trash') + 'Delete photo</button>');
+  }
   var provNote = f.provenance
     ? 'Organized by ' + actorLabel(null, f.provenance) + ' from ' + (f.provenance.source_label || 'a camera-roll sync') +
       ' — proposals ride the same review flow as documents.'

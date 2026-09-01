@@ -531,6 +531,18 @@ function fileDownloadChip(f) {
   return '<button class="file-dl" ' + act('downloadFile', f.id) +
     ' title="Download ' + esc(f.name) + '">' + icon('download') + 'Download</button>';
 }
+/* Its twin on the other side of the thumb. Unlike the download chip this one is
+   NOT keyed on there being bytes — a row with no bytes is precisely the row a
+   person most needs to remove, and that was Brendon's whole problem. It is keyed
+   on PERMISSION (canDeleteFile: the uploader, or pm-with-ownership / manager+,
+   mirroring routes/files.js) and on the row being a real one: the bell renders
+   agent proposals as synthetic files with a negative id, and those are
+   confirmed or rejected, never deleted. */
+function fileDeleteChip(f) {
+  if (!f || !(Number(f.id) > 0) || !canDeleteFile(f)) return '';
+  return '<button class="file-del" ' + act('deleteFile', f.id) +
+    ' title="Delete ' + esc(f.name) + '">' + icon('trash') + 'Delete</button>';
+}
 
 /* The two states the stage can be in while the bytes are in flight. They are
    markup only — drawPreview() owns the transitions, so the loading state is
@@ -564,6 +576,19 @@ function previewLoadingHTML() {
    would be a security claim the deployment cannot back, printed on the one
    screen a person is most inclined to believe it. If at-rest encryption ever
    lands on the NAS, change the words then and not before. */
+/* The UPLOAD half of the Vault treatment. Same voice and the same furniture as
+   previewLoadingHTML() above — one waiting room, two directions — with the
+   wording flipped, because the bytes are going TO the vault rather than coming
+   from it. The bar is an indeterminate sweep and stays one: a browser PUT of a
+   whole Blob emits no progress events, so a percentage here would be a number
+   nobody has. Same rule as the download bar, same reason. */
+function vaultSendingHTML(what) {
+  return '<div class="vprev-msg load compact"><span class="vprev-spin"></span>' +
+    '<b>Sending to the E360 Vault…</b>' +
+    '<span class="vprev-note">' + esc(what || 'Uploading the document') + '</span>' +
+    '<span class="vprev-bar"><i class="sweep"></i></span>' +
+    '<span class="vprev-sec">' + icon('lock') + 'Encrypted transfer · E360 private network</span></div>';
+}
 /* A failure says the SERVER's sentence, verbatim and technical. "the NAS is
    unreachable" is the answer the person needs; a friendlier invention here
    would hide it, and this is the one screen where the clinical name earns its

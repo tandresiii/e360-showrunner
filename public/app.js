@@ -981,7 +981,7 @@ async function downloadFile(fileId) {
     toast('Download', (f.name || 'file') + '.' + (f.ext || '') + ' from the NAS');
     return;
   }
-  var name = String(f.name || 'file') + (f.ext ? '.' + String(f.ext).replace(/^\./, '') : '');
+  var name = fileNameWithExt(f);
   try {
     var blob = await api.downloadFileBytes(fileId);
     var url = URL.createObjectURL(blob);
@@ -997,8 +997,64 @@ async function downloadFile(fileId) {
     toast('Could not download ' + name, String(e && e.message || e));
   }
 }
+/* ════════════════════════════════════════════════════════════════════════
+   DELETE A FILE — the affordance that was never built
+   ------------------------------------------------------------------------
+   `DELETE /api/files/:id` has existed since the wiring pass, is transactional,
+   takes the file's spec_renders with it, unpicks every expense / booking / PO
+   reference and drops the warm byte-cache entry. NOTHING in the product called
+   it. So Brendon filed three confirmations through a form that could not carry
+   bytes, watched the viewer tell him the bytes were not there, and had no way
+   to take them back off the record — which is the second half of "weird form,
+   and it's wrong, and he can't delete it."
+
+   The confirm is the stock browser one on purpose. This destroys somebody's
+   document record; the dialog every person already knows how to refuse beats a
+   bespoke modal they have to learn. `askConfirm` tolerates its absence (a test
+   shim, dialogs disabled) by proceeding — the SERVER gate is the real one, and
+   a delete button that silently did nothing would be the worse failure.
+   ══════════════════════════════════════════════════════════════════════ */
+function askConfirm(msg) {
+  try { if (typeof confirm === 'function') return !!confirm(msg); } catch (_) {}
+  return true;
+}
+async function deleteFileAct(fileId) {
+  var f = await api.getFile(fileId);
+  if (!f) return;
+  var nm = fileNameWithExt(f);
+  if (!askConfirm('Delete ' + nm + '?\n\n' +
+      'The record goes — along with its notes, any cached spec render, and the ' +
+      'link from any booking, expense or PO that pointed at it. The file on the ' +
+      'NAS is left where it is.')) return;
+  var showId = f.show_id;
+  try { await api.deleteFile(f.id); }
+  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  toast('Deleted', nm + ' is off the record.');
+  try { await updateFinCount(); } catch (_) {}
+  /* The viewer was looking AT the row that just stopped existing — there is
+     nothing to re-render, so go back to where the file lived. */
+  if (CUR.view === 'viewer') return showId ? openShow(showId) : render('projects');
+  if (CUR.view === 'finance' || CUR.view === 'job') return refreshFinanceUI();
+  if (CUR.view === 'show' && showId) return refreshShowTab(showId);
+  return render(CUR.view, CUR.showId || CUR.projectId);
+}
+/* "name.ext", the way a person says it — one place, because the delete confirm,
+   the download and the toasts all need the same string. */
+function fileNameWithExt(f) {
+  return String((f && f.name) || 'file') +
+    (f && f.ext ? '.' + String(f.ext).replace(/^\./, '') : '');
+}
+
 async function commitAddFile(i) {
   if (!PENDING_ADD) return;
+  /* THIRD LOCK on the fabrication line (HARDENING 21). openAddFile() never
+     renders these cards in API mode, so this is unreachable there today — but
+     it is the function that WRITES a row carrying a size nobody measured, and
+     the guard belongs on the writer, not only on the renderer. Same belt-and-
+     braces as bindChainFile()/bindGearFiles(). */
+  if (demoOnly('Nothing added — pick the real file instead',
+      'These cards model an upload. With a server attached the Add-file dialog ' +
+      'takes the actual file and the NAS gets the actual bytes.')) return;
   var showId = PENDING_ADD.showId, ctx = PENDING_ADD.ctx, td = ADD_TYPES[Number(i)];
   var show = await api.getShow(showId);
   var title = show.project.single ? show.project.name : show.name;
@@ -1528,15 +1584,18 @@ async function openAddFinDoc(showId, link) {
   PENDING_FIN = { showId: Number(showId), link: link };
   var show = await api.getShow(showId);
   var title = show.project.single ? show.project.name : show.name;
-  var pre = { vendor: '', amount: '', category: 'misc' }, ctxLine = '';
+  var pre = { vendor: '', amount: '', category: 'misc', conf: '' }, ctxLine = '';
   if (link.expenseId) {
     var e = EXPENSES_BY_ID[Number(link.expenseId)];
     if (e) { pre.vendor = e.vendor; pre.amount = e.amount; pre.category = e.budget_line_category; }
     ctxLine = '<div class="callout" style="margin-bottom:14px"><div class="ci">' + icon('link') + '</div><div><b>Attaching paperwork to a recorded cost</b><p>Files against the existing expense — its “waiting on me” flag clears the moment this lands.</p></div></div>';
   } else if (link.bookingId) {
     var b = await api.getBooking(link.bookingId);
-    if (b) { pre.vendor = b.vendor; pre.amount = b.amount == null ? '' : b.amount; pre.category = guessCategory(b.category); }
-    ctxLine = '<div class="callout" style="margin-bottom:14px"><div class="ci">' + icon('link') + '</div><div><b>Attaching paperwork to a booking</b><p>' + esc(b ? b.category : 'Booking') + ' — clears its “waiting on me” flag and records the cost.</p></div></div>';
+    if (b) {
+      pre.vendor = b.vendor; pre.amount = b.amount == null ? '' : b.amount;
+      pre.category = guessCategory(b.category); pre.conf = b.confirmation_number || '';
+    }
+    ctxLine = '<div class="callout" style="margin-bottom:14px"><div class="ci">' + icon('link') + '</div><div><b>Attaching paperwork to a booking</b><p>' + esc(b ? b.category : 'Booking') + (b && b.vendor ? ' · ' + esc(b.vendor) : '') + ' — the file links to this booking, its “waiting on me” flag clears, and the cost is recorded.</p></div></div>';
   } else if (link.poId) {
     var lpo = POS_BY_ID[Number(link.poId)];
     if (lpo) {
@@ -1552,34 +1611,141 @@ async function openAddFinDoc(showId, link) {
   var catOpts = BUDGET_CAT_ORDER.map(function (c) {
     return '<option value="' + esc(c) + '"' + (c === pre.category ? ' selected' : '') + '>' + esc(BUDGET_CATS[c]) + '</option>';
   }).join('');
+  /* "Vendor" reads as an interrogation on a booking row where the vendor is
+     already known and already filled in, so it says so. And the number on the
+     paper finally has a home: people call it an estimate number, a confirmation
+     number or a conf #, depending on whether a truck or a hotel printed it, so
+     the label says all three and writes to bookings.confirmation_number — the
+     column the call sheet and the delivery view already read. */
+  var vendorHint = link.bookingId ? 'from the booking — change it if the paper says otherwise' : null;
   var inputs = '<div class="fin-inputs">' +
-    finLabelWrap('Vendor', '<input id="fdVendor" class="cell-in" value="' + esc(pre.vendor) + '" placeholder="who billed us">') +
+    finLabelWrap('Vendor', '<input id="fdVendor" class="cell-in" value="' + esc(pre.vendor) + '" placeholder="who billed us">', vendorHint) +
     finLabelWrap('Amount $', '<input id="fdAmount" class="cell-in" type="number" min="0" value="' + esc(pre.amount) + '" placeholder="0">') +
     (link.expenseId ? '' : finLabelWrap('Category', '<select id="fdCat" class="cell-in">' + catOpts + '</select>')) +
-    '</div>';
+    '</div>' +
+    (link.bookingId
+      ? '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+        finLabelWrap('Estimate / conf #',
+          '<input id="fdConf" class="cell-in" value="' + esc(pre.conf) + '" placeholder="the number on the paperwork">',
+          'optional — goes on the booking, where the call sheet reads it') + '</div>'
+      : '');
   var cards = FIN_DOC_KINDS.map(function (t, i) {
-    return '<button class="tpl-card" style="text-align:left" ' + act('commitFinDoc', i) + '><div class="ti">' + icon(t.ic) + '</div><b>' + esc(t.label) + '</b><div class="td">' + esc(t.desc) + '</div></button>';
+    return '<button class="tpl-card fin-kind" style="text-align:left" ' + act('commitFinDoc', i) + '><div class="ti">' + icon(t.ic) + '</div><b>' + esc(t.label) + '</b><div class="td">' + esc(t.desc) + '</div></button>';
   }).join('');
+
+  /* ══════════════════════════════════════════════════════════════════════
+     THE FILE, AND IT IS NOT OPTIONAL  (HARDENING 21 — the line still open)
+     ----------------------------------------------------------------------
+     This modal is what Brendon used on Show 1. It asked for a vendor and an
+     amount and a doc TYPE — and never once for the document. It then wrote a
+     `files` row stamped 245,760 bytes, a number `api.addFinancialDoc` made up
+     to look like a PDF. The viewer, correctly, said the bytes were not there.
+     "Weird form, and it's wrong."
+
+     In API mode the form now opens with the document itself: a drop well and a
+     real <input type="file">, both required. The commit is the same two-step
+     contract every other real upload uses — POST the metadata (carrying NO
+     size), then PUT the actual bytes to the row that already exists — and the
+     size on the record is the count the server measured coming off the wire.
+
+     DEMO mode keeps the four cards as a straight commit, because there are no
+     bytes anywhere to send and the modeled row says `modeled` on its face.
+     ══════════════════════════════════════════════════════════════════════ */
+  var apiM = apiMode();
+  var canStore = apiM ? await api.uploadsEnabled() : false;
+  var fileWell = apiM
+    ? '<div class="dz fin-dz" id="fdDrop" data-findrop="1" ' + act('finPickFile') + '>' +
+        '<div class="dzi">' + icon('download') + '</div>' +
+        '<b>Drop the document here, or click to choose</b>' +
+        '<span class="fd-name" id="fdPick">Required — a confirmation is a file, and its bytes ride up with the record</span></div>' +
+      '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+      finLabelWrap('Document', '<input type="file" id="fdFile" class="cell-in">',
+        'Name, extension and size are read from the file itself — nothing here is typed in twice.') +
+      '</div>'
+    : '';
+  var storeNote = !apiM ? ''
+    : (canStore
+      ? '<div class="hint" style="margin-top:12px">' + icon('server') +
+        'The bytes land on the e360 NAS with the record — the same vault the Files tab opens from.</div>'
+      : '<div class="callout" style="margin:12px 0 0"><div class="ci">' + icon('alert') + '</div><div>' +
+        '<b>No storage on this server</b><p>The document can still be <b>registered</b> against this cost — ' +
+        'vendor, amount, who filed it, and its real name — but the bytes stay on your machine until the ' +
+        'storage wiring is finished. Nothing here will claim a size it has not got.</p></div></div>');
+  var intro = apiM
+    ? 'Pick the document, confirm the vendor and amount, then choose what kind of paper it is — that files it. ' +
+      'With an amount it also lands as an expense on the job, so budget burn updates immediately.'
+    : 'Vendor and amount, then pick the doc type to file it. With an amount it also lands as an expense on the job — budget burn updates immediately.';
   openModal('Attach financial doc · ' + title, ctxLine +
-    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">Vendor and amount, then pick the doc type to file it. With an amount it also lands as an expense on the job — budget burn updates immediately.</p>' +
-    inputs + notifyRow() + '<div class="tpl-cards" style="margin:0">' + cards + '</div>' +
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">' + intro + '</p>' +
+    fileWell + inputs + notifyRow() +
+    '<div class="tpl-cards" style="margin:0" id="fdCards">' + cards + '</div>' + storeNote +
     '<div class="hint" style="margin-top:14px">' + icon('bolt') + 'Your M365 agent does this filing automatically from your inbox — high-confidence matches file themselves; uncertain ones land as <b>proposed</b> for review.</div>');
+  /* Show the chosen file the moment it is chosen. Guarded the same way
+     openAddFile() guards its own listener — a DOM shim has no addEventListener
+     and must not take the whole modal down with it. */
+  var fi = $('#fdFile');
+  if (fi) {
+    /* A fresh modal starts with no document, always. Belt and braces against a
+       control (or a test shim) that hands back the LAST file the person chose:
+       committing the previous booking's confirmation to this one would be a
+       quieter, nastier version of the bug this whole pass is about. */
+    try { fi.value = ''; } catch (_) {}
+    try { fi.files = null; } catch (_) {}
+    if (fi.addEventListener) {
+      fi.addEventListener('change', function () { finShowPicked(fi.files && fi.files[0]); });
+    }
+  }
+}
+/* The one place the picked document is named on screen — the change listener,
+   the drop handler and a re-open all repaint through it. */
+function finShowPicked(file) {
+  if (PENDING_FIN) PENDING_FIN.file = file || null;
+  var out = document.getElementById('fdPick');
+  var well = document.getElementById('fdDrop');
+  if (well && well.classList) well.classList.toggle('has-file', !!file);
+  if (!out) return;
+  out.textContent = file
+    ? file.name + ' · ' + fmtBytes(file.size)
+    : 'Required — a confirmation is a file, and its bytes ride up with the record';
+}
+/* The well is a click target for the real input, so the person never has to
+   find the small grey "Choose file" button underneath it. */
+function finPickFileAct() {
+  var fi = document.getElementById('fdFile');
+  if (fi && fi.click) fi.click();
+}
+/* Whatever the person actually chose, from either half of the well. */
+function finPickedFile() {
+  if (PENDING_FIN && PENDING_FIN.file) return PENDING_FIN.file;
+  var fi = document.getElementById('fdFile');
+  return (fi && fi.files && fi.files[0]) || null;
 }
 async function commitFinDoc(i) {
   if (!PENDING_FIN) return;
   var t = FIN_DOC_KINDS[Number(i)];
   if (!t) return;
-  var vEl = document.getElementById('fdVendor'), aEl = document.getElementById('fdAmount'), cEl = document.getElementById('fdCat');
+  /* API mode moves real bytes or it does not create. */
+  if (apiMode()) return commitFinDocReal(t);
+  var vEl = document.getElementById('fdVendor'), aEl = document.getElementById('fdAmount'),
+      cEl = document.getElementById('fdCat'), nEl = document.getElementById('fdConf');
+  var demoLink = PENDING_FIN.link || {};
+  var demoConf = nEl && nEl.value ? String(nEl.value).trim() : '';
   stageNotifies();
   var f = await api.addFinancialDoc(PENDING_FIN.showId, {
     kind: t.kind,
     vendor: vEl && vEl.value ? vEl.value : null,
     amount: aEl && aEl.value !== '' ? Number(aEl.value) : null,
     category: cEl ? cEl.value : null,
-    expenseId: PENDING_FIN.link.expenseId || null,
-    bookingId: PENDING_FIN.link.bookingId || null,
-    poId: PENDING_FIN.link.poId || null
+    expenseId: demoLink.expenseId || null,
+    bookingId: demoLink.bookingId || null,
+    poId: demoLink.poId || null
   });
+  /* The conf-number field is offered in both modes, so it has to WORK in both —
+     a field that silently discards what you type into it is its own small
+     version of this whole bug. */
+  if (demoLink.bookingId && demoConf) {
+    try { await api.updateBooking(demoLink.bookingId, { confirmation_number: demoConf }); } catch (_) {}
+  }
   closeM();
   PENDING_FIN = null;
   var fs2 = SHOWS_BY_ID[f.show_id];
@@ -1589,6 +1755,117 @@ async function commitFinDoc(i) {
   await updateFinCount();
   if (CUR.view === 'show') return refreshShowTab(CUR.showId, 'financials');
   return refreshFinanceUI();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   THE REAL ONE — the financial attach, with the document in it
+   ------------------------------------------------------------------------
+   Same two-call contract as uploadRealFile(), in the same order, for the same
+   reason (AGENT_API §3):
+
+     1. POST /api/files          metadata + the accounting links, in ONE
+                                 transaction — the expense row, the booking's
+                                 file_id, the PO's quote/invoice pointer. It
+                                 carries NO size and NO dim.
+     2. PUT  /api/files/:id/content   the bytes, to the row that already exists.
+                                 Its response is where `size` comes from.
+
+   Step 2 failing does NOT roll back step 1. The record survives saying so, out
+   loud, and the person can retry the bytes without re-typing the vendor — a
+   silently discarded upload is worse than a visible, fixable half-state. What
+   is gone for good is the third possibility: a row that CLAIMS bytes.
+   ══════════════════════════════════════════════════════════════════════ */
+async function commitFinDocReal(t) {
+  var file = finPickedFile();
+  if (!file) {
+    toast('Choose the document first',
+      'A ' + t.label.toLowerCase() + ' is a piece of paper. Pick the file and its bytes go up with the record.');
+    return;
+  }
+  var link = PENDING_FIN.link || {}, showId = PENDING_FIN.showId;
+  var vEl = document.getElementById('fdVendor'), aEl = document.getElementById('fdAmount'),
+      cEl = document.getElementById('fdCat'), nEl = document.getElementById('fdConf');
+  var vendor = vEl && vEl.value ? vEl.value : null;
+  var conf = nEl && nEl.value ? String(nEl.value).trim() : '';
+  var g = guessFileKind(file.name);
+  var dims = await measureImage(file);          /* real pixels or nothing */
+  finUploadingUI(file);
+  stageNotifies();
+  var f;
+  try {
+    f = await api.addFinancialDoc(showId, {
+      kind: t.kind,
+      /* the name and the extension are the FILE's, so the row in the Files tab
+         is the document Brendon recognises rather than a generated caption */
+      name: g.base,
+      ext: g.ext,
+      vendor: vendor,
+      amount: aEl && aEl.value !== '' ? Number(aEl.value) : null,
+      category: cEl ? cEl.value : null,
+      expenseId: link.expenseId || null,
+      bookingId: link.bookingId || null,
+      poId: link.poId || null
+      /* NO size, NO dim. The PUT below owns both. */
+    });
+  } catch (e) {
+    finUploadFailedUI();
+    toast('Not filed', String(e && e.message || e));
+    return;
+  }
+  var stored = false, size = null, reason = 'not-configured';
+  if (await api.uploadsEnabled()) {
+    try {
+      var r = await api.uploadFileBytes(f.id, file, dims);
+      stored = true; size = r && r.size;
+    } catch (e2) { reason = e2 && e2.message ? e2.message : 'upload failed'; }
+  }
+  /* The number on the paperwork belongs to the BOOKING, not to the file — it is
+     what the call sheet and the delivery view print. Best-effort: a booking we
+     could not stamp must not lose the document that just uploaded fine. */
+  if (link.bookingId && conf) {
+    try { await api.updateBooking(link.bookingId, { confirmation_number: conf }); } catch (_) {}
+  }
+  closeM();
+  PENDING_FIN = null;
+  var fs2 = SHOWS_BY_ID[f.show_id];
+  var nm = fileNameWithExt(f);
+  var suffix = await sendNotifies('file', f.id, 'filed a ' + t.label.toLowerCase() + ': ' + nm +
+    (f.amount ? ' · ' + fmtMoney(f.amount) : '') + (fs2 ? ' — ' + showLabel(fs2) : ''));
+  /* The toast NAMES THE FILE. "Confirmation filed · Vendor TBD" was true of
+     nothing in particular; "Midwest Freight conf.pdf · 240 KB → the Trucking
+     booking" is a receipt for the act that just happened. */
+  var where = link.bookingId ? 'the booking' : link.poId ? 'the PO' : 'Accounting’s feed';
+  if (stored) {
+    toast(t.label + ' attached',
+      nm + ' · ' + fmtBytes(size) + (vendor ? ' · ' + vendor : '') + ' → ' + where + suffix);
+  } else if (reason === 'not-configured') {
+    toast('Filed — bytes not stored',
+      nm + ' is on the record and linked to ' + where + ', but this server has no NAS storage configured.');
+  } else {
+    /* Both halves, always. The row exists and the bytes did not land. */
+    toast('Filed, but the bytes did not land', nm + ' — ' + reason);
+  }
+  await updateFinCount();
+  /* Land where the person was standing. Coming off a Bookings row, the thing
+     they want to see is that row's exception clearing — not the Financials tab. */
+  if (CUR.view === 'show') return refreshShowTab(CUR.showId, link.bookingId ? 'bookings' : 'financials');
+  return refreshFinanceUI();
+}
+/* The Vault treatment, in the modal: the card grid becomes the waiting room for
+   as long as the bytes are in flight, and the person cannot fire a second
+   commit at the same document by clicking a second card. */
+function finUploadingUI(file) {
+  var host = document.getElementById('fdCards');
+  if (host) host.innerHTML = vaultSendingHTML(file ? file.name : 'Uploading the document');
+}
+function finUploadFailedUI() {
+  var host = document.getElementById('fdCards');
+  if (!host) return;
+  host.innerHTML = FIN_DOC_KINDS.map(function (t, i) {
+    return '<button class="tpl-card fin-kind" style="text-align:left" ' + act('commitFinDoc', i) +
+      '><div class="ti">' + icon(t.ic) + '</div><b>' + esc(t.label) + '</b><div class="td">' +
+      esc(t.desc) + '</div></button>';
+  }).join('');
 }
 
 /* ---- add expense ----------------------------------------------------------- */
@@ -3388,11 +3665,20 @@ async function bkCommit() {
 }
 async function bkDeleteAct(id) {
   var showId = PENDING_BOOK ? PENDING_BOOK.showId : CUR.showId;
+  /* Reachable straight off the row now, not only from inside the edit modal —
+     so it asks. Same plain confirm as the file delete, same reasoning. */
+  var bk = await api.getBooking(id);
+  if (!askConfirm('Cancel the ' + ((bk && bk.category) || 'booking') +
+      (bk && bk.vendor ? ' with ' + bk.vendor : '') + '?\n\n' +
+      'The row goes and the cancellation is logged to the folder’s activity. Any ' +
+      'document attached to it stays on the show’s Files tab.')) return;
+  if (bk && bk.show_id) showId = bk.show_id;
   try { await api.deleteBooking(id); }
   catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
   PENDING_BOOK = null;
   closeM();
-  toast('Booking deleted', '');
+  toast('Booking cancelled',
+    ((bk && bk.category) || 'The booking') + (bk && bk.vendor ? ' · ' + bk.vendor : '') + ' — logged to activity');
   return refreshShowTab(showId, 'bookings');
 }
 
@@ -3615,6 +3901,7 @@ var ACTIONS = {
   commitJobNumber: function () { return commitJobNumber(); },
   addFinDoc:     function (t, id) { return openAddFinDoc(id); },
   commitFinDoc:  function (t, id) { return commitFinDoc(id); },
+  finPickFile:   function () { return finPickFileAct(); },
   openAddExpense: function (t, id) { return openAddExpense(id); },
   commitAddExpense: function () { return commitAddExpense(); },
   viewAs:        function (t, id) { return viewAs(id); },
@@ -3635,6 +3922,7 @@ var ACTIONS = {
   commitAddFile: function (t, id) { return commitAddFile(id); },
   commitUpload:  function () { return commitUpload(); },
   downloadFile:  function (t, id) { return downloadFile(id); },
+  deleteFile:    function (t, id) { return deleteFileAct(id); },
   vOpenTab:      function (t, id) { return vOpenTab(id); },
   vMax:          function () { return vMax(); },
   specGen:       function (t, id, k) { return specGen(id, k); },
@@ -3870,6 +4158,32 @@ document.addEventListener('drop', function (ev) {
   var dropped = null;
   try { if (ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files.length) dropped = ev.dataTransfer.files[0]; } catch (_) {}
   dropFile(Number(dz.getAttribute('data-drop')), dropped);
+});
+
+/* ---- the financial-attach well (HARDENING 21) ----
+   A SEPARATE attribute from `data-drop` on purpose: a document dropped into the
+   attach modal must land on the cost that modal is about — the booking, the
+   expense, the PO — and not become a loose file on the show, which is exactly
+   what routing it through dropFile() would do. It stashes the File on
+   PENDING_FIN and repaints the well; commitFinDocReal() is what sends it. */
+document.addEventListener('dragover', function (ev) {
+  var dz = ev.target && ev.target.closest ? ev.target.closest('[data-findrop]') : null;
+  if (!dz) return;
+  ev.preventDefault(); dz.classList.add('drag');
+});
+document.addEventListener('dragleave', function (ev) {
+  var dz = ev.target && ev.target.closest ? ev.target.closest('[data-findrop]') : null;
+  if (dz) dz.classList.remove('drag');
+});
+document.addEventListener('drop', function (ev) {
+  var dz = ev.target && ev.target.closest ? ev.target.closest('[data-findrop]') : null;
+  if (!dz) return;
+  ev.preventDefault(); ev.stopPropagation();
+  dz.classList.remove('drag');
+  var dropped = null;
+  try { if (ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files.length) dropped = ev.dataTransfer.files[0]; } catch (_) {}
+  if (!dropped) { toast('Nothing to attach', 'The browser did not hand over a file.'); return; }
+  finShowPicked(dropped);
 });
 
 /* ============================================================================

@@ -1329,6 +1329,52 @@ var api = (function () {
       }, function () { return false; });
     },
 
+    /* ---- take it back off the record -----------------------------------
+       DELETE /api/files/:id has existed since the wiring pass and NOTHING in
+       the product called it — so a person who filed the wrong thing, or filed
+       a row whose bytes never landed, had no way to clean up. That is half of
+       what Brendon hit on Show 1 ("he can't delete it").
+
+       The server is the gate (uploader OR pm-with-ownership / manager+); this
+       mirror only decides what the UI offers — see canDeleteFile() in data.js.
+       The server also takes the file's spec_renders with it and drops the warm
+       byte-cache entry; the NAS byte-file is deliberately LEFT, for a
+       housekeeping pass or an operator to remove on purpose.
+
+       The demo branch unpicks the same references the server's transaction
+       does, so a demo delete cannot leave a booking pointing at a file that is
+       no longer in the store. */
+    deleteFile: function (fileId) {
+      var id = Number(fileId);
+      if (!API()) {
+        var f = FILES_BY_ID[id];
+        if (!f) return fail('file ' + id + ' not found');
+        var s = SHOWS_BY_ID[f.show_id];
+        if (s && s.files) s.files = s.files.filter(function (x) { return x.id !== id; });
+        if (s && s.photos) s.photos = s.photos.filter(function (x) { return x.id !== id; });
+        ALL_EXPENSES.forEach(function (e) { if (e.file_id === id) e.file_id = null; });
+        Object.keys(BOOKINGS_BY_ID).forEach(function (k) {
+          if (BOOKINGS_BY_ID[k].file_id === id) BOOKINGS_BY_ID[k].file_id = null;
+        });
+        Object.keys(POS_BY_ID).forEach(function (k) {
+          var po = POS_BY_ID[k];
+          if (po.quote_file_id === id) po.quote_file_id = null;
+          if (po.invoice_file_id === id) po.invoice_file_id = null;
+        });
+        delete FILES_BY_ID[id];
+        return ok({ ok: true });
+      }
+      return SR.del('/api/files/' + id).then(function (r) {
+        var f2 = FILES_BY_ID[id];
+        if (f2) {
+          var s2 = SHOWS_BY_ID[f2.show_id];
+          if (s2 && s2.files) s2.files = s2.files.filter(function (x) { return x.id !== id; });
+          delete FILES_BY_ID[id];
+        }
+        return r || { ok: true };
+      });
+    },
+
     replaceChainFile: function (showId, chainKey, body) {
       if (!API()) {
         var s = SHOWS_BY_ID[Number(showId)];
@@ -1694,7 +1740,23 @@ var api = (function () {
         s.activity.unshift(mkAct(ME, 'filed a ' + kindLbl, vendor + (amount ? ' · $' + Number(amount).toLocaleString('en-US') : ''), 0, _nowHM(), true));
         return ok(f);
       }
-      /* API: POST /api/files does the whole thing in one transaction */
+      /* API: POST /api/files does the whole thing in one transaction.
+
+         ══ HARDENING 21, the line that was still open ══════════════════════
+         This branch used to carry `size: body.size || 245760`. That constant is
+         240 KB of nothing: a plausible-looking PDF weight, stamped onto a row
+         whose bytes had never left the person's laptop, because the financial
+         modal collected a vendor and an amount and no file at all. Brendon
+         filed three booking confirmations through it on Show 1 and the viewer
+         told him — correctly — that the bytes were not there.
+
+         Nothing here invents a size any more. It is not sent AT ALL: the row is
+         born at 0 and `PUT /api/files/:id/content` replaces it with the count of
+         the bytes that actually arrived. The caller's job is to send those bytes
+         (see uploadRealFinDoc in app.js), and the modal now requires the file
+         before it will commit. A row with no bytes may exist — that is honest
+         and visible — but a row that CLAIMS bytes it has not got may not.
+         ═══════════════════════════════════════════════════════════════════ */
       var kindLbl2 = { receipt: 'receipt', invoice: 'invoice', po: 'purchase order', confirmation: 'confirmation' }[body.kind] || 'doc';
       var b = {
         show_id: Number(showId),
@@ -1704,7 +1766,6 @@ var api = (function () {
         vendor: body.vendor || null,
         amount: body.amount != null ? Number(body.amount) : null,
         doc_date: body.doc_date || TODAY_ISO,
-        size: body.size || 245760,
         category: body.category || null,
         job_id: body.job_id != null ? Number(body.job_id) : null,
         expense_id: body.expenseId != null ? Number(body.expenseId) : (body.expense_id != null ? Number(body.expense_id) : null),
