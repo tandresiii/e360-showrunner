@@ -766,6 +766,10 @@ table.tbl td.money,table.tbl th.money{text-align:right}
 .tag.fin{color:var(--accent); border-color:color-mix(in srgb,var(--accent) 40%,transparent); background:var(--accent-ghost)}
 .tag.rental{color:var(--info); border-color:color-mix(in srgb,var(--info) 40%,transparent); background:var(--info-ghost)}
 .tag.sale{color:var(--warn); border-color:color-mix(in srgb,var(--warn) 40%,transparent); background:var(--warn-ghost)}
+/* the third deal type — labour on the client's own hardware. Structural
+   parity with .rental/.sale (same 40% border, same ghost fill); a third
+   hue because these are peer categories, not a severity ladder. */
+.tag.service{color:var(--go); border-color:color-mix(in srgb,var(--go) 40%,transparent); background:var(--go-ghost)}
 /* POLISH_LIST #5 · a placeholder QB number. Deliberately the QUIETEST tag on
    the page — muted, dashed, no ghost fill. Nothing is wrong; accounting just
    has not cut the real number yet. */

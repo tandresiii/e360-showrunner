@@ -340,6 +340,23 @@ const DEL = (p, o) => call('DELETE', p, o);
      parseInt(String(tempJob.body.qb_job_number).split('-')[2], 10) + 1,
      [tempJob.body.qb_job_number, tempJob2.body.qb_job_number]);
 
+  // ── deal_type = 'service' (2026-09-02, LOVB 2027) ─────────────────────
+  // The third deal type: labour on hardware the CLIENT owns. It must survive
+  // the round trip verbatim — the old two-way branch would have quietly
+  // stored anything unrecognised as 'rental', which claims E360 gear on a
+  // floor that has none. A junk value must still be refused.
+  const svcJob = await POST('/api/jobs', { project_id: P, name: TAG + ' season tech services',
+    client: TAG + ' League', deal_type: 'service' }, { token: PMT });
+  ok("POST /api/jobs deal_type='service' is accepted and stored verbatim",
+     svcJob.status === 200 && svcJob.body.deal_type === 'service', svcJob.body);
+  const svcBack = await GET('/api/jobs/' + svcJob.body.id, { token: PMT });
+  ok("...and reads back as 'service', never coerced to rental",
+     svcBack.status === 200 && svcBack.body.deal_type === 'service', svcBack.body);
+  const junkDeal = await POST('/api/jobs', { project_id: P, name: TAG + ' junk deal type',
+    deal_type: 'barter' }, { token: PMT });
+  ok('...while an unknown deal_type still falls back to the default, not through',
+     junkDeal.status === 200 && junkDeal.body.deal_type === 'rental', junkDeal.body);
+
   const pmRealNum = await POST('/api/jobs', { project_id: P, name: TAG + ' pm tries a real number',
     qb_job_number: '26-9999' }, { token: PMT });
   ok('a pm still may NOT type a real QuickBooks number (§9, accounting owns it)',

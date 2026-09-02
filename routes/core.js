@@ -31,7 +31,7 @@ const {
 } = require('../lib/mappers');
 const {
   PROJECT_TYPES, STAGES, RAGS, STEP_STATUSES, EVIDENCE_TYPES, AUTO_SOURCES,
-  SCOPE_KINDS, LIFECYCLE_STAGES, ROLE_RANK,
+  SCOPE_KINDS, LIFECYCLE_STAGES, ROLE_RANK, DEAL_TYPES,
   oneOf, addDays, slug, isISODate, intOrNull, num, money, sameUser,
   canonicalStage, stageLabel, isConfirmed, scopeLine, scopeOf, todayISO
 } = require('../lib/enums');
@@ -221,7 +221,7 @@ router.post('/projects', requireRole('pm'), asyncH(async (req, res) => {
                            deal_type, description, contract_value)
          VALUES ($1,$2,$3,'temp',$4,$5,$6,$7)`,
         [p.id, pick(b, 'jobName') || name, await mintTempJobNumber(c), pick(b, 'client') || '',
-         oneOf(pick(b, 'dealType'), ['rental', 'sale'], 'rental'), '', 0]);
+         oneOf(pick(b, 'dealType'), DEAL_TYPES, 'rental'), '', 0]);
     }
     await logActivity(c, { projectId: p.id, actor: req.actor, action: 'project.create',
       detail: name, accent: true });
@@ -523,7 +523,7 @@ router.post('/events', requireRole('pm'), asyncH(async (req, res) => {
                          description, contract_value)
        VALUES ($1,$2,$3,'temp',$4,$5,'',$6) RETURNING *`,
       [proj.id, pick(b, 'job_name') || name, await mintTempJobNumber(c), client,
-       oneOf(pick(b, 'deal_type'), ['rental', 'sale'], 'rental'),
+       oneOf(pick(b, 'deal_type'), DEAL_TYPES, 'rental'),
        money(pick(b, 'contract_value'), 0)])).rows[0];
 
     const showName = String(pick(b, 'show_name') || name).trim();

@@ -249,13 +249,21 @@ function segColor(step) { if (step.risk && normStatus(step.status) !== 'done') r
 
 /* the commercial dimension — one job = one deal = one qb job number.
    deal_type: 'rental' (league deal, E360 keeps the gear) | 'sale' (individual
-   team agreement — hardware becomes cost-of-goods on the job). */
+   team agreement — hardware becomes cost-of-goods on the job) | 'service'
+   (labour only, on hardware the CLIENT already owns — e360 techs running
+   LOVB's own cabinets in Madison and Atlanta).
+   A map, not a ternary: a fourth deal type cannot silently render as 'rental'
+   the way the old two-way branch did. */
+var DEAL_TAGS = {
+  rental:  ['rental',  'Rental — league deal; E360 retains the gear'],
+  sale:    ['sale',    'Sale — individual team agreement; hardware is cost-of-goods on this job'],
+  service: ['service', 'Service — labour on hardware the client already owns; E360 sells no gear here']
+};
 function dealTag(job) {
   if (!job || !job.deal_type) return '';
-  var sale = job.deal_type === 'sale';
-  return '<span class="tag ' + (sale ? 'sale' : 'rental') + '" title="' +
-    esc(sale ? 'Sale — individual team agreement; hardware is cost-of-goods on this job'
-             : 'Rental — league deal; E360 retains the gear') + '">' + (sale ? 'sale' : 'rental') + '</span>';
+  var a = DEAL_TAGS[job.deal_type];
+  if (!a) return '';
+  return '<span class="tag ' + esc(a[0]) + '" title="' + esc(a[1]) + '">' + esc(a[0]) + '</span>';
 }
 /* POLISH_LIST #5. A job can be opened, budgeted and bought against before
    Candice cuts the QuickBooks number; until then it carries a TEMP-{yy}-{seq}

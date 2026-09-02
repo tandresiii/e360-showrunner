@@ -533,7 +533,14 @@ var LOVB_JOBS = [
   { id: 9, project_id: 3, qb_job_number: '26-1184', client: 'League One Volleyball', deal_type: 'rental',
     description: 'League rental — Omaha (Match 5)', contract_value: 58000 },
   { id: 5, project_id: 3, qb_job_number: '26-1233', client: 'LOVB Austin', deal_type: 'sale',
-    description: 'Austin team sale — LED package + courtside rail wraps', contract_value: 64500 }
+    description: 'Austin team sale — LED package + courtside rail wraps', contract_value: 64500 },
+  /* the third deal type. E360 sells no gear here and rents none: the league
+     already owns the cabinets, and this job buys the PEOPLE who run them. It
+     carries labour and travel and no hardware line, which is why 'rental'
+     would have been the wrong shape — it would imply E360 gear on the floor. */
+  { id: 12, project_id: 3, qb_job_number: '26-1240', client: 'League One Volleyball',
+    deal_type: 'service',
+    description: 'Season tech services — e360 operators on LOVB-owned systems', contract_value: 24000 }
 ];
 
 function lovbShow(o) {
