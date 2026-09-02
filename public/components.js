@@ -318,7 +318,7 @@ function closeM() {
 /* iterate ONLY the lanes this show's project type defines, in config order */
 function laneSteps(show) {
   var byLane = {};
-  show.steps.forEach(function (st) { (byLane[st.lane] = byLane[st.lane] || []).push(st); });
+  (show.steps || []).forEach(function (st) { (byLane[st.lane] = byLane[st.lane] || []).push(st); });
   return typeDef(show.type).lanes.map(function (l) { return { lane: l, steps: byLane[l.key] || [] }; });
 }
 function allSteps(show) {
@@ -349,7 +349,7 @@ function rollup(show) { return rollupSteps(allSteps(show), show.stage); }
 /* folder-level rollup — every step under every show in the project */
 function projectRollup(project) {
   var pairs = [];
-  project.shows.forEach(function (s) {
+  (project.shows || []).forEach(function (s) {
     allSteps(s).forEach(function (p) { pairs.push({ step: p.step, lane: p.lane, show: s }); });
   });
   return rollupSteps(pairs, project.stage);
@@ -373,7 +373,7 @@ function showNext(show) { return nextMilestone(show.milestones); }
 function projectNext(project) {
   if (project.milestones && project.milestones.length) return nextMilestone(project.milestones);
   var all = [];
-  project.shows.forEach(function (s) { (s.milestones || []).forEach(function (m) { all.push(m); }); });
+  (project.shows || []).forEach(function (s) { (s.milestones || []).forEach(function (m) { all.push(m); }); });
   return nextMilestone(all);
 }
 

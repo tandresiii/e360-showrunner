@@ -321,8 +321,15 @@ var SR = (function () {
          because a show can carry a job reference. */
       var rec = keep(PROJECTS_BY_ID, p);
       push1(PROJECTS, rec);
-      (p.jobs || []).forEach(A.job);
-      (p.shows || []).forEach(A.show);
+      /* Re-point the embedded arrays at the CANONICAL records A.job/A.show
+         return. keep() copied the raw payload arrays onto rec — and a raw
+         embedded show that was already canonical elsewhere never got the
+         empty-collection defaults, so viewSeason's rollup walked
+         `show.steps.forEach` into a TypeError the first time a multi-show
+         folder existed. Only re-point keys the payload carried: a thin
+         embedded project (from A.show) must not wipe a deep-fetched list. */
+      if (p.jobs) rec.jobs = p.jobs.map(A.job);
+      if (p.shows) rec.shows = p.shows.map(A.show);
       return rec;
     },
     show: function (s) {

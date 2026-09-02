@@ -118,7 +118,9 @@ async function showsFor(projectId, q = pool) {
   const r = await q.query(
     'SELECT * FROM shows WHERE project_id=$1 ORDER BY event_date ASC, id ASC', [projectId]);
   const out = [];
-  for (const row of r.rows) out.push(await hydrateShow(row, q));
+  // withSteps costs nothing here — hydrateShow already queries the steps for
+  // deriveRag; the season dashboard rolls up from these embedded shows.
+  for (const row of r.rows) out.push(await hydrateShow(row, q, { withSteps: true }));
   return out;
 }
 // api.js hydrateProject(): jobs + shows + the auto-collapse `single` flag.

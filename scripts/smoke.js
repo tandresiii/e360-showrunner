@@ -1513,6 +1513,14 @@ const DEL = (p, o) => call('DELETE', p, o);
      (projAsPm.body.jobs || []).every((j) => j.contract_value === undefined)
      && (projAsFin.body.jobs || []).some((j) => j.contract_value !== undefined),
      { pm: (projAsPm.body.jobs || [])[0], fin: (projAsFin.body.jobs || [])[0] });
+  // The season dashboard (viewSeason) rolls up from the shows EMBEDDED in a
+  // hydrated project — if they arrive without a steps array the first paint of
+  // any multi-show folder is a TypeError, not a dashboard. hydrateShow already
+  // queries the steps for deriveRag; embedding them costs nothing.
+  ok('hydrated project embeds steps on every show (season rollup reads them)',
+     Array.isArray(projAsFin.body.shows) && projAsFin.body.shows.length > 0
+     && projAsFin.body.shows.every((s) => Array.isArray(s.steps)),
+     (projAsFin.body.shows || []).map((s) => ({ id: s.id, steps: s.steps && s.steps.length })));
   const finAsPm = await GET(`/api/jobs/${J}/finance`, { token: PMT });
   ok('2: ...and nested under jobFinance, whose `job` the top-level strip missed',
      finAsPm.body.margin === undefined && finAsPm.body.billed === undefined
