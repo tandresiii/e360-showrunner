@@ -2027,6 +2027,94 @@ function poGenerateExpenses(po, off) {
 })();
 
 /* ============================================================================
+   NEEDS LIST — the per-job purchasing checklist (Tom, 2026-09-02)
+   ----------------------------------------------------------------------------
+   "each one of those systems need all kinds of ancillary things — it would be
+   really advantageous if i had a spot to check those off the list." A need is
+   a checklist item, not money — it touches nothing until it is raised onto a
+   PO, at which point covered_by_po_id ties the check mark to the order.
+     open · covered (raised or hand-checked) · na (deliberately not needed —
+     kept and struck through, because a decision is a record, not an absence).
+   LED_NEEDS_TEMPLATE mirrors lib/enums.js LED_ANCILLARIES verbatim — the demo
+   twin of the server's seed constant. Tom will tune the list.
+   ========================================================================== */
+var NEED_STATUSES = ['open', 'covered', 'na'];
+var LED_NEEDS_TEMPLATE = [
+  { item: 'Main power distro',                detail: 'per-system distro rack sized to the wall',          qty: 1, category: 'gear' },
+  { item: '208V / breakout cabling',          detail: 'feeder + breakouts, wall to distro to cabinets',    qty: 1, category: 'gear' },
+  { item: 'LED processor',                    detail: 'primary processor for the system',                  qty: 1, category: 'gear' },
+  { item: 'Backup processor',                 detail: 'hot spare, configured and shelved on site',         qty: 1, category: 'gear' },
+  { item: 'Data / fiber runs',                detail: 'processor-to-wall data, fiber where the run is long', qty: 1, category: 'gear' },
+  { item: 'Network switch',                   detail: 'control network for processor + peripherals',       qty: 1, category: 'gear' },
+  { item: 'Rigging / ground-support hardware', detail: 'flown: rigging kit · floor: ground-support frames', qty: 1, category: 'gear' },
+  { item: 'Spare cabinets / modules allowance', detail: 'attrition stock — pixels fail on install day',    qty: 1, category: 'gear' },
+  { item: 'Spare PSUs + receiving cards',     detail: 'the two parts that actually die',                   qty: 1, category: 'gear' },
+  { item: 'Freight / shipping',               detail: 'hardware to the venue',                             qty: 1, category: 'freight' },
+  { item: 'Install consumables',              detail: 'gaff · zip ties · hardware · edge trim',            qty: 1, category: 'misc' },
+  { item: 'Test + commissioning kit',         detail: 'test patterns, meters, spares caddy for sign-off',  qty: 1, category: 'gear' }
+];
+
+var _needSeq = 0;
+var ALL_NEEDS = [], NEEDS_BY_ID = {};
+
+function mkNeed(o) {
+  var job = JOBS_BY_ID[o.job];
+  var nd = { id: ++_needSeq, project_id: o.project || (job ? job.project_id : null),
+    job_id: o.job, show_id: o.show || null,
+    item: o.item, detail: o.detail || '', qty: o.qty == null ? 1 : o.qty,
+    est_cost: o.est == null ? null : o.est, category: o.category || 'gear',
+    status: o.status || 'open', covered_by_po_id: o.po || null,
+    checked_by: o.checkedBy || null, checked_at: o.checkedAt || null,
+    sort_order: o.sort != null ? o.sort : _needSeq,
+    created_by: o.by || 'tandres', created_at: dayISO(o.off || 0), updated_at: dayISO(o.off || 0) };
+  ALL_NEEDS.push(nd); NEEDS_BY_ID[nd.id] = nd;
+  return nd;
+}
+
+/* ---------------- pure rollups (mirror the PO helpers' style) -------------- */
+function needsForJob(jobId) {
+  return ALL_NEEDS.filter(function (nd) { return nd.job_id === Number(jobId); })
+    .sort(function (a, b) { return a.sort_order - b.sort_order || a.id - b.id; });
+}
+function openNeedsForShow(showId) {
+  return ALL_NEEDS.filter(function (nd) { return nd.show_id === Number(showId) && nd.status === 'open'; });
+}
+/* the Purchasing cockpit's "Still needed" rollup: open items grouped by job */
+function openNeedsByJob() {
+  var byJob = {};
+  ALL_NEEDS.forEach(function (nd) {
+    if (nd.status !== 'open') return;
+    var b = byJob[nd.job_id] = byJob[nd.job_id] || { job: JOBS_BY_ID[nd.job_id] || null, count: 0, est: 0 };
+    b.count += 1;
+    if (nd.est_cost != null) b.est += (nd.qty || 1) * nd.est_cost;
+  });
+  return Object.keys(byJob).map(function (jid) { return byJob[jid]; })
+    .filter(function (b) { return !!b.job; })
+    .sort(function (a, b) { return b.count - a.count || b.est - a.est; });
+}
+
+/* ---- demo seed: the Salt Lake install (job 11) mid-checklist ----
+   One item already covered by the NovaStar processor PO, one struck n/a, the
+   rest open — so the panel shows every state the moment the demo opens. */
+(function seedNeeds() {
+  var poNova = ALL_POS.filter(function (po) { return po.po_number === 'PO-26-047'; })[0] || null;
+  mkNeed({ job: 11, show: 6, item: 'LED processor', detail: 'MX40 Pro — on the season processor order',
+    qty: 1, est: 5600, status: 'covered', po: poNova ? poNova.id : null,
+    checkedBy: 'tvigon', checkedAt: dayISO(-1), by: 'tvigon', off: -3, sort: 1 });
+  mkNeed({ job: 11, show: 6, item: 'Main power distro', detail: 'per-system distro rack sized to the wall',
+    qty: 1, est: 6400, by: 'tvigon', off: -3, sort: 2 });
+  mkNeed({ job: 11, show: 6, item: '208V / breakout cabling', detail: 'feeder + breakouts, wall to distro to cabinets',
+    qty: 1, est: 1800, by: 'tvigon', off: -3, sort: 3 });
+  mkNeed({ job: 11, show: 6, item: 'Freight / shipping', detail: 'hardware to Maverik Center', qty: 1,
+    est: 2500, category: 'freight', by: 'tvigon', off: -3, sort: 4 });
+  mkNeed({ job: 11, show: 6, item: 'Install consumables', detail: 'gaff · zip ties · hardware · edge trim',
+    qty: 1, est: 400, category: 'misc', by: 'tvigon', off: -3, sort: 5 });
+  mkNeed({ job: 11, show: 6, item: 'Rigging / ground-support hardware',
+    detail: 'venue steel + house rig already contracted', qty: 1, status: 'na',
+    checkedBy: 'tandres', checkedAt: dayISO(-2), by: 'tvigon', off: -3, sort: 6 });
+})();
+
+/* ============================================================================
    NOTES + @MENTIONS — anchored comments (notes pass)
    ----------------------------------------------------------------------------
    The decided model (TEAM_FEEDBACK): threads live ON things, never free-

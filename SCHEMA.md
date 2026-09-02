@@ -82,6 +82,7 @@ with **Jobs** (the commercial dimension) alongside the shows in the folder.
 | PO `status` | `needed` → `quoted` → `ordered` → `shipped` → `received` → `reconciled` |
 | PO committed statuses | `ordered` · `shipped` |
 | `po_lines.ownership` | `inventory` · `cogs` |
+| need `status` (`purchase_needs`) | `open` · `covered` · `na` — `covered` = raised onto a PO (`covered_by_po_id`) or checked off by hand; `na` = deliberately not needed, kept struck-through |
 | note `anchor_type` | `project` · `show` · `step` · `file` · `job` · `expense` · `po` |
 | schedule `kind` | `travel` · `work` · `show` · `meal` · `strike` |
 | deliverable `kind` / `status` | `recap` · `call_sheet` · `photo_set` / `draft` · `approved` · `sent` |
@@ -287,6 +288,21 @@ which is what the finance feed reads for budget events.
 > `quoted → ordered` without `approval.approved_by`. **Approvers = the admins
 > (Tom/Tony/Jim) + Candice's finance capability** — `canApprovePO()` is
 > `role==='admin' || finance===true`. Not manager+.
+
+**`purchase_needs`** *(idx: `(job_id, status)`, `project_id`, `covered_by_po_id`)*
+`id · project_id · job_id · show_id · item · detail · qty · est_cost NUMERIC(12,2) NULL · category · status · covered_by_po_id · checked_by · checked_at · sort_order · created_at · updated_at · created_by`
+
+> **The needs list (Tom, 2026-09-02).** The per-job ancillaries checklist —
+> what each LED system still needs around the cabinets. A need is a **checklist
+> item, not money**: `est_cost` is a planning number and touches no budget.
+> `POST /api/jobs/:id/needs/seed` drops the standard LED template
+> (`LED_ANCILLARIES`, lib/enums.js) idempotently by item name;
+> `POST /api/needs/raise-po` turns open needs into **one PO at `needed`** (one
+> line per need) and stamps each `covered` with `covered_by_po_id`, all in one
+> transaction — a non-open need or one from another job poisons the whole call.
+> Status changes stamp `checked_by`/`checked_at`; reopening clears both and the
+> covering PO. Write gates mirror the PO family (pm-floor + `canEditProject`).
+> **No notifications in v1**, deliberately.
 
 ### Conversation
 
@@ -596,17 +612,18 @@ or the per-user agents of `ARCHITECTURE.md`; this app does not fake one.
 
 | Entry point | Reaches |
 |---|---|
-| `deletePoCascade(poId)` | po-anchored `notes` (+ their reads/mentions), `po_lines`, `activity`, nulls `expenses.po_id`, the PO |
-| `deleteShowCascade(showId)` | notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, `proposals`, **`tech_reports`**, **`notification_outbox`**, `activity`, nulls `po_lines.show_id`, the show |
-| `deleteProjectCascade(projectId)` | every show (via the show cascade), every PO (via the PO cascade), job- and project-anchored notes, `budget_lines`, `jobs`, project-level `steps`/`files`/`expenses`/`milestones`/`deliverables`/`proposals`/**`tech_reports`**/**`notification_outbox`**, `activity`, the project |
+| `deletePoCascade(poId)` | po-anchored `notes` (+ their reads/mentions), `po_lines`, `activity`, nulls `expenses.po_id`, **reopens `purchase_needs` this PO was covering** (`covered_by_po_id` nulled, `covered` → `open`), the PO |
+| `deleteShowCascade(showId)` | notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, `proposals`, **`tech_reports`**, **`notification_outbox`**, `activity`, nulls `po_lines.show_id` and `purchase_needs.show_id`, the show |
+| `deleteProjectCascade(projectId)` | every show (via the show cascade), every PO (via the PO cascade), job- and project-anchored notes, `budget_lines`, **`purchase_needs`**, `jobs`, project-level `steps`/`files`/`expenses`/`milestones`/`deliverables`/`proposals`/**`tech_reports`**/**`notification_outbox`**, `activity`, the project |
+| `DELETE /api/jobs/:id` (`routes/finance.js`) | refuses while shows/expenses/po_lines still attach; then `budget_lines`, **`purchase_needs`**, job-anchored `notes`, the job |
 | `DELETE /api/files/:id` (single file, `routes/files.js`) | file-anchored `notes` (+ reads/mentions), **`spec_renders` by `file_id`**, nulls `expenses.file_id` / `bookings.file_id` / `purchase_orders.quote_file_id` / `.invoice_file_id`, the file. The NAS bytes are left on disk deliberately. `spec_renders` was added in the 2026-08-27 hardening pass: `spec_renders.file_id` is `NOT NULL`, so a render cannot be orphaned the way a nullable FK can — it goes with the file or it is a dangling row |
 
 The smoke test builds a folder carrying a child of **every** one of these tables,
-deletes it, and asserts **zero orphans** in all 26.
+deletes it, and asserts **zero orphans** in all 27.
 
 ---
 
-## API surface (192 routes)
+## API surface (198 routes)
 
 Human routes return **snake_case** records matching `public/data.js`; agent
 routes speak **camelCase** per `AGENT_API.md`. Request bodies accept **both**
@@ -671,6 +688,8 @@ Purchasing  GET /api/pos[/:id] · GET /api/purchasing/overview · GET /api/procu
             PUT/DELETE /api/pos/:id/lines/:lineId · PUT /api/pos/:id/status
             POST /api/pos/:id/approve · PUT/DELETE /api/pos/:id
             GET/PUT /api/config/po-approval-threshold
+            GET/POST /api/needs · PUT/DELETE /api/needs/:id
+            POST /api/jobs/:id/needs/seed · POST /api/needs/raise-po
 Notes       GET /api/notes · GET /api/notes/:id · GET /api/notes/count/:type/:id
             POST /api/notes · PUT/DELETE /api/notes/:id
 Inbox       GET /api/me/inbox · GET /api/me/inbox/count · POST /api/me/inbox/read
@@ -786,6 +805,8 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | `listPOs` / `getPO` / `getPurchasingOverview` | `GET /api/pos` · `/api/pos/:id` · `/api/purchasing/overview` |
 | `listProcurementRisks` / `listCommitted` | `GET /api/procurement/risks` · `GET /api/jobs/:id/committed` |
 | `createPO` / `addPOLine` / `updatePOStatus` / `approvePO` | `POST /api/pos` · `POST /api/pos/:id/lines` · `PUT /api/pos/:id/status` · `POST /api/pos/:id/approve` |
+| `listNeeds` / `createNeed` / `updateNeed` / `deleteNeed` | `GET /api/needs?job_id=&status=` · `POST /api/needs` · `PUT`/`DELETE /api/needs/:id` |
+| `seedNeeds(jid)` / `raiseNeedsPO(jid, ids, vendor?)` | `POST /api/jobs/:id/needs/seed` · `POST /api/needs/raise-po {job_id, need_ids[]}` |
 | `listNotes(t, id)` / `addNote` / `editNote` | `GET /api/notes?anchor_type=&anchor_id=` · `POST /api/notes` · `PUT /api/notes/:id` |
 | `myInbox` / `markNotesRead` / `markAllNotesRead` / `notesUnreadCount` | `GET /api/me/inbox` · `POST /api/me/inbox/read {ids}` · `{all:true}` · `GET /api/me/inbox/count` |
 | `getSchedule` / `addScheduleItem` / `updateScheduleItem` / `removeScheduleItem` | `GET /api/shows/:id/call-sheet` (alias `/run-of-show`) · `POST /api/shows/:id/schedule` · `PUT`/`DELETE /api/schedule/:id` |

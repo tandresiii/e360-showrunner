@@ -144,6 +144,10 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
 .chk svg{width:11px;height:11px; opacity:0; color:var(--on-accent)}
 .task.done .chk{background:var(--accent); border-color:var(--accent)}
 .task.done .chk svg{opacity:1}
+/* a standalone .chk (the needs list) carries its own checked state — same
+   look as .task.done, minus the .task wrapper the pipeline rows have */
+.chk.on{background:var(--accent); border-color:var(--accent)}
+.chk.on svg{opacity:1}
 .task.done .tt .txt{color:var(--muted); text-decoration:line-through}
 .task .txt{font-size:13px; font-weight:500; line-height:1.35; flex:1}
 .task .tm{display:flex; align-items:center; gap:8px; flex-wrap:wrap}

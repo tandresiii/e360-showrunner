@@ -362,7 +362,9 @@ function viewJobFinance(jf) {
     '</div></div>' +
     stats +
     '<div class="ov" style="grid-template-columns:1.5fr 1fr">' +
-    '<div style="display:flex;flex-direction:column;gap:16px">' + budgetCard + expCard + '</div>' +
+    /* the NEEDS checklist (views-purchasing.js) rides between budget and
+       actuals — it is the buying that has not become either yet */
+    '<div style="display:flex;flex-direction:column;gap:16px">' + budgetCard + needsPanel(j) + expCard + '</div>' +
     '<div style="display:flex;flex-direction:column;gap:16px">' + posPanel + docsPanel + showsPanel +
     notesPanel('job', j.id, { collapse: 2 }) + '</div>' +
     '</div>';

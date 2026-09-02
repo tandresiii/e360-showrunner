@@ -110,6 +110,10 @@ async function renderView(view, arg) {
   } else if (view === 'job') {
     var jf = await api.getJobFinance(arg);
     await api.listNotes('job', jf.job.id);
+    /* the needs checklist and its covered-by chips read the flat store the
+       demo way — warm it (and the PO panel beside it) for this job first */
+    await api.listNeeds({ job_id: jf.job.id });
+    await api.listPOs({ jobId: jf.job.id });
     CUR.jobId = jf.job.id;
     s.innerHTML = viewJobFinance(jf);
     crumb([{ t: 'Finance', act: act('goFinance') }, { t: jf.job.qb_job_number + ' · ' + jf.job.client }]);
@@ -117,6 +121,7 @@ async function renderView(view, arg) {
 
   } else if (view === 'purchasing') {
     var pov = await api.getPurchasingOverview();
+    await api.listNeeds({ status: 'open' });    /* the "Still needed" rollup */
     s.innerHTML = viewPurchasing(pov);
     crumb([{ t: 'Purchasing' }]);
 
@@ -1548,6 +1553,135 @@ async function commitAddPOLine() {
     return;
   }
   return refreshFinanceUI();
+}
+
+/* ============================================================================
+   NEEDS LIST ACTIONS — the per-job ancillaries checklist (Tom, 2026-09-02)
+   seed the standard list · check off / n-a / reopen · add · edit · delete ·
+   raise ONE PO from everything still open. Every write goes through api.*
+   and re-renders from fresh data, like the rest of the money surface.
+   ========================================================================== */
+async function needToggleAct(id) {
+  var nd = NEEDS_BY_ID[Number(id)];
+  if (!nd) return;
+  var next = nd.status === 'covered' ? 'open' : 'covered';
+  try {
+    var upd = await api.updateNeed(nd.id, { status: next });
+    toast(next === 'covered' ? 'Checked off' : 'Reopened',
+      upd.item + (next === 'covered' ? ' — handled outside a PO' : ' — back on the list'));
+  } catch (e) { toast('Not updated', String(e && e.message || e)); return; }
+  return refreshFinanceUI();
+}
+async function needNaAct(id) {
+  var nd = NEEDS_BY_ID[Number(id)];
+  if (!nd) return;
+  var next = nd.status === 'na' ? 'open' : 'na';
+  try {
+    var upd = await api.updateNeed(nd.id, { status: next });
+    toast(next === 'na' ? 'Marked n/a' : 'Restored',
+      upd.item + (next === 'na' ? ' — not needed on this system' : ' — it is needed after all'));
+  } catch (e) { toast('Not updated', String(e && e.message || e)); return; }
+  return refreshFinanceUI();
+}
+async function needDeleteAct(id) {
+  var nd = NEEDS_BY_ID[Number(id)];
+  if (!nd) return;
+  try { await api.deleteNeed(nd.id); }
+  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  toast('Item removed', nd.item);
+  return refreshFinanceUI();
+}
+async function needAddCommitAct(jobId) {
+  var item = (document.getElementById('ndItem') || {}).value;
+  if (!item || !item.trim()) { toast('Name the item', 'A need is a named thing'); return; }
+  var est = (document.getElementById('ndEst') || {}).value;
+  try {
+    var nd = await api.createNeed({
+      job_id: Number(jobId), item: item.trim(),
+      qty: Number((document.getElementById('ndQty') || {}).value) || 1,
+      est_cost: est === '' || est == null ? null : Number(est),
+      category: (document.getElementById('ndCat') || {}).value || 'gear'
+    });
+    toast('Added to the list', nd.item);
+  } catch (e) { toast('Not added', String(e && e.message || e)); return; }
+  return refreshFinanceUI();
+}
+async function needSeedAct(jobId) {
+  var r;
+  try { r = await api.seedNeeds(jobId); }
+  catch (e) { toast('Not seeded', String(e && e.message || e)); return; }
+  toast(r.added.length ? 'Seeded ' + r.added.length + ' ancillaries' : 'Nothing to add',
+    r.added.length
+      ? 'The standard LED list — tune quantities and estimates, strike what this system doesn’t need'
+      : 'Every standard item is already on the list');
+  return refreshFinanceUI();
+}
+var PENDING_NEED = null;
+async function needEditAct(id) {
+  var nd = NEEDS_BY_ID[Number(id)];
+  if (!nd) return;
+  PENDING_NEED = { id: nd.id };
+  var catOpts = BUDGET_CAT_ORDER.map(function (c) {
+    return '<option value="' + esc(c) + '"' + (c === nd.category ? ' selected' : '') + '>' + esc(BUDGET_CATS[c]) + '</option>';
+  }).join('');
+  /* pin-to-show options: the project's shows as far as the cache knows them,
+     plus whatever the item is already pinned to */
+  var seen = {};
+  var showOpts = '<option value="">whole job</option>' + ALL_SHOWS.filter(function (s) {
+    return s.project_id === nd.project_id && !seen[s.id] && (seen[s.id] = 1);
+  }).map(function (s) {
+    return '<option value="' + Number(s.id) + '"' + (s.id === nd.show_id ? ' selected' : '') + '>' + esc(showLabel(s)) + '</option>';
+  }).join('');
+  if (nd.show_id && !seen[nd.show_id]) {
+    showOpts += '<option value="' + Number(nd.show_id) + '" selected>show #' + Number(nd.show_id) + '</option>';
+  }
+  openModal('Edit need',
+    '<div class="fin-inputs" style="grid-template-columns:1.6fr 84px 110px">' +
+    finLabelWrap('Item', '<input id="neItem" class="cell-in" value="' + esc(nd.item) + '">') +
+    finLabelWrap('Qty', '<input id="neQty" class="cell-in" type="number" min="1" value="' + esc(nd.qty) + '">') +
+    finLabelWrap('Est $ each', '<input id="neEst" class="cell-in" type="number" min="0" value="' + esc(nd.est_cost == null ? '' : nd.est_cost) + '" placeholder="—">') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Detail', '<input id="neDetail" class="cell-in" value="' + esc(nd.detail) + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+    finLabelWrap('Category', '<select id="neCat" class="cell-in">' + catOpts + '</select>') +
+    finLabelWrap('Pinned to', '<select id="neShow" class="cell-in">' + showOpts + '</select>') +
+    '</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('needCommit') + '>' + icon('check') + 'Save</button></div>');
+}
+async function needCommit() {
+  if (!PENDING_NEED) return;
+  var item = (document.getElementById('neItem') || {}).value;
+  if (!item || !item.trim()) { toast('Name the item', 'A need is a named thing'); return; }
+  var est = (document.getElementById('neEst') || {}).value;
+  try {
+    var upd = await api.updateNeed(PENDING_NEED.id, {
+      item: item.trim(),
+      detail: (document.getElementById('neDetail') || {}).value || '',
+      qty: Number((document.getElementById('neQty') || {}).value) || 1,
+      est_cost: est === '' || est == null ? null : Number(est),
+      category: (document.getElementById('neCat') || {}).value || 'gear',
+      show_id: Number((document.getElementById('neShow') || {}).value) || null
+    });
+    closeM();
+    PENDING_NEED = null;
+    toast('Item updated', upd.item);
+  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  return refreshFinanceUI();
+}
+async function needRaiseAct(jobId) {
+  var open = needsForJob(jobId).filter(function (nd) { return nd.status === 'open'; });
+  if (!open.length) { toast('Nothing open', 'Every item is covered or n/a'); return; }
+  var r;
+  try {
+    r = await api.raiseNeedsPO(jobId, open.map(function (nd) { return nd.id; }));
+  } catch (e) { toast('Not raised', String(e && e.message || e)); return; }
+  toast('Opened ' + r.po.po_number,
+    open.length + ' item' + (open.length === 1 ? '' : 's') + ' → one PO at needed — set the vendor, quote it out');
+  updatePoCount();
+  return render('po', r.po.id);
 }
 
 /* ---- attach financial doc (receipt / invoice / po / confirmation) ---------- */
@@ -3893,6 +4027,15 @@ var ACTIONS = {
   commitNewPO:   function () { return commitNewPO(); },
   openAddPOLine: function (t, id) { return openAddPOLine(id); },
   commitAddPOLine: function () { return commitAddPOLine(); },
+  /* needs list — the per-job ancillaries checklist */
+  needToggle:    function (t, id) { return needToggleAct(id); },
+  needNa:        function (t, id) { return needNaAct(id); },
+  needEdit:      function (t, id) { return needEditAct(id); },
+  needCommit:    function () { return needCommit(); },
+  needAddCommit: function (t, id) { return needAddCommitAct(id); },
+  needDelete:    function (t, id) { return needDeleteAct(id); },
+  needSeed:      function (t, id) { return needSeedAct(id); },
+  needRaisePo:   function (t, id) { return needRaiseAct(id); },
   openShowFin:   function (t, id) { return openShowFin(id); },
   confirmDoc:    function (t, id) { return confirmDocAct(id); },
   rejectDoc:     function (t, id) { return rejectDocAct(id); },

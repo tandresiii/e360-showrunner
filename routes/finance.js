@@ -195,6 +195,10 @@ router.delete('/jobs/:id', requireRole('manager'), asyncH(async (req, res) => {
   }
   await withTx(async (c) => {
     await c.query('DELETE FROM budget_lines WHERE job_id=$1', [id]);
+    // the needs CHECKLIST goes with its job, like the budget lines — it is
+    // bookkeeping about the job, not money in the record. A need that was
+    // raised onto a PO left its po_line behind, which is what blocks above.
+    await c.query('DELETE FROM purchase_needs WHERE job_id=$1', [id]);
     await c.query(`DELETE FROM notes WHERE anchor_type='job' AND anchor_id=$1`, [id]);
     await c.query('DELETE FROM jobs WHERE id=$1', [id]);
   });

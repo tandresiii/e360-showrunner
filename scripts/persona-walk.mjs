@@ -424,6 +424,73 @@ async function main() {
        .rows.some((r) => r.accent));
 
   // ══════════════════════════════════════════════════════════════════════════
+  section('8b · the needs list — every system’s ancillaries  (Tom 2026-09-02)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "each one of those systems need all kinds of ancillary things — it would
+  // be really advantageous if i had a spot to check those off the list."
+  // Brenden seeds the standard LED list onto the job, works it like a
+  // checklist, and raises what is left as ONE purchase order.
+  reach('Seed the LED ancillaries', { seam: 'seedNeeds', action: 'needSeed' });
+  reach('Work the checklist', { seam: ['listNeeds', 'createNeed', 'updateNeed', 'deleteNeed'],
+    action: ['needToggle', 'needNa', 'needEdit', 'needCommit', 'needAddCommit', 'needDelete'] });
+  reach('Raise a PO from the open items', { seam: 'raiseNeedsPO', action: 'needRaisePo' });
+
+  const { LED_ANCILLARIES } = require(path.join(APP, 'lib', 'enums.js'));
+  const seeded = await POST(`/api/jobs/${JOB}/needs/seed`, {}, { token: T.brenden });
+  ok('the one-click seed fills the standard LED list', seeded.status === 200
+     && (seeded.body.added || []).length === LED_ANCILLARIES.length,
+     { added: seeded.body.added?.length });
+  const seededAgain = await POST(`/api/jobs/${JOB}/needs/seed`, {}, { token: T.brenden });
+  ok('…and a second click adds NOTHING — the seed is idempotent',
+     (seededAgain.body.added || []).length === 0
+     && (seededAgain.body.skipped || []).length === LED_ANCILLARIES.length, seededAgain.body);
+
+  const list0 = (await GET(`/api/needs?job_id=${JOB}`, { token: T.brenden })).body;
+  const distro = list0.find((x) => /power distro/i.test(x.item));
+  const rig = list0.find((x) => /rigging/i.test(x.item));
+  const est = await PUT(`/api/needs/${distro.id}`, { est_cost: 6400, qty: 1 }, { token: T.brenden });
+  ok('Brenden edits an item — the distro gets its estimate', est.status === 200
+     && est.body.est_cost === 6400, est.body);
+  const na = await PUT(`/api/needs/${rig.id}`, { status: 'na' }, { token: T.brenden });
+  ok('…strikes the rigging n/a (Fiserv steel is contracted) — stamped',
+     na.status === 200 && na.body.status === 'na' && na.body.checked_by === 'brenden', na.body);
+  const custom = await POST('/api/needs', { job_id: JOB, item: 'Camera platform edge trim',
+    detail: 'venue-specific — broadcast platform butts the wall', qty: 1, est_cost: 350,
+    category: 'misc', show_id: SHOW }, { token: T.brenden });
+  ok('…adds a venue-specific custom item, pinned to the show', custom.status === 200
+     && custom.body.show_id === SHOW, custom.body);
+  const spares = list0.find((x) => /Spare PSUs/i.test(x.item));
+  const hand = await PUT(`/api/needs/${spares.id}`, { status: 'covered' }, { token: T.brenden });
+  ok('…checks the PSU spares off by hand (they ride the traveling kit)',
+     hand.status === 200 && hand.body.status === 'covered' && !hand.body.covered_by_po_id, hand.body);
+
+  const stillOpen = (await GET(`/api/needs?job_id=${JOB}&status=open`, { token: T.brenden })).body;
+  const raisedPo = await POST('/api/needs/raise-po',
+    { job_id: JOB, need_ids: stillOpen.map((x) => x.id) }, { token: T.brenden });
+  ok('one click raises EVERYTHING still open as ONE PO at needed',
+     raisedPo.status === 200 && raisedPo.body.po.status === 'needed'
+     && (raisedPo.body.po.lines || []).length === stillOpen.length, raisedPo.body.po?.lines?.length);
+  const coveredNow = (await GET(`/api/needs?job_id=${JOB}&status=covered`, { token: T.brenden })).body;
+  ok('…and every raised item reads covered, carrying THAT PO’s id',
+     stillOpen.every((x) => coveredNow.some(
+       (c) => c.id === x.id && c.covered_by_po_id === raisedPo.body.po.id)), coveredNow.length);
+
+  // a second job exists only to prove the poison: one foreign need refuses ALL
+  const sideJob = await POST('/api/jobs', { project_id: PROJ, name: 'walk side job' }, { token: T.tom });
+  const foreign = await POST('/api/needs', { job_id: sideJob.body.id, item: 'foreign probe' },
+    { token: T.tom });
+  const posN = (await pool.query('SELECT COUNT(*)::int AS n FROM purchase_orders')).rows[0].n;
+  const mixed = await POST('/api/needs/raise-po',
+    { job_id: sideJob.body.id, need_ids: [foreign.body.id, spares.id] }, { token: T.tom });
+  ok('a need from another job poisons the whole raise — 400, nothing created',
+     mixed.status === 400
+     && (await pool.query('SELECT COUNT(*)::int AS n FROM purchase_orders')).rows[0].n === posN,
+     mixed.body);
+
+  const dropped = await DEL(`/api/needs/${custom.body.id}`, { token: T.brenden });
+  ok('…and a wrong item deletes cleanly', dropped.status === 200, dropped.body);
+
+  // ══════════════════════════════════════════════════════════════════════════
   section('9 · Candice does the money  (C1 · C2 — and the margin gate, both ways)');
   // ══════════════════════════════════════════════════════════════════════════
   reach('Budget lines', { seam: ['addBudgetLine', 'updateBudgetLine', 'deleteBudgetLine'],

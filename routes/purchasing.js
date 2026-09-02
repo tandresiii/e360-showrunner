@@ -43,6 +43,7 @@ const router = express.Router();
 
 const {
   PO_STATUSES, PO_COMMITTED, PO_OWNERSHIP, BUDGET_CATS,
+  NEED_STATUSES, LED_ANCILLARIES,
   oneOf, money, num, isoDiffDays, isISODate, todayISO
 } = require('../lib/enums');
 const {
@@ -50,7 +51,7 @@ const {
   deletePoCascade, getConfig, setConfig
 } = require('../lib/db');
 const {
-  pick, has, dbToPO, dbToPOLine, dbToExpense, dbToShow, dbToActivity
+  pick, has, dbToPO, dbToPOLine, dbToNeed, dbToExpense, dbToShow, dbToActivity
 } = require('../lib/mappers');
 const {
   asyncH, badRequest, forbidden, notFound, conflict, idParam, limitOf
@@ -924,6 +925,304 @@ router.delete('/pos/:id', requireAuth, requireRole('manager'), asyncH(async (req
       });
     }
     return { ok: true, id: po.id, po_number: po.po_number };
+  });
+  res.json(out);
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// NEEDS LIST — the per-job purchasing checklist (Tom, 2026-09-02)
+// ────────────────────────────────────────────────────────────────────────────
+// "each one of those systems need all kinds of ancillary things — it would be
+// really advantageous if i had a spot to check those off the list." Eight LED
+// installs a season, each needing the same dozen ancillaries around the
+// cabinets. A need is a CHECKLIST ITEM, not money: it touches no budget until
+// it is raised onto a PO, and most of them are checked off rather than bought.
+//
+// Gates mirror the PO family exactly: read is any signed-in user; every write
+// is pm-floor AND canEditProject on the need's project — the same pair the PO
+// create/line routes enforce above. Notifications: NONE in v1, deliberately —
+// checking a box on your own list is the definition of a routine edit, and the
+// raise-po moment already writes the accented po.create row everyone reads.
+// ════════════════════════════════════════════════════════════════════════════
+
+async function loadNeed(id, q = pool) {
+  const r = await q.query('SELECT * FROM purchase_needs WHERE id=$1', [id]);
+  if (!r.rows.length) throw notFound(`need ${id} not found`);
+  return dbToNeed(r.rows[0]);
+}
+// The one write gate, asked once per route: pm floor is on the route, the
+// ownership half lives here (same shape as assertCanEdit for POs).
+async function assertCanEditNeed(req, projectId, q = pool) {
+  const project = projectId ? await loadProject(projectId, q) : null;
+  if (!canEditProject(req.session, project)) {
+    throw forbidden('This needs list belongs to a project you do not own — pm (owner) or manager+ required');
+  }
+  return project;
+}
+function readNeedStatus(body) {
+  const s = String(pick(body, 'status') || '');
+  const v = oneOf(s, NEED_STATUSES, null);
+  if (!v) throw badRequest(`status must be one of ${NEED_STATUSES.join(', ')}`);
+  return v;
+}
+
+// GET /api/needs?project_id=&job_id=&show_id=&status=   (api.js listNeeds)
+router.get('/needs', requireAuth, asyncH(async (req, res) => {
+  const rawStatus = req.query.status || '';
+  const status = rawStatus ? oneOf(String(rawStatus), NEED_STATUSES, null) : null;
+  if (rawStatus && !status) throw badRequest(`unknown need status "${rawStatus}"`);
+  const projectId = num(req.query.projectId != null ? req.query.projectId : req.query.project_id, null);
+  const jobId = num(req.query.jobId != null ? req.query.jobId : req.query.job_id, null);
+  const showId = num(req.query.showId != null ? req.query.showId : req.query.show_id, null);
+
+  const params = [];
+  const P = (v) => { params.push(v); return `$${params.length}`; };
+  const where = [];
+  if (status) where.push(`status = ${P(status)}`);
+  if (projectId) where.push(`project_id = ${P(projectId)}`);
+  if (jobId) where.push(`job_id = ${P(jobId)}`);
+  if (showId) where.push(`show_id = ${P(showId)}`);
+  const r = await pool.query(
+    `SELECT * FROM purchase_needs ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     ORDER BY job_id, sort_order, id LIMIT ${P(limitOf(req, 500, 1000))}`, params);
+  res.json(r.rows.map(dbToNeed));
+}));
+
+// POST /api/needs — pm+, same floor as opening a PO.   (api.js createNeed)
+// The job is the anchor; project_id is DERIVED from it (one source of truth —
+// a caller-supplied project that disagrees with the job is a 400, not a fork).
+router.post('/needs', requireAuth, requireRole('pm'), asyncH(async (req, res) => {
+  const jobId = num(pick(req.body, 'job_id'), null);
+  const job = jobId ? await loadJob(jobId) : null;
+  if (!job) throw badRequest(`job ${pick(req.body, 'job_id')} not found`);
+  const claimed = num(pick(req.body, 'project_id'), null);
+  if (claimed && claimed !== job.project_id) {
+    throw badRequest(`project ${claimed} does not match job ${jobId}'s project ${job.project_id}`);
+  }
+  await assertCanEditNeed(req, job.project_id);
+
+  const item = String(pick(req.body, 'item') || '').trim();
+  if (!item) throw badRequest('a need is a named thing — item is required');
+  const qty = num(pick(req.body, 'qty'), 1);
+  if (!(qty > 0)) throw badRequest('qty must be greater than zero');
+  const showId = num(pick(req.body, 'show_id'), null);
+  if (showId) await assertRow('shows', showId, pool, 'show');
+  const category = readCategory(req.body, 'gear');
+  const estCost = money(pick(req.body, 'est_cost'), null);
+  const detail = String(pick(req.body, 'detail') || '');
+
+  const need = await withTx(async (c) => {
+    const tail = await c.query(
+      'SELECT COALESCE(MAX(sort_order),0)+1 AS next FROM purchase_needs WHERE job_id=$1', [job.id]);
+    const r = await c.query(
+      `INSERT INTO purchase_needs (project_id, job_id, show_id, item, detail, qty, est_cost,
+                                   category, sort_order, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [job.project_id, job.id, showId, item.slice(0, 300), detail, money(qty, 1), estCost,
+       category, num(tail.rows[0].next, 1), req.actor]);
+    const mapped = dbToNeed(r.rows[0]);
+    await logActivity(c, {
+      projectId: job.project_id, showId, jobId: job.id, actor: req.actor, action: 'need.add',
+      detail: `${mapped.item} · ${mapped.qty}${estCost != null ? ' × ' + usd(estCost) : ''}`
+    });
+    return mapped;
+  });
+  res.json(need);
+}));
+
+// PUT /api/needs/:id — pm+. A STATUS change is the checkbox: it stamps
+// checked_by / checked_at from the session; reopening clears the stamp and any
+// covering PO (unchecking IS the statement "this is not handled after all").
+router.put('/needs/:id', requireAuth, requireRole('pm'), asyncH(async (req, res) => {
+  const id = idParam(req);
+  const out = await withTx(async (c) => {
+    const need = await loadNeed(id, c);
+    await assertCanEditNeed(req, need.project_id, c);
+
+    const sets = ['updated_at = NOW()'];
+    const params = [need.id];
+    const P = (v) => { params.push(v); return `$${params.length}`; };
+
+    if (has(req.body, 'item')) {
+      const item = String(pick(req.body, 'item') || '').trim();
+      if (!item) throw badRequest('a need is a named thing — item cannot be blank');
+      sets.push(`item = ${P(item.slice(0, 300))}`);
+    }
+    if (has(req.body, 'detail')) sets.push(`detail = ${P(String(pick(req.body, 'detail') || ''))}`);
+    if (has(req.body, 'qty')) {
+      const qty = num(pick(req.body, 'qty'), null);
+      if (!(qty > 0)) throw badRequest('qty must be greater than zero');
+      sets.push(`qty = ${P(money(qty, 1))}`);
+    }
+    if (has(req.body, 'est_cost')) sets.push(`est_cost = ${P(money(pick(req.body, 'est_cost'), null))}`);
+    if (has(req.body, 'category')) sets.push(`category = ${P(readCategory(req.body, need.category))}`);
+    if (has(req.body, 'show_id')) {
+      const sid = num(pick(req.body, 'show_id'), null);
+      if (sid) await assertRow('shows', sid, c, 'show');
+      sets.push(`show_id = ${P(sid)}`);
+    }
+    if (has(req.body, 'sort_order')) sets.push(`sort_order = ${P(num(pick(req.body, 'sort_order'), 0))}`);
+
+    let statusChange = null;
+    if (has(req.body, 'status')) {
+      const status = readNeedStatus(req.body);
+      if (status !== need.status) {
+        statusChange = status;
+        sets.push(`status = ${P(status)}`);
+        if (status === 'open') {
+          sets.push('checked_by = NULL', 'checked_at = NULL', 'covered_by_po_id = NULL');
+        } else {
+          sets.push(`checked_by = ${P(req.session.username)}`, 'checked_at = NOW()');
+        }
+      }
+    }
+    if (sets.length === 1) throw badRequest('nothing to update');
+
+    const r = await c.query(
+      `UPDATE purchase_needs SET ${sets.join(', ')} WHERE id = $1 RETURNING *`, params);
+    const mapped = dbToNeed(r.rows[0]);
+    await logActivity(c, {
+      projectId: mapped.project_id, showId: mapped.show_id, jobId: mapped.job_id,
+      actor: req.actor, action: statusChange ? 'need.status' : 'need.update',
+      detail: statusChange
+        ? `${mapped.item} → ${statusChange === 'na' ? 'not needed' : statusChange}`
+        : `${mapped.item} · ${mapped.qty}${mapped.est_cost != null ? ' × ' + usd(mapped.est_cost) : ''}`
+    });
+    return mapped;
+  });
+  res.json(out);
+}));
+
+// DELETE /api/needs/:id — same floor as removing a PO line (pm+ on your own
+// project). A raised need's po_line survives it; the checklist row is ours.
+router.delete('/needs/:id', requireAuth, requireRole('pm'), asyncH(async (req, res) => {
+  const id = idParam(req);
+  const out = await withTx(async (c) => {
+    const need = await loadNeed(id, c);
+    await assertCanEditNeed(req, need.project_id, c);
+    await c.query('DELETE FROM purchase_needs WHERE id=$1', [need.id]);
+    await logActivity(c, {
+      projectId: need.project_id, showId: need.show_id, jobId: need.job_id,
+      actor: req.actor, action: 'need.delete', detail: need.item
+    });
+    return { ok: true, id: need.id, job_id: need.job_id };
+  });
+  res.json(out);
+}));
+
+// POST /api/jobs/:id/needs/seed — drop the standard LED ancillaries onto a
+// job. IDEMPOTENT BY ITEM NAME: an item already on the job — in ANY status —
+// is skipped, because a covered or n/a row is a decision someone made and
+// re-adding it as open would quietly overrule them. Returns what it added and
+// what it left alone, so the click is honest about what it did.
+router.post('/jobs/:id/needs/seed', requireAuth, requireRole('pm'), asyncH(async (req, res) => {
+  const jobId = idParam(req);
+  const job = await loadJob(jobId);
+  if (!job) throw notFound(`job ${jobId} not found`);
+  await assertCanEditNeed(req, job.project_id);
+
+  const out = await withTx(async (c) => {
+    const existing = await c.query(
+      'SELECT item FROM purchase_needs WHERE job_id=$1', [job.id]);
+    const taken = new Set(existing.rows.map((x) => String(x.item).toLowerCase()));
+    const tail = await c.query(
+      'SELECT COALESCE(MAX(sort_order),0) AS max FROM purchase_needs WHERE job_id=$1', [job.id]);
+    let order = num(tail.rows[0].max, 0);
+
+    const added = [];
+    const skipped = [];
+    for (const t of LED_ANCILLARIES) {
+      if (taken.has(t.item.toLowerCase())) { skipped.push(t.item); continue; }
+      order += 1;
+      const r = await c.query(
+        `INSERT INTO purchase_needs (project_id, job_id, item, detail, qty, category,
+                                     sort_order, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        [job.project_id, job.id, t.item, t.detail, money(t.qty, 1), t.category, order, req.actor]);
+      added.push(dbToNeed(r.rows[0]));
+    }
+    if (added.length) {
+      await logActivity(c, {
+        projectId: job.project_id, jobId: job.id, actor: req.actor, action: 'need.seed',
+        detail: `seeded ${added.length} LED ancillar${added.length === 1 ? 'y' : 'ies'}` +
+                (skipped.length ? ` (${skipped.length} already listed)` : '')
+      });
+    }
+    return { added, skipped };
+  });
+  res.json(out);
+}));
+
+// POST /api/needs/raise-po — {job_id, need_ids[], vendor?}: ONE PO at
+// 'needed', one line per need, every need stamped covered — ALL IN ONE
+// TRANSACTION. A need that is not open, or that belongs to a different job,
+// poisons the whole call: partial success here would leave the checklist and
+// the PO telling two different stories about the same hardware.
+router.post('/needs/raise-po', requireAuth, requireRole('pm'), asyncH(async (req, res) => {
+  const jobId = num(pick(req.body, 'job_id'), null);
+  const rawIds = pick(req.body, 'need_ids');
+  if (!Array.isArray(rawIds) || !rawIds.length) throw badRequest('need_ids must be a non-empty array');
+  const ids = [];
+  for (const v of rawIds) {
+    const id = num(v, null);
+    if (!(id > 0)) throw badRequest(`"${v}" is not a need id`);
+    if (!ids.includes(id)) ids.push(id);
+  }
+  const job = jobId ? await loadJob(jobId) : null;
+  if (!job) throw badRequest(`job ${pick(req.body, 'job_id')} not found`);
+  const vendor = String(pick(req.body, 'vendor') || 'TBD').slice(0, 200);
+
+  const out = await withTx(async (c) => {
+    const project = await assertCanEditNeed(req, job.project_id, c);
+
+    // validate EVERY need before writing ANYTHING, naming the offender
+    const rows = await c.query('SELECT * FROM purchase_needs WHERE id = ANY($1::int[])', [ids]);
+    const byId = new Map(rows.rows.map((r) => [r.id, dbToNeed(r)]));
+    const needs = [];
+    for (const id of ids) {
+      const nd = byId.get(id);
+      if (!nd) throw badRequest(`need ${id} not found`);
+      if (nd.job_id !== job.id) {
+        throw badRequest(`need ${id} (${nd.item}) belongs to job ${nd.job_id}, not job ${job.id} — nothing was raised`);
+      }
+      if (nd.status !== 'open') {
+        throw badRequest(`need ${id} (${nd.item}) is ${nd.status === 'na' ? 'marked n/a' : nd.status} — only open needs can raise a PO; nothing was raised`);
+      }
+      needs.push(nd);
+    }
+
+    const row = await insertPO(c, {
+      supplied: '',
+      insert: async (poNumber) => (await c.query(
+        `INSERT INTO purchase_orders (po_number, vendor, project_id, job_id, status, created_by, memo)
+         VALUES ($1,$2,$3,$4,'needed',$5,$6) RETURNING *`,
+        [poNumber, vendor, job.project_id, job.id, req.actor,
+         `Raised from the needs list — ${needs.length} item${needs.length === 1 ? '' : 's'}`])).rows[0]
+    });
+
+    // one job for every line (validated above), so ownership derives once
+    const ownership = await deriveOwnership(c, job.id);
+    for (const nd of needs) {
+      await c.query(
+        `INSERT INTO po_lines (po_id, item, detail, qty, unit_cost, category, job_id, show_id, ownership)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [row.id, nd.item, nd.detail, money(nd.qty, 1), money(nd.est_cost, 0),
+         nd.category, nd.job_id, nd.show_id, ownership]);
+      await c.query(
+        `UPDATE purchase_needs
+         SET status='covered', covered_by_po_id=$2, checked_by=$3, checked_at=NOW(), updated_at=NOW()
+         WHERE id=$1`, [nd.id, row.id, req.session.username]);
+    }
+
+    await logActivity(c, {
+      projectId: project ? project.id : job.project_id, poId: row.id, jobId: job.id,
+      actor: req.actor, action: 'po.create', accent: true,
+      detail: `opened ${row.po_number} for ${vendor} — raised from ${needs.length} needs-list item${needs.length === 1 ? '' : 's'}`
+    });
+
+    const after = await c.query(
+      'SELECT * FROM purchase_needs WHERE id = ANY($1::int[]) ORDER BY sort_order, id', [ids]);
+    return { po: (await hydrate(c, [row]))[0], needs: after.rows.map(dbToNeed) };
   });
   res.json(out);
 }));

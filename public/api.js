@@ -286,11 +286,11 @@ var SR = (function () {
      NOTES_BY_ID, SCHEDULE_BY_ID, CREW_BY_ID, DELIVERABLES_BY_ID, ROSTER, USERS_BY_ID,
      /* F2/F3 — a new store that is not cleared here is a store that leaks the
         DEMO fixture into a real session on login. */
-     REPORTS_BY_ID, NOTIF_BY_ID,
+     REPORTS_BY_ID, NOTIF_BY_ID, NEEDS_BY_ID,
      NOTE_READS].forEach(clearMap);
     [PROJECTS, ALL_SHOWS, ALL_JOBS, ALL_EXPENSES, ALL_POS, PO_LINES, ALL_NOTES,
      ALL_DELIVERABLES, USERS, BUDGET_LINES,
-     TECH_REPORTS, NOTIF_OUTBOX].forEach(function (a) { a.length = 0; });
+     TECH_REPORTS, NOTIF_OUTBOX, ALL_NEEDS].forEach(function (a) { a.length = 0; });
     NOTIF_PREFS = {};
     /* mentionLookup() memoizes name->username off USERS on first use. USERS is
        emptied above, but the cache is not derived state the maps own — so
@@ -455,6 +455,15 @@ var SR = (function () {
       if (!n) return n;
       var rec = keep(NOTIF_BY_ID, n);
       push1(NOTIF_OUTBOX, rec);
+      return rec;
+    },
+    /* needs-list rows — the job drill-in's checklist, the cockpit's "Still
+       needed" rollup and the Gear-tab chip all read the flat store through
+       needsForJob() / openNeedsByJob(), the demo way. */
+    need: function (nd) {
+      if (!nd) return nd;
+      var rec = keep(NEEDS_BY_ID, nd);
+      push1(ALL_NEEDS, rec);
       return rec;
     },
     list: function (fn) { return function (rows) { return (rows || []).map(fn); }; }
@@ -2012,6 +2021,166 @@ var api = (function () {
       }
       return SR.post('/api/pos/' + Number(id) + '/approve', {}, { notifyOk: true })
         .then(function (r) { return A.po(r && r.po ? r.po : r); });
+    },
+
+    /* ================= NEEDS LIST =======================================
+       The per-job purchasing checklist (Tom, 2026-09-02). Deliberately sends
+       NO notifications in v1 — checking your own list is a routine edit.
+       GET  /api/needs                -> listNeeds(filters)
+       POST /api/needs                -> createNeed(body)
+       PUT  /api/needs/:id            -> updateNeed(id, body)   [status changes
+                                         stamp checked_by/checked_at server-side]
+       DELETE /api/needs/:id          -> deleteNeed(id)
+       POST /api/jobs/:id/needs/seed  -> seedNeeds(jobId)   [idempotent]
+       POST /api/needs/raise-po       -> raiseNeedsPO(jobId, needIds, vendor)
+       ==================================================================== */
+    listNeeds: function (filters) {
+      filters = filters || {};
+      if (!API()) {
+        var out = ALL_NEEDS.filter(function (nd) {
+          if (filters.status && nd.status !== filters.status) return false;
+          if (filters.project_id && nd.project_id !== Number(filters.project_id)) return false;
+          if (filters.job_id && nd.job_id !== Number(filters.job_id)) return false;
+          if (filters.show_id && nd.show_id !== Number(filters.show_id)) return false;
+          return true;
+        });
+        return ok(out.slice());
+      }
+      return SR.get('/api/needs' + SR.qs({ status: filters.status, project_id: filters.project_id,
+                                           job_id: filters.job_id, show_id: filters.show_id, limit: 500 }))
+        .then(function (rows) { return (rows || []).map(A.need); });
+    },
+    createNeed: function (body) {
+      if (!body || !body.job_id) return fail('a need belongs to a job');
+      if (!body.item || !String(body.item).trim()) return fail('a need is a named thing — item is required');
+      if (!API()) {
+        var j = JOBS_BY_ID[Number(body.job_id)];
+        if (!j) return fail('job ' + body.job_id + ' not found');
+        var nd = mkNeed({ job: j.id, show: body.show_id ? Number(body.show_id) : null,
+          item: String(body.item).trim(), detail: body.detail || '',
+          qty: Number(body.qty) > 0 ? Number(body.qty) : 1,
+          est: body.est_cost == null || body.est_cost === '' ? null : Number(body.est_cost),
+          category: body.category || 'gear', by: ME });
+        return ok(nd);
+      }
+      return SR.post('/api/needs', body, { noNotify: true }).then(A.need);
+    },
+    /* status is the checkbox: covered / na stamp who + when; open clears the
+       stamp AND any covering PO — unchecking says "not handled after all" */
+    updateNeed: function (id, body) {
+      if (!API()) {
+        var nd = NEEDS_BY_ID[Number(id)];
+        if (!nd) return fail('need ' + id + ' not found');
+        if (body.status !== undefined && NEED_STATUSES.indexOf(body.status) < 0) {
+          return fail('status must be one of ' + NEED_STATUSES.join(', '));
+        }
+        ['item', 'detail', 'category'].forEach(function (k) {
+          if (body[k] !== undefined) nd[k] = body[k];
+        });
+        if (body.qty !== undefined && Number(body.qty) > 0) nd.qty = Number(body.qty);
+        if (body.est_cost !== undefined) {
+          nd.est_cost = body.est_cost == null || body.est_cost === '' ? null : Number(body.est_cost);
+        }
+        if (body.show_id !== undefined) nd.show_id = body.show_id ? Number(body.show_id) : null;
+        if (body.status !== undefined && body.status !== nd.status) {
+          nd.status = body.status;
+          if (body.status === 'open') {
+            nd.checked_by = null; nd.checked_at = null; nd.covered_by_po_id = null;
+          } else {
+            nd.checked_by = ME; nd.checked_at = TODAY_ISO;
+          }
+        }
+        nd.updated_at = TODAY_ISO;
+        return ok(nd);
+      }
+      return SR.put('/api/needs/' + Number(id), body, { noNotify: true }).then(A.need);
+    },
+    deleteNeed: function (id) {
+      if (!API()) {
+        var nd = NEEDS_BY_ID[Number(id)];
+        if (!nd) return fail('need ' + id + ' not found');
+        delete NEEDS_BY_ID[nd.id];
+        var i = ALL_NEEDS.indexOf(nd);
+        if (i >= 0) ALL_NEEDS.splice(i, 1);
+        return ok({ ok: true, id: nd.id, job_id: nd.job_id });
+      }
+      return SR.del('/api/needs/' + Number(id), null, { noNotify: true }).then(function (r) {
+        var cached = NEEDS_BY_ID[Number(id)];
+        if (cached) {
+          delete NEEDS_BY_ID[cached.id];
+          var i2 = ALL_NEEDS.indexOf(cached);
+          if (i2 >= 0) ALL_NEEDS.splice(i2, 1);
+        }
+        return r;
+      });
+    },
+    /* idempotent: an item name already on the job (any status) is skipped —
+       a covered or n/a row is a decision, and re-adding it would overrule it */
+    seedNeeds: function (jobId) {
+      if (!API()) {
+        var j = JOBS_BY_ID[Number(jobId)];
+        if (!j) return fail('job ' + jobId + ' not found');
+        var have = {};
+        needsForJob(j.id).forEach(function (nd) { have[nd.item.toLowerCase()] = 1; });
+        var added = [], skipped = [];
+        LED_NEEDS_TEMPLATE.forEach(function (t) {
+          if (have[t.item.toLowerCase()]) { skipped.push(t.item); return; }
+          added.push(mkNeed({ job: j.id, item: t.item, detail: t.detail, qty: t.qty,
+                              category: t.category, by: ME }));
+        });
+        return ok({ added: added, skipped: skipped });
+      }
+      return SR.post('/api/jobs/' + Number(jobId) + '/needs/seed', {}, { noNotify: true })
+        .then(function (r) {
+          (r && r.added || []).forEach(A.need);
+          return r;
+        });
+    },
+    /* ONE PO at 'needed', one line per need, every need stamped covered — one
+       transaction server-side. A non-open need or one from another job poisons
+       the whole call; the server names the offender. */
+    raiseNeedsPO: function (jobId, needIds, vendor) {
+      if (!Array.isArray(needIds) || !needIds.length) return fail('pick at least one open item');
+      if (!API()) {
+        var j = JOBS_BY_ID[Number(jobId)];
+        if (!j) return fail('job ' + jobId + ' not found');
+        var needs = [];
+        for (var i = 0; i < needIds.length; i++) {
+          var nd = NEEDS_BY_ID[Number(needIds[i])];
+          if (!nd) return fail('need ' + needIds[i] + ' not found');
+          if (nd.job_id !== j.id) {
+            return fail('need ' + nd.id + ' (' + nd.item + ') belongs to job ' + nd.job_id +
+              ', not job ' + j.id + ' — nothing was raised');
+          }
+          if (nd.status !== 'open') {
+            return fail('need ' + nd.id + ' (' + nd.item + ') is ' +
+              (nd.status === 'na' ? 'marked n/a' : nd.status) + ' — only open needs can raise a PO; nothing was raised');
+          }
+          needs.push(nd);
+        }
+        var po = mkPO({ num: 'PO-26-0' + (50 + _poSeq), vendor: vendor || 'TBD',
+          project: j.project_id, job: j.id, status: 'needed', by: ME,
+          memo: 'Raised from the needs list — ' + needs.length + ' item' + (needs.length === 1 ? '' : 's') });
+        needs.forEach(function (nd2) {
+          mkPOLine(po, { item: nd2.item, detail: nd2.detail, qty: nd2.qty,
+            unit: nd2.est_cost || 0, category: nd2.category, job: nd2.job_id, show: nd2.show_id });
+          nd2.status = 'covered';
+          nd2.covered_by_po_id = po.id;
+          nd2.checked_by = ME;
+          nd2.checked_at = TODAY_ISO;
+          nd2.updated_at = TODAY_ISO;
+        });
+        po.activity.unshift(mkAct(ME, 'opened ' + po.po_number + ' from the needs list',
+          needs.length + ' item' + (needs.length === 1 ? '' : 's') + ' — needed, quote it out', 0, _nowHM(), true));
+        return ok({ po: po, needs: needs.slice() });
+      }
+      return SR.post('/api/needs/raise-po',
+        { job_id: Number(jobId), need_ids: needIds.map(Number), vendor: vendor || undefined },
+        { noNotify: true })
+        .then(function (r) {
+          var po2 = A.po(r && r.po);
+          return { po: po2, needs: (r && r.needs || []).map(A.need) };
+        });
     },
 
     /* ================= NOTES + @MENTIONS ================================

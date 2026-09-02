@@ -507,6 +507,116 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('the PO approval threshold is server config, default 5000 (punch 28)',
      threshold.status === 200 && Number(threshold.body.value) === 5000, threshold.body);
 
+  // ── the NEEDS LIST (Tom, 2026-09-02) — per-job ancillaries checklist ──────
+  const { LED_ANCILLARIES } = require('../lib/enums');
+  const seed1 = await POST(`/api/jobs/${J}/needs/seed`, {}, { token: A });
+  ok('POST /api/jobs/:id/needs/seed drops the standard LED template',
+     seed1.status === 200 && (seed1.body.added || []).length === LED_ANCILLARIES.length,
+     { added: (seed1.body.added || []).length, want: LED_ANCILLARIES.length });
+  const seed2 = await POST(`/api/jobs/${J}/needs/seed`, {}, { token: A });
+  ok('THE SEED IS IDEMPOTENT — a second seed adds 0 and skips every item',
+     seed2.status === 200 && (seed2.body.added || []).length === 0
+     && (seed2.body.skipped || []).length === LED_ANCILLARIES.length, seed2.body);
+
+  const techNeed = await POST('/api/needs', { job_id: J, item: 'tech-made need' }, { token: TECHT });
+  ok('a tech is below the needs floor — 403, same rank gate as PO creation',
+     techNeed.status === 403, techNeed.body);
+  const pm2Need = await POST('/api/needs', { job_id: J, item: 'foreign-pm need' }, { token: PM2T });
+  ok('...and a pm who owns NOTHING fails the ownership half', pm2Need.status === 403, pm2Need.body);
+  const techSeed = await POST(`/api/jobs/${J}/needs/seed`, {}, { token: TECHT });
+  ok('...the seed carries the same floor', techSeed.status === 403, techSeed.body);
+
+  const pmNeed = await POST('/api/needs', { job_id: J, item: TAG + ' spare data drums', qty: 2,
+    est_cost: 300, category: 'gear', show_id: S }, { token: PMT });
+  ok('the OWNING pm adds a custom item, pinned to the show, est carried',
+     pmNeed.status === 200 && pmNeed.body.show_id === S && pmNeed.body.est_cost === 300
+     && pmNeed.body.status === 'open', pmNeed.body);
+  const ND = pmNeed.body.id;
+
+  const badNeedStatus = await PUT(`/api/needs/${ND}`, { status: 'bought' }, { token: PMT });
+  ok('an unknown need status is 400 (oneOf whitelist)', badNeedStatus.status === 400, badNeedStatus.body);
+  const checked = await PUT(`/api/needs/${ND}`, { status: 'covered' }, { token: PMT });
+  ok('checking an item off STAMPS checked_by/checked_at from the session',
+     checked.status === 200 && checked.body.status === 'covered'
+     && checked.body.checked_by === pmUser && !!checked.body.checked_at, checked.body);
+  const reopened = await PUT(`/api/needs/${ND}`, { status: 'open' }, { token: PMT });
+  ok('...and reopening CLEARS the stamp and any covering PO',
+     reopened.status === 200 && reopened.body.status === 'open'
+     && !reopened.body.checked_by && !reopened.body.checked_at
+     && !reopened.body.covered_by_po_id, reopened.body);
+
+  // raise-po: two open items become ONE PO at needed, in one transaction
+  const openList = await GET(`/api/needs?job_id=${J}&status=open`, { token: A });
+  ok('GET /api/needs filters by job + status', openList.status === 200
+     && openList.body.length > 2 && openList.body.every((x) => x.status === 'open'),
+     openList.body.length);
+  const raiseIds = [ND, openList.body.find((x) => x.id !== ND).id];
+  const raised = await POST('/api/needs/raise-po', { job_id: J, need_ids: raiseIds }, { token: PMT });
+  ok('POST /api/needs/raise-po opens ONE PO at needed, vendor TBD',
+     raised.status === 200 && raised.body.po && raised.body.po.status === 'needed'
+     && raised.body.po.vendor === 'TBD', raised.body.po && raised.body.po.status);
+  ok('...one line per need — qty, est→unit_cost, category, show carried',
+     (raised.body.po.lines || []).length === 2
+     && raised.body.po.lines.some((l) => l.unit_cost === 300 && l.qty === 2 && l.show_id === S),
+     raised.body.po.lines);
+  ok('...and every raised need reads covered BY THAT PO',
+     (raised.body.needs || []).length === 2 && raised.body.needs.every(
+       (x) => x.status === 'covered' && x.covered_by_po_id === raised.body.po.id
+              && x.checked_by === pmUser), raised.body.needs);
+  const raiseAct = await pool.query(
+    `SELECT detail FROM activity WHERE po_id=$1 AND action='po.create'`, [raised.body.po.id]);
+  ok('...the raise logged its po.create row naming the needs list',
+     raiseAct.rows.length === 1 && /needs-list/.test(raiseAct.rows[0].detail), raiseAct.rows);
+
+  // TRANSACTIONALITY — one bad need poisons the WHOLE call, nothing lands
+  const j2res = await POST('/api/jobs', { project_id: P, name: TAG + ' second job' }, { token: A });
+  const J2 = j2res.body.id;
+  const foreignNeed = await POST('/api/needs', { job_id: J2, item: TAG + ' foreign need' }, { token: A });
+  const goodOpen = (await GET(`/api/needs?job_id=${J}&status=open`, { token: A })).body[0];
+  const posBefore = (await pool.query('SELECT COUNT(*)::int AS n FROM purchase_orders')).rows[0].n;
+  const poisoned = await POST('/api/needs/raise-po',
+    { job_id: J, need_ids: [goodOpen.id, foreignNeed.body.id] }, { token: A });
+  ok('a need from ANOTHER JOB poisons raise-po — 400 naming the offender',
+     poisoned.status === 400 && String(poisoned.body.error).includes(`need ${foreignNeed.body.id}`),
+     poisoned.body);
+  const posAfter = (await pool.query('SELECT COUNT(*)::int AS n FROM purchase_orders')).rows[0].n;
+  const goodAfter = (await GET(`/api/needs?job_id=${J}`, { token: A })).body
+    .find((x) => x.id === goodOpen.id);
+  ok('...and NOTHING was created — no PO, and the good need is still open',
+     posAfter === posBefore && goodAfter.status === 'open' && !goodAfter.covered_by_po_id,
+     { posBefore, posAfter, goodAfter });
+  const notOpen = await POST('/api/needs/raise-po', { job_id: J, need_ids: [ND] }, { token: A });
+  ok('a need that is already covered refuses the whole call too',
+     notOpen.status === 400 && String(notOpen.body.error).includes(`need ${ND}`), notOpen.body);
+
+  // delete: same floor as a PO line, then the row is gone
+  const techDelNeed = await DEL(`/api/needs/${foreignNeed.body.id}`, { token: TECHT });
+  ok('a tech may not delete a need (PO-line floor)', techDelNeed.status === 403, techDelNeed.body);
+  const delNeed = await DEL(`/api/needs/${foreignNeed.body.id}`, { token: A });
+  ok('DELETE /api/needs/:id', delNeed.status === 200 && delNeed.body.ok === true, delNeed.body);
+
+  const needActs = await pool.query(
+    `SELECT DISTINCT action FROM activity WHERE job_id=$1 AND action LIKE 'need.%'`, [J]);
+  const needActSet = needActs.rows.map((r) => r.action);
+  ok('seed / status / add wrote their need.* activity rows',
+     needActSet.includes('need.seed') && needActSet.includes('need.status')
+     && needActSet.includes('need.add'), needActSet);
+
+  // cascades: a deleted show NULLS the pin; a deleted job takes its checklist
+  const tmpShow = await POST('/api/shows', { project_id: P, name: TAG + ' needs-pin probe',
+    event_date: '2026-12-01', stage: 'planning' }, { token: A });
+  const pinned = await POST('/api/needs', { job_id: J, item: TAG + ' pinned probe',
+    show_id: tmpShow.body.id }, { token: A });
+  await DEL(`/api/shows/${tmpShow.body.id}`, { token: A });
+  const unpinned = await pool.query('SELECT show_id FROM purchase_needs WHERE id=$1', [pinned.body.id]);
+  ok('deleting a show NULLS purchase_needs.show_id (the row survives)',
+     unpinned.rows.length === 1 && unpinned.rows[0].show_id === null, unpinned.rows);
+  await POST('/api/needs', { job_id: J2, item: TAG + ' orphan probe' }, { token: A });
+  const delJ2 = await DEL(`/api/jobs/${J2}`, { token: A });
+  const j2Orphans = await pool.query('SELECT COUNT(*)::int AS n FROM purchase_needs WHERE job_id=$1', [J2]);
+  ok('deleting a job takes its needs checklist with it — zero orphans',
+     delJ2.status === 200 && j2Orphans.rows[0].n === 0, j2Orphans.rows[0]);
+
   // notes (31-37)
   const note = await POST('/api/notes', { anchor_type: 'show', anchor_id: S,
     body: `Power tie-in is the risk here. @${pmUser} can you confirm the dock window?` }, { token: A });
@@ -3412,7 +3522,8 @@ const DEL = (p, o) => call('DELETE', p, o);
      && before.jobs > 0 && before.budget_lines > 0 && before.notes > 0 && before.note_reads > 0
      && before.note_mentions > 0 && before.schedule_items > 0 && before.crew_assignments > 0
      && before.deliverables > 0 && before.milestones > 0 && before.proposals > 0
-     && before.purchase_orders > 0 && before.po_lines > 0 && before.activity > 0
+     && before.purchase_orders > 0 && before.po_lines > 0 && before.purchase_needs > 0
+     && before.activity > 0
      && before.tech_reports > 0 && before.notification_outbox > 0,
      before);
   // add the remaining child types so the cascade is exercised in full
@@ -3543,6 +3654,7 @@ async function childCounts(projectId) {
     bookings:         await q(`SELECT COUNT(*) n FROM bookings WHERE show_id ${inShows}`),
     purchase_orders:  await q('SELECT COUNT(*) n FROM purchase_orders WHERE project_id=$1'),
     po_lines:         await q(`SELECT COUNT(*) n FROM po_lines WHERE po_id IN (SELECT id FROM purchase_orders WHERE project_id=$1)`),
+    purchase_needs:   await q('SELECT COUNT(*) n FROM purchase_needs WHERE project_id=$1'),
     notes:            await q('SELECT COUNT(*) n FROM notes WHERE project_id=$1'),
     note_reads:       await q(`SELECT COUNT(*) n FROM note_reads WHERE note_id IN (SELECT id FROM notes WHERE project_id=$1)`),
     note_mentions:    await q(`SELECT COUNT(*) n FROM note_mentions WHERE note_id IN (SELECT id FROM notes WHERE project_id=$1)`),

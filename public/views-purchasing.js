@@ -156,6 +156,7 @@ function viewPurchasing(o) {
     '<div class="ov" style="grid-template-columns:1.5fr 1fr;margin-bottom:20px">' +
     poRiskPanel(o.risks) +
     '<div style="display:flex;flex-direction:column;gap:16px">' + poApprovalQueue(o.approvals) +
+    needsRollupPanel() +
     '<div class="hint" style="margin-top:0">' + icon('bolt') + '<span>Your agent can draft these — <b>PO-26-049</b> below came out of the <b>LOVB season planning</b> meeting. Once Teams transcripts go live, “derive the purchase list from this meeting” files straight onto this board as a draft.</span></div>' +
     '</div></div>' +
     boardHead + poBoard(o.pos);
@@ -405,7 +406,16 @@ function poGearStrip(show) {
       poStatusPill(po.status) + when +
       '<span class="money" style="font-size:12.5px">' + esc(fmtMoney(r.amt)) + '</span></div>';
   }).join('');
-  return '<div class="panel" style="margin-bottom:16px"><h3>Incoming hardware · purchase orders</h3><div class="next-list">' + items + '</div>' +
+  /* the needs chip: ancillaries pinned to THIS show and still open — a count,
+     not a panel; the checklist itself lives on the job drill-in */
+  var openNeeds = openNeedsForShow(show.id);
+  var needsChip = openNeeds.length
+    ? '<span class="pill warn" style="padding:1px 8px;font-size:10px" title="' +
+      esc(openNeeds.map(function (nd) { return nd.item; }).join(' · ') + ' — open on the needs checklist') + '">' +
+      openNeeds.length + ' need' + (openNeeds.length === 1 ? '' : 's') + ' open</span>'
+    : '';
+  return '<div class="panel" style="margin-bottom:16px"><h3>Incoming hardware · purchase orders' +
+    (needsChip ? '<span style="flex:1"></span>' + needsChip : '') + '</h3><div class="next-list">' + items + '</div>' +
     '<div class="perm-note">' + inlineIcon('truck') + ' Watched against this show’s load-in (' + esc(fmtDate(show.load_in_date)) + '). Received inventory-owned gear routes to <b>Flex</b> as pull-able E360 stock.</div></div>';
 }
 
@@ -434,4 +444,134 @@ function poSeasonFlag(show) {
   return ' <span class="pill ' + (crit ? 'crit' : 'warn') + '" style="padding:1px 8px;font-size:10px" title="' +
     esc(risks.map(function (r) { return r.po.po_number + ' — ' + r.why; }).join(' · ')) + '">' +
     inlineIcon('truck') + ' PO</span>';
+}
+
+/* ============================================================================
+   NEEDS LIST — the per-job ancillary checklist (Tom, 2026-09-02)
+   ----------------------------------------------------------------------------
+   "each one of those systems need all kinds of ancillary things — it would be
+   really advantageous if i had a spot to check those off the list." Eight LED
+   installs a season, each needing the same dozen things around the cabinets.
+   needsPanel()      — the checklist on the job drill-in (views-finance.js
+                       mounts it): seed · check off · n/a · add · raise a PO.
+   needsRollupPanel()— the Purchasing cockpit's "Still needed": open items and
+                       their est cost grouped by job, click-through to the job.
+   A need is a checklist item, not money — nothing hits a budget until it is
+   raised onto a PO, and the covered-by tag then links straight to the order.
+   ========================================================================== */
+function needEstTotal(nd) { return nd.est_cost == null ? null : (nd.qty || 1) * nd.est_cost; }
+
+/* what stands in the "covered by" column: the PO chip, the hand-check, or the
+   struck n/a decision — each carrying who and when in the title */
+function needStatusCell(nd) {
+  if (nd.status === 'covered') {
+    var po = nd.covered_by_po_id ? POS_BY_ID[nd.covered_by_po_id] : null;
+    if (po) {
+      return '<button class="tag" style="cursor:pointer" title="' +
+        esc('Covered by ' + po.po_number + ' · ' + po.vendor +
+            (nd.checked_by ? ' — raised by ' + userName(nd.checked_by) : '')) + '" ' +
+        act('openPO', po.id) + '>' + inlineIcon('cart') + ' ' + esc(po.po_number) + '</button>';
+    }
+    if (nd.covered_by_po_id) {
+      return '<button class="tag" style="cursor:pointer" ' + act('openPO', nd.covered_by_po_id) +
+        '>' + inlineIcon('cart') + ' PO #' + Number(nd.covered_by_po_id) + '</button>';
+    }
+    return '<span class="mini" title="' + esc('Checked off by hand — ordered or handled outside the list' +
+      (nd.checked_by ? ' · ' + userName(nd.checked_by) : '')) + '">' + inlineIcon('checkC') + ' handled</span>';
+  }
+  if (nd.status === 'na') {
+    return '<span class="mini dep" title="' + esc('Not needed on this system' +
+      (nd.checked_by ? ' — ' + userName(nd.checked_by) : '')) + '">n/a</span>';
+  }
+  return '<span class="mini dep" title="Still needs buying or a decision">open</span>';
+}
+
+function needRow(nd) {
+  var na = nd.status === 'na';
+  var covered = nd.status === 'covered';
+  var s = nd.show_id ? SHOWS_BY_ID[nd.show_id] : null;
+  var struck = na ? 'text-decoration:line-through;color:var(--muted)' : '';
+  return '<tr>' +
+    '<td style="width:28px"><button class="chk' + (covered ? ' on' : '') + '" title="' +
+      (covered ? 'Uncheck — this is not handled after all' : na ? 'Marked n/a — restore it below' : 'Check off — handled outside a PO') + '"' +
+      (na ? ' disabled style="opacity:.35;cursor:default"' : ' ' + act('needToggle', nd.id)) + '>' +
+      icon('check') + '</button></td>' +
+    '<td><b style="font-weight:600;' + struck + '">' + esc(nd.item) + '</b>' +
+      (nd.detail ? '<span style="display:block;color:var(--muted);font-size:11px;' + (na ? 'text-decoration:line-through' : '') + '">' + esc(nd.detail) + '</span>' : '') +
+      (s ? '<span class="mini" style="margin-top:3px">' + esc(showLabel(s)) + '</span>' : '') + '</td>' +
+    '<td class="money" style="color:var(--text-2)">' + esc(nd.qty) + '</td>' +
+    '<td class="money" style="color:var(--text-2)">' + esc(nd.est_cost == null ? '—' : fmtMoney(needEstTotal(nd))) + '</td>' +
+    '<td><span class="tag">' + esc(BUDGET_CATS[nd.category] || nd.category) + '</span></td>' +
+    '<td>' + needStatusCell(nd) + '</td>' +
+    '<td style="white-space:nowrap;text-align:right">' +
+      '<button class="iconbtn" title="' + (na ? 'Restore — it is needed after all' : 'Not needed on this system (n/a)') + '" ' +
+        act('needNa', nd.id) + '>' + icon(na ? 'plus' : 'x') + '</button> ' +
+      '<button class="iconbtn" title="Edit this item" ' + act('needEdit', nd.id) + '>' + icon('pencil') + '</button> ' +
+      '<button class="iconbtn" title="Delete this item" ' + act('needDelete', nd.id) + '>' + icon('trash') + '</button>' +
+    '</td></tr>';
+}
+
+/* the inline add row — a checklist grows one line at a time, no modal */
+function needAddRow(jobId) {
+  var catOpts = BUDGET_CAT_ORDER.map(function (c) {
+    return '<option value="' + esc(c) + '"' + (c === 'gear' ? ' selected' : '') + '>' + esc(BUDGET_CATS[c]) + '</option>';
+  }).join('');
+  return '<tr><td></td>' +
+    '<td><input id="ndItem" class="cell-in" placeholder="add an item this system needs"></td>' +
+    '<td><input id="ndQty" class="cell-in" type="number" min="1" value="1" style="width:56px"></td>' +
+    '<td><input id="ndEst" class="cell-in" type="number" min="0" placeholder="est $" style="width:84px"></td>' +
+    '<td><select id="ndCat" class="cell-in">' + catOpts + '</select></td>' +
+    '<td colspan="2" style="text-align:right"><button class="btn sm ghost" ' + act('needAddCommit', jobId) + '>' +
+      icon('plus') + 'Add</button></td></tr>';
+}
+
+function needsPanel(job) {
+  var rows = needsForJob(job.id);
+  var open = rows.filter(function (nd) { return nd.status === 'open'; });
+  var openEst = open.reduce(function (a, nd) { return a + (needEstTotal(nd) || 0); }, 0);
+
+  if (!rows.length) {
+    return '<div class="card"><div class="card-h"><h3>Needs · ancillaries checklist</h3></div>' +
+      '<div class="empty" style="padding:22px;line-height:1.6">Nothing listed yet.<br>' +
+      '<span style="color:var(--muted);font-size:12px">Every LED system needs the same dozen things around the ' +
+      'cabinets — power distro, processors, data runs, rigging, spares, freight. Seed the standard list and ' +
+      'check them off, or add items one at a time below.</span>' +
+      '<div style="margin-top:14px"><button class="btn primary" ' + act('needSeed', job.id) + '>' +
+      icon('plus') + 'Seed LED ancillaries</button></div></div>' +
+      '<div class="tbl-wrap"><table class="tbl"><tbody>' + needAddRow(job.id) + '</tbody></table></div></div>';
+  }
+
+  return '<div class="card"><div class="card-h"><h3>Needs · ' + open.length + ' open</h3>' +
+    (open.length && openEst ? '<span class="mini" title="sum of the estimates on open items">' +
+      esc('~' + fmtMoney(openEst) + ' to buy') + '</span>' : '') +
+    '<span style="flex:1"></span>' +
+    (open.length
+      ? '<button class="btn sm primary" title="One PO at needed — every open item becomes a line, checked off against it" ' +
+        act('needRaisePo', job.id) + '>' + icon('cart') + 'Raise PO from open items</button>'
+      : '<span class="pill go"><span class="dot"></span>All covered</span>') + '</div>' +
+    '<div class="tbl-wrap"><table class="tbl">' +
+    '<thead><tr><th></th><th>Item</th><th class="money">Qty</th><th class="money">Est</th><th>Category</th><th>Covered by</th><th></th></tr></thead>' +
+    '<tbody>' + rows.map(needRow).join('') + needAddRow(job.id) + '</tbody></table></div>' +
+    '<div class="perm-note" style="padding:12px 16px;margin-top:0">' + inlineIcon('cart') +
+    ' Check = handled outside a PO · <b>Raise PO</b> turns the open items into one order at <b>needed</b> and ' +
+    'links each back here · <b>n/a</b> keeps the decision on record, struck through. Estimates are planning ' +
+    'numbers — money only moves on the PO.</div></div>';
+}
+
+/* the Purchasing cockpit's rollup: what every job still needs, at a glance */
+function needsRollupPanel() {
+  var groups = openNeedsByJob();
+  if (!groups.length) return '';
+  var items = 0, est = 0;
+  groups.forEach(function (g) { items += g.count; est += g.est; });
+  var rowsHtml = groups.map(function (g) {
+    return '<div class="next-item" ' + act('openJob', g.job.id) + ' style="cursor:pointer"><div class="txt">' +
+      esc(g.job.client) + '<span>' + esc(g.job.qb_job_number + ' · ' + g.count + ' item' + (g.count === 1 ? '' : 's') + ' open') + '</span></div>' +
+      '<span class="money" style="font-size:12.5px">' + esc(g.est ? '~' + fmtMoney(g.est) : '—') + '</span></div>';
+  }).join('');
+  return '<div class="panel"><h3>Still needed · ' + items + ' item' + (items === 1 ? '' : 's') +
+    (est ? ' <span class="mini" style="margin-left:6px">~' + esc(fmtMoney(est)) + '</span>' : '') + '</h3>' +
+    '<div class="next-list">' + rowsHtml + '</div>' +
+    '<div class="perm-note">' + inlineIcon('cart') + ' Open items on each job’s ancillaries checklist — ' +
+    'the buying that hasn’t reached a PO yet. Click through to check off or raise the order.</div></div>';
 }

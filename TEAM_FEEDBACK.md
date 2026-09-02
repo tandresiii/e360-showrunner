@@ -142,3 +142,5 @@ The test for every feature: *a change made anywhere becomes visible to everyone 
 - **Version history UI**: per chain node, a "versions" list showing superseded/withdrawn specs (they're queryable by status today, just unsurfaced) — open/print any old rev, see who bound what when. Discoverability note on the Specs tab: "binding a new spec retires this one automatically."
 
 ## (more team wishes to be added here as responses come in)
+
+## Per-system ancillary checklist (Tom, 2026-09-02) — SHIPPED 2026-09-02: the per-job Needs List — seed the standard LED ancillaries onto a job, check items off or strike them n/a, and raise everything still open as ONE PO at needed, each item linked back to the order that covers it.
