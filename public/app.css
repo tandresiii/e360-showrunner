@@ -161,7 +161,11 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
 /* ---------- overview grid ---------- */
 .ov{display:grid; grid-template-columns:1.6fr 1fr; gap:16px; align-items:start}
 .panel{background:var(--surface); border:1px solid var(--border); border-radius:var(--r); padding:16px 18px}
-.panel h3{font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); font-weight:700; margin-bottom:14px; font-family:var(--font-body)}
+.panel h3{font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); font-weight:700; margin-bottom:14px; font-family:var(--font-body); display:flex; align-items:center; gap:8px}
+/* Panels that ride inside a centered empty state (the schedule tab renders the
+   crew + contacts panels below "No schedule yet") must not inherit its
+   centering — the crew card grid reads left-aligned like everywhere else. */
+.gear-empty .panel{text-align:left}
 .lane-status{display:flex; flex-direction:column; gap:10px}
 .ls-row{display:flex; align-items:center; gap:12px}
 .ls-row .nm{width:130px; font-size:12.5px; color:var(--text-2); font-weight:500}
