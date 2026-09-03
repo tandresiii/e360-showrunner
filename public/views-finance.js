@@ -325,8 +325,9 @@ function viewJobFinance(jf) {
     return '<div class="file-cell"><button class="file" ' + act('openViewer', f.id) + '>' +
       '<div class="thumb">' + icon('dollar') + '<span class="ext">' + esc(f.ext) + '</span>' +
       (f.status === 'proposed' ? '<span class="ext" style="right:auto;left:8px;color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent)">proposed</span>' : '') + '</div>' +
-      '<div class="fb"><b>' + esc(f.vendor || f.name) + '</b><span>' + esc(finKindLabel(f.kind)) + ' · ' + esc(fmtMoney(f.amount)) + '</span></div></button>' +
-      fileDownloadChip(f) + fileDeleteChip(f) + '</div>';
+      '<div class="fb"><b>' + esc(f.vendor || f.name) + '</b><span>' + esc(finKindLabel(f.kind)) + ' · ' + esc(fmtMoney(f.amount)) + '</span>' +
+      fileBytelessFlag(f) + '</div></button>' +
+      fileDownloadChip(f) + fileUploadChip(f) + fileDeleteChip(f) + '</div>';
   }).join('') || '<div class="empty" style="padding:20px">No financial docs yet.</div>';
   var docsPanel = '<div class="panel"><h3>Financial docs · ' + jf.docs.length + '</h3><div class="file-grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">' + docCards + '</div></div>';
 
@@ -503,8 +504,9 @@ function tabFinancials(show) {
     return '<div class="file-cell"><button class="file" ' + act('openViewer', f.id) + '>' +
       '<div class="thumb">' + icon('dollar') + '<span class="ext">' + esc(f.ext) + '</span>' +
       (f.status === 'proposed' ? '<span class="ext" style="right:auto;left:8px;color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent)">proposed</span>' : '') + '</div>' +
-      '<div class="fb"><b>' + esc(f.vendor || f.name) + '</b><span>' + esc(finKindLabel(f.kind)) + ' · ' + esc(fmtMoney(f.amount)) + (f.provenance ? ' · via agent' : '') + '</span></div></button>' +
-      fileDownloadChip(f) + fileDeleteChip(f) + '</div>';
+      '<div class="fb"><b>' + esc(f.vendor || f.name) + '</b><span>' + esc(finKindLabel(f.kind)) + ' · ' + esc(fmtMoney(f.amount)) + (f.provenance ? ' · via agent' : '') + '</span>' +
+      fileBytelessFlag(f) + '</div></button>' +
+      fileDownloadChip(f) + fileUploadChip(f) + fileDeleteChip(f) + '</div>';
   }).join('');
   var docsBlock = '<div class="files-head" style="margin-top:16px"><h3>Financial docs · ' + docs.length + '</h3>' +
     '<button class="btn primary" ' + act('addFinDoc', show.id) + '>' + icon('plus') + 'Attach doc</button></div>' +

@@ -1877,6 +1877,195 @@ async function main() {
   ok('…and a revoked config closes the gate on the very next read — no reload needed',
      feat3.schedulerPush === false, feat3);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('38 · the green checkmark tells the truth  (Tom 2026-09-03, live)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom's screenshots from live testing: "Could not list staffing events",
+  // "Could not download …", and "Filed, but the bytes did not land" — every
+  // one wearing the SUCCESS check, because toast() had exactly one face.
+  // Brendon read a failed upload as a done one off that check. The component
+  // now takes an explicit kind, and this scan holds the CALL SITES to it,
+  // mechanically, the way the size-stamp scan holds HARDENING 21: a toast
+  // fired from a catch block, or titled like a failure ("Could not…",
+  // "Not filed…", "Failed…", "…did not land", "…not configured"), must pass
+  // 'err' — so a future catch-block toast cannot ship green-checked.
+  ok('toast() takes an explicit kind and picks the alert face for it',
+     /function toast\(b, s, kind\)[\s\S]{0,400}icon\(k === 'ok' \? 'check' : 'alert'\)/
+       .test(SRC['components.js']));
+  {
+    const css = fs.readFileSync(path.join(PUB, 'app.css'), 'utf8');
+    ok('…and the err/warn faces wear the crit/warn accents, not the success one',
+       /\.toast\.err\{border-left-color:var\(--crit\)\}/.test(css) &&
+       /\.toast\.err svg\{color:var\(--crit\)\}/.test(css) &&
+       /\.toast\.warn\{border-left-color:var\(--warn\)\}/.test(css));
+  }
+  {
+    // string/comment-aware span matcher — a title like "(demo)" must not
+    // derail the paren scan, and a commented-out toast must not count.
+    const spanEnd = (src, open) => {
+      const closer = src[open] === '(' ? ')' : '}';
+      let depth = 0;
+      for (let i = open; i < src.length; i++) {
+        const ch = src[i];
+        if (ch === "'" || ch === '"' || ch === '`') {
+          const q = ch; i++;
+          while (i < src.length && src[i] !== q) { if (src[i] === '\\') i++; i++; }
+          continue;
+        }
+        if (ch === '/' && src[i + 1] === '*') { i = src.indexOf('*/', i + 2) + 1; continue; }
+        if (ch === '/' && src[i + 1] === '/') { i = src.indexOf('\n', i); if (i < 0) i = src.length; continue; }
+        if (ch === src[open]) depth++;
+        else if (ch === closer) { depth--; if (depth === 0) return i + 1; }
+      }
+      return src.length;
+    };
+    // catch blocks, both statement form and .catch(function () { … })
+    const catchRangesOf = (src) => {
+      const out = [];
+      const re = /catch\s*(\([^)]*\))?\s*\{/g;
+      let m;
+      while ((m = re.exec(src))) out.push([re.lastIndex - 1, spanEnd(src, re.lastIndex - 1)]);
+      return out;
+    };
+    let checked = 0;
+    const naked = [];
+    for (const fname of Object.keys(SRC)) {
+      const src = SRC[fname];
+      const ranges = catchRangesOf(src);
+      const re = /toast\s*\(/g;
+      let m;
+      while ((m = re.exec(src))) {
+        const before = src.slice(Math.max(0, m.index - 10), m.index);
+        if (/function\s*$/.test(before) || /[\w$.]$/.test(before)) continue;
+        const open = src.indexOf('(', m.index);
+        const args = src.slice(open + 1, spanEnd(src, open) - 1);
+        const titleM = args.match(/^\s*'((?:[^'\\]|\\.)*)'/);
+        const failTitle = titleM &&
+          (/^(Could not|Not filed|Failed)/.test(titleM[1]) ||
+           /did not land|not configured/.test(titleM[1]));
+        const inCatch = ranges.some(([a, b]) => m.index > a && m.index < b);
+        if (!inCatch && !failTitle) continue;
+        checked += 1;
+        const stripped = args.replace(/\/\*[\s\S]*?\*\//g, '').trimEnd();
+        if (!/,\s*'err'$/.test(stripped)) {
+          naked.push(`${fname}:${src.slice(0, m.index).split('\n').length}` +
+                     ` "${titleM ? titleM[1] : '(dynamic)'}"`);
+        }
+      }
+    }
+    ok('the scan sees the failure toasts at all (>= 120 call sites)', checked >= 120, checked);
+    ok('EVERY catch-block toast and every failure-titled toast passes the ERROR kind',
+       naked.length === 0, naked.slice(0, 6).join(' · '));
+  }
+  // the three toasts from Tom's screenshots, pinned by name — the rule above
+  // is general; these are the incidents it must never let regress.
+  for (const t of ['Could not list staffing events', 'Could not download ',
+                   'Filed, but the bytes did not land']) {
+    const hits = [...APP_JS.matchAll(new RegExp(`toast\\('${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'))];
+    ok(`“${t.trim()}” exists and wears the error face`,
+       hits.length > 0 && hits.every((h) => {
+         const open = APP_JS.indexOf('(', h.index);
+         let i = open, depth = 0;
+         for (; i < APP_JS.length; i++) {
+           const ch = APP_JS[i];
+           if (ch === "'") { i++; while (i < APP_JS.length && APP_JS[i] !== "'") { if (APP_JS[i] === '\\') i++; i++; } continue; }
+           if (ch === '(') depth++;
+           else if (ch === ')') { depth--; if (!depth) break; }
+         }
+         return /,\s*'err'\s*$/.test(APP_JS.slice(open + 1, i));
+       }), hits.length);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('39 · the byteless row is VISIBLE — and recoverable in one click');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Brendon's Rhino booking doc, the other half: a metadata row with size 0
+  // and no bytes on the NAS rendered exactly like a finished document on
+  // every list and card, and Tom learned the truth from a download error.
+  // The two-tier model DESIGNED this state to be visible and retryable; the
+  // product never drew the state or offered the retry. Now every place a file
+  // renders flags "no document — metadata only", and the flagged row carries
+  // an Upload affordance that re-runs the byte half onto the existing record.
+  reach('Upload the missing document', {
+    seam: 'uploadFileBytes', action: 'uploadMissingBytes' });
+  ok('fileIsByteless keys on the size the SERVER owns, API mode only',
+     /function fileIsByteless\(f\)[\s\S]{0,250}SR\.isApi\(\)[\s\S]{0,150}Number\(f\.size\) > 0/
+       .test(SRC['components.js']));
+  ok('the flag says honest words on a warn accent',
+     /no document — metadata only/.test(SRC['components.js']) &&
+     /\.file-nobytes\{[^}]*color:var\(--warn\)/.test(fs.readFileSync(path.join(PUB, 'app.css'), 'utf8')));
+  // every renderer, held mechanically — the bug was precisely a state one
+  // screen knew about and four screens didn't.
+  const FLAG_SITES = [
+    ['files-tab card', SRC['views-folder.js'],
+     /function fileCard\([\s\S]{0,900}fileBytelessFlag\(f\)[\s\S]{0,200}fileUploadChip\(f\)/],
+    ['bookings row (the Rhino doc itself)', SRC['views-folder.js'],
+     /fileBytelessFlag\(bkFile\)/],
+    ['financial doc cards (job + show)', SRC['views-finance.js'],
+     null],
+    ['purchasing linked docs', SRC['views-purchasing.js'],
+     /fileBytelessFlag\(f\)[\s\S]{0,200}fileUploadChip\(f\)/],
+    ['viewer meta panel', SRC['views-global.js'],
+     /fileIsByteless\(f\)[\s\S]{0,200}fileBytelessFlag\(f\)/]
+  ];
+  for (const [label, src, re2] of FLAG_SITES) {
+    const pass2 = re2 ? re2.test(src)
+      : (src.match(/fileBytelessFlag\(f\)/g) || []).length >= 2 &&
+        (src.match(/fileUploadChip\(f\)/g) || []).length >= 2;
+    ok(`the flag renders on the ${label}`, pass2);
+  }
+  ok('…and the viewer offers the recovery beside the flag',
+     /act\('uploadMissingBytes', f\.id\)/.test(SRC['views-global.js']));
+
+  // ── the live half: the row, the flag's predicate, and the recovery PUT ────
+  const wGhost = await POST('/api/files',
+    { show_id: SHOW, name: 'Rhino Staging — booking conf', ext: 'pdf', kind: 'confirmation' },
+    { token: T.brenden });
+  ok('a metadata-only row files honestly at size 0 — the state the flag draws',
+     wGhost.status === 200 && Number(wGhost.body.size) === 0, wGhost.body.size);
+  ok('…which is exactly the pair fileIsByteless() reads (id > 0, size not > 0)',
+     Number(wGhost.body.id) > 0 && !(Number(wGhost.body.size) > 0));
+  // the byte half runs in a CHILD server with a throwaway STORAGE_ROOT on the
+  // same database — §34's out-of-process trick, because lib/storage.js reads
+  // its env once at require time and THIS server is production-shaped (no NAS).
+  const wRecover = (() => {
+    const script =
+      `(async () => {
+        const srv = require(${JSON.stringify(path.join(APP, 'server.js').replace(/\\/g, '/'))});
+        const server = await srv.boot();
+        const base = 'http://127.0.0.1:' + server.address().port;
+        const login = await fetch(base + '/api/auth/login', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: 'brenden', password: ${JSON.stringify(PW)} }) });
+        const tok = (await login.json()).token;
+        const r = await fetch(base + '/api/files/' + ${Number(wGhost.body.id)} + '/content', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/octet-stream', 'x-auth-token': tok },
+          body: Buffer.from('the rhino confirmation, landing at last') });
+        console.log('WALKBYTES ' + JSON.stringify({ status: r.status, body: await r.json() }));
+        server.close();
+        process.exit(0);
+      })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });`;
+    const r = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      env: { ...process.env, PORT: '0', SWEEP_ON_BOOT: '0',
+             STORAGE_ROOT: path.join(os.tmpdir(), 'sr-walk-bytes-storage') }
+    });
+    const m = String(r.stdout || '').match(/WALKBYTES (.*)/);
+    if (!m) console.error('  (byte child failed)', String(r.stderr || '').slice(0, 400));
+    return m ? JSON.parse(m[1]) : null;
+  })();
+  ok('the Upload affordance’s PUT lands bytes on the EXISTING row (child server with storage)',
+     wRecover && wRecover.status === 200 && wRecover.body.size === 39,
+     wRecover && wRecover.body);
+  const wAfter = await GET(`/api/files/${wGhost.body.id}`, { token: T.brenden });
+  ok('…the row now claims the TRUE byte count — the flag clears by arithmetic',
+     Number(wAfter.body.size) === 39, wAfter.body.size);
+  ok('…and nobody re-typed anything: same id, same name, same booking-facing record',
+     wAfter.body.id === wGhost.body.id && wAfter.body.name === 'Rhino Staging — booking conf');
+  const wCleanup = await DEL(`/api/files/${wGhost.body.id}`, { token: T.brenden });
+  ok('…the probe row cleans up', wCleanup.status === 200, wCleanup.body);
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

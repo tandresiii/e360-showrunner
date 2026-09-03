@@ -322,9 +322,14 @@ function viewPO(po) {
   });
   var docCards = docs.map(function (f) {
     var role = f.id === po.invoice_file_id ? 'invoice' : f.id === po.quote_file_id ? 'quote' : 'evidence';
-    return '<button class="file" ' + act('openViewer', f.id) + '>' +
+    /* wrapped in .file-cell like the other doc grids, so a metadata-only row
+       (size 0, no bytes on the NAS) carries its flag and its recovery chip
+       here too — a PO invoice that never landed must not read as landed */
+    return '<div class="file-cell"><button class="file" ' + act('openViewer', f.id) + '>' +
       '<div class="thumb">' + icon('dollar') + '<span class="ext">' + esc(f.ext) + '</span></div>' +
-      '<div class="fb"><b>' + esc(f.vendor || f.name) + '</b><span>' + esc(role + (f.amount ? ' · ' + fmtMoney(f.amount) : '')) + '</span></div></button>';
+      '<div class="fb"><b>' + esc(f.vendor || f.name) + '</b><span>' + esc(role + (f.amount ? ' · ' + fmtMoney(f.amount) : '')) + '</span>' +
+      fileBytelessFlag(f) + '</div></button>' +
+      fileUploadChip(f) + '</div>';
   }).join('') || '<div class="empty" style="padding:18px">No docs yet — attach the vendor quote, then the invoice.</div>';
   var docsPanel = '<div class="panel"><h3>Linked docs · ' + docs.length + '</h3>' +
     '<div class="file-grid" style="grid-template-columns:repeat(auto-fill,minmax(140px,1fr))">' + docCards + '</div>' +

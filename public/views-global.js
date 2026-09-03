@@ -866,6 +866,10 @@ function drawViewer(show) {
     : '';
   $('#vMeta').innerHTML = '<div class="mh"><b>File details</b></div>' +
     '<div class="bound"><div class="bi">' + icon('pin') + '</div><div class="bt"><span>Bound to</span><b>' + esc(title) + '</b></div></div>' +
+    /* the byteless truth, ABOVE the metadata it qualifies — this panel is the
+       screen that finally told Brendon, and now it says so before the rows
+       instead of leaving a download error to break the news */
+    (fileIsByteless(f) ? '<div style="margin:2px 0 10px">' + fileBytelessFlag(f) + '</div>' : '') +
     metaRow('Type', fileTypeLabel(f, show)) +
     finRows +
     metaRow('Version', f.ver) + metaRow('Size', fmtSize(f.size)) + metaRow('Dimensions', f.dim) +
@@ -876,6 +880,12 @@ function drawViewer(show) {
        bytes — including the .xlsx and .dwg the browser cannot preview, which is
        precisely when a person needs them most. */
     (hasBytes ? '<button class="btn" ' + act('vOpenTab', f.id) + '>' + icon('link') + 'Open in new tab</button>' : '') +
+    /* the recovery, where the flag is: re-run the byte half of the two-tier
+       upload onto THIS row — same gate as the original attach */
+    (fileIsByteless(f) && canDeleteFile(f, show)
+      ? '<button class="btn" ' + act('uploadMissingBytes', f.id) + '>' + icon('upload') +
+        'Upload the missing document</button>'
+      : '') +
     '<button class="btn" ' + act('downloadFile', f.id) + '>' + icon('download') + 'Download</button>' +
     /* THE DELETE, where a person is already looking at the thing they want
        gone. The viewer is the screen that TOLD Brendon the bytes were missing,
@@ -945,6 +955,11 @@ function drawPhotoMeta(show, f, title, hasBytes) {
       (f.recap_pick ? 'Recap pick — remove' : 'Star for the recap') + '</button>');
   }
   if (hasBytes) acts.push('<button class="btn" ' + act('vOpenTab', f.id) + '>' + icon('link') + 'Open in new tab</button>');
+  /* same byteless recovery as documents — a photo is a files row like any other */
+  if (fileIsByteless(f) && canDeleteFile(f, show)) {
+    acts.push('<button class="btn" ' + act('uploadMissingBytes', f.id) + '>' + icon('upload') +
+      'Upload the missing document</button>');
+  }
   acts.push('<button class="btn" ' + act('downloadFile', f.id) + '>' + icon('download') + 'Download original</button>');
   /* A photo is a `files` row like any other and gets the same retraction — the
      wrong frame lands in a show's gallery exactly as often as the wrong PDF
@@ -964,6 +979,7 @@ function drawPhotoMeta(show, f, title, hasBytes) {
         : 'The original lives on the NAS; the record here is metadata + a thumbnail.');
   $('#vMeta').innerHTML = '<div class="mh"><b>Photo details</b></div>' +
     '<div class="bound"><div class="bi">' + icon('cam') + '</div><div class="bt"><span>Tagged to</span><b>' + esc(title) + '</b></div></div>' +
+    (fileIsByteless(f) ? '<div style="margin:2px 0 10px">' + fileBytelessFlag(f) + '</div>' : '') +
     capBlock + tagRow + rows +
     '<div class="ph-nas">' + icon('server') + '<span>' + esc(f.nas_path || '') + '</span></div>' +
     '<div class="acts">' + acts.join('') + '</div>' +
@@ -1097,7 +1113,7 @@ function vPrevOpenBlob(blob, f) {
   } catch (_) { w = null; }
   setTimeout(function () { try { URL.revokeObjectURL(url); } catch (_) {} }, VPREV_TAB_MS);
   if (w) toast('Opened in a new tab', viewerFileName(f));
-  else toast('Your browser blocked the new tab', 'Allow pop-ups for Showrunner, or use Download.');
+  else toast('Your browser blocked the new tab', 'Allow pop-ups for Showrunner, or use Download.', 'err');
   return !!w;
 }
 async function vOpenTab(fileId) {
@@ -1109,6 +1125,6 @@ async function vOpenTab(fileId) {
     vPrevOpenBlob(blob, f);
   } catch (e) {
     /* the server's own sentence, verbatim — same rule as downloadFile() */
-    toast('Could not open ' + viewerFileName(f), String(e && e.message || e));
+    toast('Could not open ' + viewerFileName(f), String(e && e.message || e), 'err');
   }
 }

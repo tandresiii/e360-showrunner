@@ -33,7 +33,7 @@ const {
   PROJECT_TYPES, STAGES, RAGS, STEP_STATUSES, EVIDENCE_TYPES, AUTO_SOURCES,
   SCOPE_KINDS, LIFECYCLE_STAGES, ROLE_RANK, DEAL_TYPES,
   oneOf, addDays, slug, isISODate, intOrNull, num, money, sameUser,
-  canonicalStage, stageLabel, isConfirmed, scopeLine, scopeOf, todayISO
+  canonicalStage, stageLabel, isConfirmed, scopeLine, scopeOf, todayISO, printable
 } = require('../lib/enums');
 // F2/F3/F5/F6 — the four post-deploy engines. Each one owns its decision; this
 // module only routes to them.
@@ -691,7 +691,14 @@ async function applyScope(c, show, b, actor, { silent = false } = {}) {
   const textField = (k, cur) => {
     const v = val(k);
     if (v === undefined) return cur;
-    const t = String(v == null ? '' : v).trim().slice(0, 60);
+    /* THE JUMBLED CHIP (2026-09-03): a cabinet type pasted out of a spec PDF
+       carried combining overlay strokes and every chip rendered it struck
+       through. printable() strips controls, zero-widths, bidi marks and the
+       overlay strokes — never accents — BEFORE the trim, so an invisible
+       character cannot survive as the whole value either. Because this is the
+       one writer both PUT /shows/:id/scope and from-spec share, RE-SAVING a
+       scope is also how an already-dirty row gets clean. */
+    const t = printable(v).trim().slice(0, 60);
     return t || null;
   };
 

@@ -525,7 +525,7 @@ async function openChainFile(showId, key) {
   if (!f && key === 'content') f = show.files.filter(function (x) { return x.kind === 'spec'; })[0];
   if (!f && key === 'pull') f = show.files.filter(function (x) { return x.artifact === 'pullsheet'; })[0];
   if (!f && key === 'manifest') f = show.files.filter(function (x) { return x.artifact === 'manifest'; })[0];
-  if (!f) { toast('Not generated yet', 'Generate or pull it first'); return; }
+  if (!f) { toast('Not generated yet', 'Generate or pull it first', 'err'); return; }
   return openViewer(f.id);
 }
 async function printChainFile(showId, key) {
@@ -534,7 +534,7 @@ async function printChainFile(showId, key) {
   if (!f && key === 'content') f = show.files.filter(function (x) { return x.kind === 'spec'; })[0];
   if (!f && key === 'pull') f = show.files.filter(function (x) { return x.artifact === 'pullsheet'; })[0];
   if (!f && key === 'manifest') f = show.files.filter(function (x) { return x.artifact === 'manifest'; })[0];
-  if (!f) { toast('Not generated yet', 'Generate or pull it first'); return; }
+  if (!f) { toast('Not generated yet', 'Generate or pull it first', 'err'); return; }
   printSheet(show, f, show.gear);
 }
 
@@ -557,7 +557,7 @@ var SPEC_STATE_CHIP = {
 async function specHistoryAct(showId) {
   var r;
   try { r = await api.listSpecHistory(showId); }
-  catch (e) { toast('Could not read the spec history', String((e && e.message) || e)); return; }
+  catch (e) { toast('Could not read the spec history', String((e && e.message) || e), 'err'); return; }
   var versions = (r && r.versions) || [];
   var rows = versions.map(function (v) {
     var chip = SPEC_STATE_CHIP[v.state] || ['cs', v.state || '?'];
@@ -587,7 +587,7 @@ async function specViewRevAct(showId, key) {
   var node = parts[0], rev = parseInt(parts[1], 10);
   var r;
   try { r = await api.getSpecRender(showId, node, rev); }
-  catch (e) { toast('No banked render for that version', String((e && e.message) || e)); return; }
+  catch (e) { toast('No banked render for that version', String((e && e.message) || e), 'err'); return; }
   var body;
   if (r.png) {
     body = '<img src="' + esc(r.png) + '" alt="spec render" style="max-width:100%;border:1px solid var(--border);border-radius:8px">';
@@ -620,7 +620,7 @@ async function specOutdateAct(showId, node) {
     } else { note = ''; }
   } catch (_) { note = ''; }
   try { await api.outdateSpec(showId, node, { note: String(note || '').trim() }); }
-  catch (e) { toast('Not flagged', String((e && e.message) || e)); return; }
+  catch (e) { toast('Not flagged', String((e && e.message) || e), 'err'); return; }
   toast('Spec flagged outdated', (CHAIN_LABEL[node] || node) +
     ' — the record stands, marked as stale until a new spec binds.');
   var fresh = await refreshShowTab(showId, 'specs');
@@ -630,7 +630,7 @@ async function specOutdateClearAct(showId, node) {
   if (!askConfirm('Withdraw the outdated flag on the ' + (CHAIN_LABEL[node] || node) + ' spec?\n\n' +
       'The spec goes back to reading as current.')) return;
   try { await api.outdateSpec(showId, node, { undo: true }); }
-  catch (e) { toast('Not withdrawn', String((e && e.message) || e)); return; }
+  catch (e) { toast('Not withdrawn', String((e && e.message) || e), 'err'); return; }
   toast('Outdated flag withdrawn', (CHAIN_LABEL[node] || node) + ' reads as current again.');
   var fresh = await refreshShowTab(showId, 'specs');
   refreshSpecTabBadge(fresh);
@@ -648,7 +648,7 @@ async function specUnbindAct(showId, node) {
     return;
   }
   try { await api.unbindSpec(showId, node); }
-  catch (e) { toast('Not unbound', String((e && e.message) || e)); return; }
+  catch (e) { toast('Not unbound', String((e && e.message) || e), 'err'); return; }
   toast('Spec unbound', (CHAIN_LABEL[node] || node) +
     ' — the file stays in Files; the node is bindable again.');
   var fresh = await refreshShowTab(showId, 'specs');
@@ -705,7 +705,7 @@ async function gearSnapSaveAct(showId) {
     snap = await api.saveGearSnapshot(showId, {
       sheet: sheet, label: flexDocKindLabel(sheet)
     });
-  } catch (e) { toast('Snapshot NOT saved', String((e && e.message) || e)); return; }
+  } catch (e) { toast('Snapshot NOT saved', String((e && e.message) || e), 'err'); return; }
   toast('Snapshot saved to the folder',
     (snap.doc_label || 'Sheet') + (snap.doc_number ? ' ' + snap.doc_number : '') + ' — ' +
     snap.lines_count + ' lines · ' + snap.units_count + ' units, banked as of today. ' +
@@ -732,7 +732,7 @@ async function gearSnapDeleteAct(id) {
       String(snap.created_at || '').slice(0, 10) + ' — the banked record goes; ' +
       'nothing in Flex is touched.')) return;
   try { await api.deleteGearSnapshot(id); }
-  catch (e) { toast('Not deleted', String((e && e.message) || e)); return; }
+  catch (e) { toast('Not deleted', String((e && e.message) || e), 'err'); return; }
   if (GEAR_HIST[snap.show_id] && GEAR_HIST[snap.show_id].open &&
       GEAR_HIST[snap.show_id].open.id === Number(id)) {
     GEAR_HIST[snap.show_id].open = null;
@@ -790,7 +790,7 @@ async function flexCreate(showId) {
   var cfg = await SR.serverConfig();
   if (!(cfg && cfg.features && cfg.features.flex)) {
     toast('Flex is not configured on this server',
-      'FLEX_BASE_URL and FLEX_API_KEY are unset. Nothing was created — ask for them to be set, then try again.');
+      'FLEX_BASE_URL and FLEX_API_KEY are unset. Nothing was created — ask for them to be set, then try again.', 'err');
     return;
   }
   if (g.linked && g.elementId && !g.fabricated) {
@@ -803,7 +803,7 @@ async function flexCreate(showId) {
     r = await api.flexCreateElement(showId, { createContacts: FLEX_CREATE_CONTACTS });
   } catch (e) {
     var msg = String((e && e.message) || e);
-    toast(e && e.status === 501 ? 'Flex is not configured' : 'Flex folder NOT created', msg);
+    toast(e && e.status === 501 ? 'Flex is not configured' : 'Flex folder NOT created', msg, 'err');
     return;
   }
   var line = flexContactLine(r && r.contacts);
@@ -909,7 +909,7 @@ async function flexPull(showId) {
   var cfg = await SR.serverConfig();
   if (!(cfg && cfg.features && cfg.features.flex)) {
     toast('Flex is not configured on this server',
-      'FLEX_BASE_URL and FLEX_API_KEY are unset. Nothing was read — ask for them to be set, then try again.');
+      'FLEX_BASE_URL and FLEX_API_KEY are unset. Nothing was read — ask for them to be set, then try again.', 'err');
     return;
   }
 
@@ -921,7 +921,7 @@ async function flexPull(showId) {
   } catch (e) {
     FLEX_SHEETS[showId] = { error: String((e && e.message) || e) };
     toast(e && e.status === 501 ? 'Flex is not configured' : 'Could not read the Flex folder',
-      String((e && e.message) || e));
+      String((e && e.message) || e), 'err');
     await refreshShowTab(showId, 'gear');
     return;
   }
@@ -977,7 +977,7 @@ async function flexLoadSheet(showId, listId, listCtx) {
     r = await api.flexPullSheet(showId, listId);
   } catch (e) {
     FLEX_SHEETS[showId] = { error: String((e && e.message) || e), lists: (listCtx && listCtx.lists) || [] };
-    toast('Could not read that gear list', String((e && e.message) || e));
+    toast('Could not read that gear list', String((e && e.message) || e), 'err');
     await refreshShowTab(showId, 'gear');
     return;
   }
@@ -1200,7 +1200,7 @@ async function commitUpload() {
     });
   } catch (e) {
     if (btn) { btn.disabled = false; btn.innerHTML = 'Upload'; }
-    toast('Upload failed', String(e && e.message || e));
+    toast('Upload failed', String(e && e.message || e), 'err');
     return;
   }
   closeM();
@@ -1209,10 +1209,10 @@ async function commitUpload() {
     toast('File uploaded', res.file.name + ' → ' + title + ' · ' + fmtBytes(res.size) + suffix);
   } else if (res.reason === 'not-configured') {
     toast('Registered — bytes not stored',
-      res.file.name + ' is on the record, but this server has no NAS storage configured.');
+      res.file.name + ' is on the record, but this server has no NAS storage configured.', 'warn');
   } else {
     /* The row exists and the bytes did not land. Say BOTH halves. */
-    toast('Filed, but the bytes did not land', res.file.name + ' — ' + res.reason);
+    toast('Filed, but the bytes did not land', res.file.name + ' — ' + res.reason, 'err');
   }
   return openViewer(res.file.id);
 }
@@ -1238,8 +1238,60 @@ async function downloadFile(fileId) {
     toast('Downloading', name);
   } catch (e) {
     /* the server's message, verbatim: "the NAS is unreachable" is the answer */
-    toast('Could not download ' + name, String(e && e.message || e));
+    toast('Could not download ' + name, String(e && e.message || e), 'err');
   }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   UPLOAD THE MISSING DOCUMENT — recovery for a metadata-only row
+   ------------------------------------------------------------------------
+   Brendon's Rhino booking doc: the row was filed, the bytes never landed,
+   and the only paths out were delete-and-retype or a download error. The
+   two-tier model already made this state RETRYABLE by design ("the person
+   can retry the second half without re-typing the first" — api.js); this is
+   the affordance that finally does the retrying. One picker, then the exact
+   PUT /api/files/:id/content the original attach uses, onto the row that
+   already exists. The server replaces `size` with the true byte count, so
+   the byteless flag clears by arithmetic, not by a second bookkeeping bit.
+   Offered under the original attach's gate (canDeleteFile mirrors the
+   route's "canEditProject OR the uploader"). */
+async function uploadMissingBytesAct(fileId) {
+  var f = await api.getFile(fileId);
+  if (!f) return;
+  if (!apiMode()) {
+    toast('Byte uploads need the Showrunner server',
+      'Demo rows are modeled — there is no NAS for the bytes to land on.', 'err');
+    return;
+  }
+  if (!(await api.uploadsEnabled())) {
+    toast('No storage on this server',
+      fileNameWithExt(f) + ' stays metadata-only until the NAS wiring is finished — ask Tom.', 'err');
+    return;
+  }
+  var inp = document.createElement('input');
+  inp.type = 'file';
+  inp.addEventListener('change', async function () {
+    var file = inp.files && inp.files[0];
+    if (!file) return;
+    var dims = await measureImage(file);       /* real pixels or nothing */
+    var r;
+    try {
+      r = await api.uploadFileBytes(f.id, file, dims);
+    } catch (e) {
+      /* the row is still standing and still flagged — say exactly that */
+      toast('The bytes did not land', fileNameWithExt(f) + ' — ' +
+        String(e && e.message || e) + '. The record is unchanged; try again.', 'err');
+      return;
+    }
+    toast('Document uploaded', fileNameWithExt(f) + ' · ' + fmtBytes(r && r.size) +
+      ' — the metadata-only flag clears.');
+    /* re-render wherever the person was standing, so the flag visibly goes */
+    if (CUR.view === 'viewer') return openViewer(f.id);
+    if (CUR.view === 'show') return refreshShowTab(CUR.showId);
+    if (CUR.view === 'folder') return render('folder', CUR.projectId);
+    return refreshFinanceUI();                 /* finance / job / purchasing / po */
+  });
+  inp.click();
 }
 /* ════════════════════════════════════════════════════════════════════════
    DELETE A FILE — the affordance that was never built
@@ -1272,7 +1324,7 @@ async function deleteFileAct(fileId) {
       'NAS is left where it is.')) return;
   var showId = f.show_id;
   try { await api.deleteFile(f.id); }
-  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
   toast('Deleted', nm + ' is off the record.');
   try { await updateFinCount(); } catch (_) {}
   /* The viewer was looking AT the row that just stopped existing — there is
@@ -1340,7 +1392,7 @@ async function dropFile(showId, dropped) {
       toast('Registered — bytes not stored',
         res.file.name + ' is on the record, but this server has no NAS storage configured.');
     } else {
-      toast('Filed, but the bytes did not land', res.file.name + ' — ' + res.reason);
+      toast('Filed, but the bytes did not land', res.file.name + ' — ' + res.reason, 'err');
     }
     if (CUR.view === 'show') await refreshShowTab(showId, 'files');
     return;
@@ -1520,7 +1572,7 @@ async function commitNewEvent() {
       scope: anyScope ? scope : undefined
     });
   } catch (e) {
-    toast('Not created', String(e && e.message || e));
+    toast('Not created', String(e && e.message || e), 'err');
     return;
   }
   closeM();
@@ -1587,7 +1639,7 @@ async function confirmDocAct(fileId, overrides) {
   catch (e) {
     var msg = String(e && e.message || e);
     if (/overrides/i.test(msg)) return openRetarget(fileId, msg);
-    toast('Not confirmed', msg);
+    toast('Not confirmed', msg, 'err');
     return;
   }
   refreshBellPanel();                     /* the bell lists pending proposals */
@@ -1727,7 +1779,7 @@ async function commitJobNumber() {
     await updateFinCount();
     return refreshFinanceUI();
   } catch (e) {
-    toast('Could not set the job number', (e && e.message) || 'the server refused that change');
+    toast('Could not set the job number', (e && e.message) || 'the server refused that change', 'err');
   }
 }
 
@@ -1751,7 +1803,7 @@ async function poAdvance(poId) {
         ? 'Over ' + fmtMoney(PO_APPROVAL_THRESHOLD) + ' — an admin (Tom, Tony, Jim) or Candice must approve before it can be ordered'
       : upd.vendor);
   } catch (e) {
-    toast('Blocked', String(e && e.message || e));
+    toast('Blocked', String(e && e.message || e), 'err');
     return;
   }
   return refreshFinanceUI();
@@ -1761,7 +1813,7 @@ async function poApprove(poId) {
     var po = await api.approvePO(poId);
     toast('Approved ' + po.po_number, fmtMoney(poTotal(po)) + ' · cleared to order — logged to activity');
   } catch (e) {
-    toast('Not approved', String(e && e.message || e));
+    toast('Not approved', String(e && e.message || e), 'err');
     return;
   }
   return refreshFinanceUI();
@@ -1872,7 +1924,7 @@ async function commitAddPOLine() {
     PENDING_PO_LINE = null;
     toast('Line added', l.item + ' · ' + l.qty + ' × ' + fmtMoney(l.unit_cost) + ' · ' + l.ownership);
   } catch (e) {
-    toast('Could not add line', String(e && e.message || e));
+    toast('Could not add line', String(e && e.message || e), 'err');
     return;
   }
   return refreshFinanceUI();
@@ -1921,7 +1973,7 @@ async function poEditCommit() {
   stageNotifies();
   var po;
   try { po = await api.updatePO(poId, patch); }
-  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   PENDING_PO_EDIT = null;
   closeM();
   var suffix = await sendNotifies('po', poId, 'updated ' + po.po_number + ' —');
@@ -2001,7 +2053,7 @@ async function poLineCommit() {
       show_id: Number(_v('plShow')) || null,
       ownership: _v('plOwn') || null
     });
-  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   PENDING_PO_LINE_EDIT = null;
   closeM();
   toast('Line saved', l.item + ' · ' + l.qty + ' × ' + fmtMoney(l.unit_cost));
@@ -2015,7 +2067,7 @@ async function poLineDeleteAct(lineId) {
       'The line and its ' + fmtMoney(poLineTotal(l)) + ' come off the order. The checklist item it ' +
       'came from (if any) stays covered — uncheck it there if it still needs buying.')) return;
   try { await api.deletePOLine(l.po_id, l.id); }
-  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  catch (e) { toast('Not removed', String(e && e.message || e), 'err'); return; }
   toast('Line removed', l.item);
   return refreshFinanceUI();
 }
@@ -2033,7 +2085,7 @@ async function poDeleteAct(poId) {
       (landed ? '\nCosts that already landed stay on the books, just without the PO link.' : '') +
       '\nThe deletion is logged to the folder’s activity.')) return;
   try { await api.deletePO(po.id); }
-  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
   toast('Deleted ' + po.po_number,
     covered ? covered + ' checklist item' + (covered === 1 ? '' : 's') + ' reopened — still needs buying'
             : po.vendor + ' — logged to the folder’s activity');
@@ -2055,7 +2107,7 @@ async function needToggleAct(id) {
     var upd = await api.updateNeed(nd.id, { status: next });
     toast(next === 'covered' ? 'Checked off' : 'Reopened',
       upd.item + (next === 'covered' ? ' — handled outside a PO' : ' — back on the list'));
-  } catch (e) { toast('Not updated', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not updated', String(e && e.message || e), 'err'); return; }
   return refreshFinanceUI();
 }
 async function needNaAct(id) {
@@ -2066,14 +2118,14 @@ async function needNaAct(id) {
     var upd = await api.updateNeed(nd.id, { status: next });
     toast(next === 'na' ? 'Marked n/a' : 'Restored',
       upd.item + (next === 'na' ? ' — not needed on this system' : ' — it is needed after all'));
-  } catch (e) { toast('Not updated', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not updated', String(e && e.message || e), 'err'); return; }
   return refreshFinanceUI();
 }
 async function needDeleteAct(id) {
   var nd = NEEDS_BY_ID[Number(id)];
   if (!nd) return;
   try { await api.deleteNeed(nd.id); }
-  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
   toast('Item removed', nd.item);
   return refreshFinanceUI();
 }
@@ -2089,13 +2141,13 @@ async function needAddCommitAct(jobId) {
       category: (document.getElementById('ndCat') || {}).value || 'gear'
     });
     toast('Added to the list', nd.item);
-  } catch (e) { toast('Not added', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not added', String(e && e.message || e), 'err'); return; }
   return refreshFinanceUI();
 }
 async function needSeedAct(jobId) {
   var r;
   try { r = await api.seedNeeds(jobId); }
-  catch (e) { toast('Not seeded', String(e && e.message || e)); return; }
+  catch (e) { toast('Not seeded', String(e && e.message || e), 'err'); return; }
   toast(r.added.length ? 'Seeded ' + r.added.length + ' ancillaries' : 'Nothing to add',
     r.added.length
       ? 'The standard LED list — tune quantities and estimates, strike what this system doesn’t need'
@@ -2154,7 +2206,7 @@ async function needCommit() {
     closeM();
     PENDING_NEED = null;
     toast('Item updated', upd.item);
-  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   return refreshFinanceUI();
 }
 /* v1 swept EVERY open item into one TBD order in a single click. Real seasons
@@ -2196,7 +2248,7 @@ async function needRaiseCommit() {
   var vendor = _v('nrVendor');
   var r;
   try { r = await api.raiseNeedsPO(PENDING_RAISE.jobId, picks, vendor || undefined); }
-  catch (e) { toast('Not raised', String(e && e.message || e)); return; }
+  catch (e) { toast('Not raised', String(e && e.message || e), 'err'); return; }
   PENDING_RAISE = null;
   closeM();
   toast('Opened ' + r.po.po_number,
@@ -2465,7 +2517,7 @@ async function commitFinDocReal(t) {
     });
   } catch (e) {
     finUploadFailedUI();
-    toast('Not filed', String(e && e.message || e));
+    toast('Not filed', String(e && e.message || e), 'err');
     return;
   }
   var stored = false, size = null, reason = 'not-configured';
@@ -2496,10 +2548,10 @@ async function commitFinDocReal(t) {
       nm + ' · ' + fmtBytes(size) + (vendor ? ' · ' + vendor : '') + ' → ' + where + suffix);
   } else if (reason === 'not-configured') {
     toast('Filed — bytes not stored',
-      nm + ' is on the record and linked to ' + where + ', but this server has no NAS storage configured.');
+      nm + ' is on the record and linked to ' + where + ', but this server has no NAS storage configured.', 'warn');
   } else {
     /* Both halves, always. The row exists and the bytes did not land. */
-    toast('Filed, but the bytes did not land', nm + ' — ' + reason);
+    toast('Filed, but the bytes did not land', nm + ' — ' + reason, 'err');
   }
   await updateFinCount();
   /* Land where the person was standing. Coming off a Bookings row, the thing
@@ -2581,7 +2633,7 @@ async function commitAddExpense() {
    in as them is the real thing, and it is one click away in Settings. */
 async function viewAs(userId) {
   if (!api.isDemo()) {
-    toast('Not in a live session', 'Roles come from the server — sign in as that person to see their view');
+    toast('Not in a live session', 'Roles come from the server — sign in as that person to see their view', 'err');
     return;
   }
   var u = USERS_BY_ID[Number(userId)];
@@ -2706,7 +2758,7 @@ async function schedSaveAct() {
     PENDING_SCHED = null;
     if (CUR.view === 'show') return refreshShowTab(sid, 'schedule');
   } catch (e) {
-    toast('Not saved', String(e && e.message || e));
+    toast('Not saved', String(e && e.message || e), 'err');
   }
 }
 async function schedDeleteAct(itemId) {
@@ -2717,7 +2769,7 @@ async function schedDeleteAct(itemId) {
     toast('Removed from the schedule', 'The call sheet updates everywhere it renders');
     if (CUR.view === 'show') return refreshShowTab(r.show_id, 'schedule');
   } catch (e) {
-    toast('Not removed', String(e && e.message || e));
+    toast('Not removed', String(e && e.message || e), 'err');
   }
 }
 
@@ -2734,7 +2786,7 @@ async function photoPickAct(fileId) {
     toast(f.recap_pick ? 'Starred for the recap' : 'Removed from the recap picks',
       String(f.caption || f.name).slice(0, 64));
   } catch (e) {
-    toast('Not starred', String(e && e.message || e));
+    toast('Not starred', String(e && e.message || e), 'err');
     return;
   }
   if (CUR.view === 'viewer') return drawViewer(await api.getShow(VIEWER.showId));
@@ -2746,7 +2798,7 @@ async function photoConfirmAct(fileId) {
     var f = await api.confirmPhoto(fileId);
     toast('Photo confirmed & filed', String(f.caption || f.name).slice(0, 64));
   } catch (e) {
-    toast('Not confirmed', String(e && e.message || e));
+    toast('Not confirmed', String(e && e.message || e), 'err');
     return;
   }
   refreshBellPanel();
@@ -2763,7 +2815,7 @@ async function photoRejectAct(fileId) {
     await api.rejectPhoto(fileId);
     toast('Proposal rejected', 'Nothing landed — the NAS quarantine copy is discarded');
   } catch (e) {
-    toast('Not rejected', String(e && e.message || e));
+    toast('Not rejected', String(e && e.message || e), 'err');
     return;
   }
   refreshBellPanel();
@@ -2790,7 +2842,7 @@ async function phCapSaveAct(fileId) {
     PH_UI.editCap = null;
     toast('Caption updated', String(f.caption).slice(0, 64));
   } catch (e) {
-    toast('Not saved', String(e && e.message || e));
+    toast('Not saved', String(e && e.message || e), 'err');
     return;
   }
   return drawViewer(await api.getShow(VIEWER.showId));
@@ -2829,7 +2881,7 @@ async function rcGenerateAct(showId) {
     toast(had ? 'Draft regenerated' : 'Recap drafted',
       (rb.highlights || []).length + ' highlights · ' + (rb.photo_ids || []).length + ' photos — review it before anything goes out');
   } catch (e) {
-    toast('Not generated', String(e && e.message || e));
+    toast('Not generated', String(e && e.message || e), 'err');
     return;
   }
   return refreshRecap(showId);
@@ -2875,7 +2927,7 @@ async function rcSaveAct(showId, key) {
     toast('Recap updated', 'Saved to the draft — still nothing sent');
   } catch (e) {
     /* the content firewall speaks here, in the person's own words */
-    toast('Not saved', String(e && e.message || e));
+    toast('Not saved', String(e && e.message || e), 'err');
     return;
   }
   return refreshRecap(showId);
@@ -2898,7 +2950,7 @@ async function rcAddAct(showId, what) {
     patch = { stats: st }; key = 's:' + (st.length - 1);
   }
   if (!patch) return;
-  try { await api.updateRecap(showId, patch); } catch (e) { toast('Not added', String(e && e.message || e)); return; }
+  try { await api.updateRecap(showId, patch); } catch (e) { toast('Not added', String(e && e.message || e), 'err'); return; }
   return rcEditAct(showId, key);
 }
 async function rcDelAct(showId, key) {
@@ -2913,7 +2965,7 @@ async function rcDelAct(showId, key) {
     await api.updateRecap(showId, patch);
     RECAP_UI.edit = null;
     toast('Removed from the draft', 'The recap updates everywhere it renders');
-  } catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not removed', String(e && e.message || e), 'err'); return; }
   return refreshRecap(showId);
 }
 async function rcPhotoAct(fileId, how) {
@@ -2923,7 +2975,7 @@ async function rcPhotoAct(fileId, how) {
     if (how === 'remove') await api.removeRecapPhoto(f.show_id, f.id);
     else if (how === 'add') await api.addRecapPhoto(f.show_id, f.id);
     else await api.reorderRecapPhoto(f.show_id, f.id, how === 'up' ? -1 : 1);
-  } catch (e) { toast('Not changed', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not changed', String(e && e.message || e), 'err'); return; }
   return refreshRecap(f.show_id);
 }
 async function rcApproveAct(showId) {
@@ -2931,14 +2983,14 @@ async function rcApproveAct(showId) {
     var rec = await api.approveRecap(showId);
     RECAP_UI.edit = null;
     toast('Recap approved', 'Locked for send by ' + userName(rec.approved_by) + ' — sending is still a human act');
-  } catch (e) { toast('Not approved', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not approved', String(e && e.message || e), 'err'); return; }
   return refreshRecap(showId);
 }
 async function rcReopenAct(showId) {
   try {
     await api.reopenRecap(showId);
     toast('Reopened for edits', 'Back to draft — it cannot be marked sent until it is approved again');
-  } catch (e) { toast('Not reopened', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not reopened', String(e && e.message || e), 'err'); return; }
   return refreshRecap(showId);
 }
 /* the mock. Records a send a person performed; performs no send. */
@@ -2960,7 +3012,7 @@ async function rcCommitSentAct(showId) {
     var rec = await api.markSent(showId, to);
     closeM();
     toast('Recorded as sent', 'Recap sent to ' + rec.sent_to + ' — logged to the folder’s activity');
-  } catch (e) { toast('Not recorded', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not recorded', String(e && e.message || e), 'err'); return; }
   return refreshRecap(showId);
 }
 async function rcPreviewAct(showId) {
@@ -3052,7 +3104,7 @@ async function noteEditSaveAct(id) {
     NOTES_UI.editing = null;
     toast('Note updated', 'Edited marker set' + (n.mentions.length ? ' · mentions re-parsed' : ''));
   } catch (e) {
-    toast('Not saved', String(e && e.message || e));
+    toast('Not saved', String(e && e.message || e), 'err');
     return;
   }
   return refreshFinanceUI();
@@ -3118,7 +3170,7 @@ async function confirmShowAct(showId) {
   try {
     r = await api.confirmShow(showId);
   } catch (e) {
-    toast('Not confirmed', String(e && e.message || e));
+    toast('Not confirmed', String(e && e.message || e), 'err');
     return;
   }
   toast('Confirmed', showLabel(show) + ' — the client committed. Scheduler push is unlocked.');
@@ -3208,7 +3260,7 @@ async function commitScope() {
   try {
     show = await api.setScope(PENDING_SCOPE.showId, patch);
   } catch (e) {
-    toast('Scope not saved', String(e && e.message || e));
+    toast('Scope not saved', String(e && e.message || e), 'err');
     return;
   }
   closeM();
@@ -3225,7 +3277,7 @@ async function scopeFromSpecAct(showId) {
     toast('Filled from the bound spec', scopeLine(show) + ' — stack-aware where the spec records stacking');
     return render('show', Number(showId));
   } catch (e) {
-    toast('Nothing to fill from', String(e && e.message || e));
+    toast('Nothing to fill from', String(e && e.message || e), 'err');
   }
 }
 
@@ -3243,7 +3295,7 @@ async function markStruckAct(showId) {
       ? r.created + ' show report' + (r.created === 1 ? '' : 's') + ' now owed — the crew has been asked'
       : 'nobody on the crew has a login, so no report is owed');
   } catch (e) {
-    toast('Not marked', String(e && e.message || e));
+    toast('Not marked', String(e && e.message || e), 'err');
     return;
   }
   await updateBellBadge();
@@ -3273,7 +3325,7 @@ async function repSaveAct(id) {
   try {
     r = await api.fileTechReport(showId, { body: body });
   } catch (e) {
-    toast('Not filed', String(e && e.message || e));
+    toast('Not filed', String(e && e.message || e), 'err');
     return;
   }
   REPORT_UI.editing = null;
@@ -3286,12 +3338,12 @@ async function repSaveAct(id) {
 }
 async function repReviewAct(id) {
   try { await api.reviewTechReport(id); toast('Marked reviewed', 'Optional bookkeeping — filing was what cleared it'); }
-  catch (e) { toast('Not reviewed', String(e && e.message || e)); return; }
+  catch (e) { toast('Not reviewed', String(e && e.message || e), 'err'); return; }
   return refreshShowTab(CUR.showId, 'reports');
 }
 async function repReopenAct(id) {
   try { await api.reopenTechReport(id); toast('Reopened', 'Back to filed — they can revise it'); }
-  catch (e) { toast('Not reopened', String(e && e.message || e)); return; }
+  catch (e) { toast('Not reopened', String(e && e.message || e), 'err'); return; }
   return refreshShowTab(CUR.showId, 'reports');
 }
 async function repNagAct(id) {
@@ -3300,7 +3352,7 @@ async function repNagAct(id) {
   try {
     await api.nagTechReports(rep.show_id, rep.username);
     toast('Nudged ' + (firstName(rep.username) || rep.username), 'Bell + their chosen channel');
-  } catch (e) { toast('Not sent', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not sent', String(e && e.message || e), 'err'); return; }
   await updateBellBadge();
   return refreshShowTab(rep.show_id, 'reports');
 }
@@ -3308,7 +3360,7 @@ async function repNagAllAct(showId) {
   try {
     var r = await api.nagTechReports(showId, null);
     toast('Nudged everyone still out', r.nagged + ' reminder' + (r.nagged === 1 ? '' : 's') + ' sent');
-  } catch (e) { toast('Not sent', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not sent', String(e && e.message || e), 'err'); return; }
   await updateBellBadge();
   return refreshShowTab(Number(showId), 'reports');
 }
@@ -3367,10 +3419,10 @@ async function repAttachCommitAct() {
     if (!apiMode()) { toast('Uploads need the live server', 'In the demo, pick an existing document instead'); return; }
     var res;
     try { res = await uploadRealFile(p.showId, file, { kind: 'report' }); }
-    catch (e) { toast('Upload failed', String(e && e.message || e)); return; }
+    catch (e) { toast('Upload failed', String(e && e.message || e), 'err'); return; }
     fileId = res.file.id;
     if (!res.stored && res.reason !== 'not-configured') {
-      toast('Filed, but the bytes did not land', res.reason);
+      toast('Filed, but the bytes did not land', res.reason, 'err');
     }
   } else {
     fileId = _n('repSel');
@@ -3382,7 +3434,7 @@ async function repAttachCommitAct() {
   if (ta && String(ta.value || '').trim()) payload.body = String(ta.value).trim();
   var r;
   try { r = await api.fileTechReport(p.showId, payload); }
-  catch (e2) { toast('Not attached', String(e2 && e2.message || e2)); return; }
+  catch (e2) { toast('Not attached', String(e2 && e2.message || e2), 'err'); return; }
   PENDING_REPATTACH = null;
   REPORT_UI.editing = null;
   closeM();
@@ -3402,28 +3454,28 @@ async function archiveShowAct(showId) {
     var r = await api.archiveShow(showId);
     toast(r.already ? 'Already archived' : 'Archived',
       'Out of the working set — nothing deleted, and the Archive view still opens it');
-  } catch (e) { toast('Not archived', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not archived', String(e && e.message || e), 'err'); return; }
   return render('show', Number(showId));
 }
 async function unarchiveShowAct(showId) {
   try {
     await api.unarchiveShow(showId);
     toast('Back in the working set', 'It appears in the normal lists again');
-  } catch (e) { toast('Not restored', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not restored', String(e && e.message || e), 'err'); return; }
   return render('show', Number(showId));
 }
 async function archiveProjectAct(projectId) {
   try {
     await api.archiveProject(projectId);
     toast('Folder archived', 'Every show inside it went with it');
-  } catch (e) { toast('Not archived', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not archived', String(e && e.message || e), 'err'); return; }
   return render('projects');
 }
 async function unarchiveProjectAct(projectId) {
   try {
     await api.unarchiveProject(projectId);
     toast('Folder restored', 'Back in the portfolio');
-  } catch (e) { toast('Not restored', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not restored', String(e && e.message || e), 'err'); return; }
   return render('archive');
 }
 
@@ -3437,7 +3489,7 @@ async function notifPrefAct(spec) {
   patch[parts[0]] = parts[1];
   try {
     await api.setNotificationPrefs(patch);
-  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   toast(NOTIFY_KIND_LABEL[parts[0]] || parts[0],
     parts[1] === 'off' ? 'Bell only — it still reaches you in the app'
       : parts[1] === 'immediate' ? 'You will hear about these right away'
@@ -3447,7 +3499,7 @@ async function notifPrefAct(spec) {
 async function runSweepAct() {
   var r;
   try { r = await api.sweep(); }
-  catch (e) { toast('Sweep refused', String(e && e.message || e)); return; }
+  catch (e) { toast('Sweep refused', String(e && e.message || e), 'err'); return; }
   var bits = [];
   if (r.struck) bits.push(r.struck + ' struck');
   if (r.reports_created) bits.push(r.reports_created + ' reports created');
@@ -3569,7 +3621,7 @@ async function copyTempPwAct() {
     sel.removeAllRanges(); sel.addRange(range);
     toast('Selected — press Ctrl-C', 'This browser will not let a page write to the clipboard');
   } catch (_) {
-    toast('Copy it by hand', 'This browser will not let a page write to the clipboard');
+    toast('Copy it by hand', 'This browser will not let a page write to the clipboard', 'err');
   }
 }
 
@@ -3602,7 +3654,7 @@ async function commitAddPerson() {
   body.username = username;
   var r;
   try { r = await api.createUser(body); }
-  catch (e) { toast('Not created', String((e && e.message) || e)); return; }
+  catch (e) { toast('Not created', String((e && e.message) || e), 'err'); return; }
   var who = (r.user && (r.user.name || r.user.username)) || username;
   revealTempPassword('Account created · ' + who, username, r.temp_password,
     '<b>' + esc(who) + '</b> can sign in now with this temporary password. It is the only time it is shown.');
@@ -3628,7 +3680,7 @@ async function commitEditPerson() {
   if (!PENDING_USER) return;
   var id = PENDING_USER;
   try { await api.updateUser(id, personFromForm()); }
-  catch (e) { toast('Not saved', String((e && e.message) || e)); return; }
+  catch (e) { toast('Not saved', String((e && e.message) || e), 'err'); return; }
   closeM();
   PENDING_USER = null;
   toast('Saved', 'Their role and permissions take effect on their next request');
@@ -3656,7 +3708,7 @@ async function commitResetPassword(userId) {
   var u = USERS_BY_ID[Number(userId)];
   var r;
   try { r = await api.resetUserPassword(userId); }
-  catch (e) { toast('Not reset', String((e && e.message) || e)); return; }
+  catch (e) { toast('Not reset', String((e && e.message) || e), 'err'); return; }
   revealTempPassword('Password reset · ' + ((u && u.name) || r.username), r.username, r.temp_password,
     'Read this to <b>' + esc((u && u.name) || r.username) + '</b>. Their old password no longer works and ' +
     'they have been signed out everywhere.');
@@ -3686,7 +3738,7 @@ async function commitSetActive(userId, on) {
   var u = USERS_BY_ID[Number(userId)];
   var isMe = !!(u && u.username === CURRENT_USER.username);
   try { await api.setUserActive(userId, on); }
-  catch (e) { toast(on ? 'Not reactivated' : 'Not deactivated', String((e && e.message) || e)); return; }
+  catch (e) { toast(on ? 'Not reactivated' : 'Not deactivated', String((e && e.message) || e), 'err'); return; }
   closeM();
   if (!on && isMe && !api.isDemo()) {
     /* We just switched off the account this window is holding. Say it plainly
@@ -3812,7 +3864,7 @@ async function commitChangePassword() {
   var v = function (id) { var el = document.getElementById(id); return el ? String(el.value || '') : ''; };
   if (v('cpNew') !== v('cpNew2')) { toast('They do not match', 'Type the new password the same way twice'); return; }
   try { await api.changeMyPassword(v('cpCur'), v('cpNew')); }
-  catch (e) { toast('Not changed', String((e && e.message) || e)); return; }
+  catch (e) { toast('Not changed', String((e && e.message) || e), 'err'); return; }
   closeM();
   toast('Password changed', 'You are signed out on every other device');
   return render('settings');
@@ -3948,7 +4000,7 @@ async function crewCommit() {
   var saved;
   try {
     saved = p.id ? await api.updateCrew(p.id, body) : await api.addCrew(p.showId, body);
-  } catch (e) { toast(p.id ? 'Not saved' : 'Not added', String(e && e.message || e)); return; }
+  } catch (e) { toast(p.id ? 'Not saved' : 'Not added', String(e && e.message || e), 'err'); return; }
   var showId = p.showId, wasEdit = !!p.id;
   PENDING_CREW = null;
   closeM();
@@ -3964,7 +4016,7 @@ async function crewCommit() {
 async function crewRemoveAct(crewId) {
   var showId = PENDING_CREW ? PENDING_CREW.showId : CUR.showId;
   try { await api.removeCrew(crewId); }
-  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  catch (e) { toast('Not removed', String(e && e.message || e), 'err'); return; }
   PENDING_CREW = null;
   closeM();
   toast('Taken off the show', 'They are told, and they stop hearing about this show');
@@ -4035,7 +4087,7 @@ async function csCommit() {
     client_poc: mkPoc('csCpName', 'csCpTitle', 'csCpPhone')
   };
   try { await api.updateCallSheet(showId, patch); }
-  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   PENDING_SHEET = null;
   closeM();
   toast('Call sheet saved', 'Everyone on this show has been told the times changed');
@@ -4102,7 +4154,7 @@ async function commitAddContact() {
   if (!body.name) { toast('Who is it?', 'A contact needs a name'); return; }
   var made;
   try { made = await api.createContact(body); }
-  catch (e) { toast('Not added', String(e && e.message || e)); return; }
+  catch (e) { toast('Not added', String(e && e.message || e), 'err'); return; }
   closeM();
   toast('Added to the rolodex', made.name + (made.org ? ' · ' + made.org : ''));
   if (CUR.view === 'contacts') return render('contacts');
@@ -4111,7 +4163,7 @@ async function openEditContact(contactId) {
   if (!canEditContacts()) { toast('PMs manage the rolodex', 'Ask a pm, a manager or an admin'); return; }
   var c;
   try { c = await api.getContact(contactId); }
-  catch (e) { toast('Not found', String(e && e.message || e)); return; }
+  catch (e) { toast('Not found', String(e && e.message || e), 'err'); return; }
   PENDING_CONTACT = c.id;
   openModal('Edit · ' + c.name, contactFields(c) + _foot(act('ctEditCommit'), 'Save contact'));
 }
@@ -4121,7 +4173,7 @@ async function commitEditContact() {
   if (!body.name) { toast('Who is it?', 'A contact keeps its name — blank is not a rename'); return; }
   var saved;
   try { saved = await api.updateContact(PENDING_CONTACT, body); }
-  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   PENDING_CONTACT = null;
   closeM();
   toast('Saved', saved.name);
@@ -4133,7 +4185,7 @@ async function commitEditContact() {
 async function openContactCard(contactId) {
   var c;
   try { c = await api.getContact(contactId); }
-  catch (e) { toast('Not found', String(e && e.message || e)); return; }
+  catch (e) { toast('Not found', String(e && e.message || e), 'err'); return; }
   var shows = (c.shows || []).map(function (x) {
     return '<div class="poc-card"><div class="poc-t"><span>' + esc(x.role || '—') + '</span>' +
       '<button style="padding:0;background:none;border:0;cursor:pointer;text-align:left;color:var(--text);font-family:inherit" ' +
@@ -4176,14 +4228,14 @@ function ctOpenShowAct(showId) { closeM(); return render('show', showId); }
 
 async function ctArchiveAct(contactId) {
   try { await api.archiveContact(contactId); }
-  catch (e) { toast('Not archived', String(e && e.message || e)); return; }
+  catch (e) { toast('Not archived', String(e && e.message || e), 'err'); return; }
   closeM();
   toast('Archived', 'Out of the working set — still searchable, every show link kept');
   if (CUR.view === 'contacts') return render('contacts');
 }
 async function ctUnarchiveAct(contactId) {
   try { await api.unarchiveContact(contactId); }
-  catch (e) { toast('Not restored', String(e && e.message || e)); return; }
+  catch (e) { toast('Not restored', String(e && e.message || e), 'err'); return; }
   closeM();
   toast('Back in the rolodex', 'Nothing was lost');
   if (CUR.view === 'contacts') return render('contacts');
@@ -4203,7 +4255,7 @@ function openDeleteContact(contactId) {
 }
 async function ctDeleteGoAct(contactId) {
   try { await api.deleteContact(contactId); }
-  catch (e) { closeM(); toast('Not deleted', String(e && e.message || e)); return; }
+  catch (e) { closeM(); toast('Not deleted', String(e && e.message || e), 'err'); return; }
   closeM();
   toast('Deleted', 'The card is gone for good');
   if (CUR.view === 'contacts') return render('contacts');
@@ -4213,7 +4265,7 @@ async function ctDeleteGoAct(contactId) {
 async function openLinkContact(showId) {
   var rows;
   try { rows = await api.listContacts({}); }
-  catch (e) { toast('Rolodex unavailable', String(e && e.message || e)); return; }
+  catch (e) { toast('Rolodex unavailable', String(e && e.message || e), 'err'); return; }
   var linked = {};
   contactsForShow(showId).forEach(function (x) { linked[x.contact.id] = 1; });
   var free = rows.filter(function (c) { return !linked[c.id]; });
@@ -4242,7 +4294,7 @@ async function scAddCommitAct() {
   if (!contactId) { toast('Pick a contact', 'Or add one on the Contacts page first'); return; }
   var showId = PENDING_SC.showId;
   try { await api.linkShowContact(showId, contactId, _v('scRole')); }
-  catch (e) { toast('Not linked', String(e && e.message || e)); return; }
+  catch (e) { toast('Not linked', String(e && e.message || e), 'err'); return; }
   PENDING_SC = null;
   closeM();
   var c = CONTACTS_BY_ID[Number(contactId)];
@@ -4252,7 +4304,7 @@ async function scAddCommitAct() {
 async function scUnlinkAct(contactId, showIdKey) {
   var showId = Number(showIdKey);
   try { await api.unlinkShowContact(showId, contactId); }
-  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  catch (e) { toast('Not removed', String(e && e.message || e), 'err'); return; }
   toast('Taken off the show', 'The contact keeps its card and its history');
   return refreshShowTab(showId, 'schedule');
 }
@@ -4283,7 +4335,7 @@ async function csPickContactAct(showId, slot) {
   var sid = PENDING_SHEET.showId;
   var rows;
   try { rows = await api.listContacts({}); }
-  catch (e) { toast('Rolodex unavailable', String(e && e.message || e)); return; }
+  catch (e) { toast('Rolodex unavailable', String(e && e.message || e), 'err'); return; }
   PENDING_SHEET = { showId: sid, stash: stash, slot: slot };
   var list = rows.map(function (c) {
     return '<button class="sp-hit" style="display:flex;align-items:center;gap:9px;width:100%;text-align:left;background:none;border:0;border-radius:6px;padding:7px 9px;cursor:pointer;color:var(--text);font-family:inherit" ' +
@@ -4373,7 +4425,7 @@ async function esCommit() {
       load_in_date: _v('esLoadIn'), event_date: _v('esEvent'), strike_date: _v('esStrike'),
       owner: _v('esOwner'), on_site_poc: _v('esPoc'), cabinets: _n('esCabs') || 0
     });
-  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   PENDING_SHOWEDIT = null;
   closeM();
   var suffix = await sendNotifies('show', showId, 'updated ' + name + ' —');
@@ -4414,7 +4466,7 @@ async function efCommit() {
   try {
     await api.updateProject(pid, { name: name, client: _v('efClient'),
       owner: _v('efOwner'), description: _v('efDesc') });
-  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   PENDING_FOLDEDIT = null;
   closeM();
   var suffix = await sendNotifies('project', pid, 'updated the folder ' + name + ' —');
@@ -4491,7 +4543,7 @@ async function tkCommit() {
       body.show_id = p.showId;
       saved = await api.createStep(body);
     }
-  } catch (e) { toast(p.id ? 'Not saved' : 'Not created', String(e && e.message || e)); return; }
+  } catch (e) { toast(p.id ? 'Not saved' : 'Not created', String(e && e.message || e), 'err'); return; }
   var showId = p.showId, wasNew = !p.id;
   PENDING_TASK = null;
   closeM();
@@ -4506,7 +4558,7 @@ async function tkCommit() {
 async function tkDeleteAct(stepId) {
   var showId = PENDING_TASK ? PENDING_TASK.showId : CUR.showId;
   try { await api.deleteStep(stepId); }
-  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
   PENDING_TASK = null;
   closeM();
   toast('Task deleted', 'Its owner has been told it came off their list');
@@ -4519,7 +4571,7 @@ async function stepStatusAct(stepId, status) {
   var st = await api.getStep(stepId);
   if (!st) return;
   try { await api.setStepStatus(stepId, status); }
-  catch (e) { toast('Not updated', String(e && e.message || e)); return; }
+  catch (e) { toast('Not updated', String(e && e.message || e), 'err'); return; }
   await refreshShowTab(st.show_id, 'pipeline');
   toast(status === 'blocked' ? 'Marked blocked' : 'Status updated',
     st.title + (status === 'blocked'
@@ -4568,7 +4620,7 @@ async function blCommit() {
   try {
     if (p.id) await api.updateBudgetLine(p.id, { category: cat, allotted: amt, notes: _v('blNotes') });
     else await api.addBudgetLine(p.jobId, { category: cat, allotted: amt, notes: _v('blNotes') });
-  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   var jobId = p.jobId, wasEdit = !!p.id;
   PENDING_BUDGET = null;
   closeM();
@@ -4579,7 +4631,7 @@ async function blCommit() {
 async function blDeleteAct(lineId) {
   var jobId = PENDING_BUDGET ? PENDING_BUDGET.jobId : CUR.jobId;
   try { await api.deleteBudgetLine(lineId); }
-  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  catch (e) { toast('Not removed', String(e && e.message || e), 'err'); return; }
   PENDING_BUDGET = null;
   closeM();
   toast('Line removed', 'Costs in that category now read as unbudgeted');
@@ -4615,7 +4667,7 @@ async function cvCommit() {
   var amt = _n('cvAmt');
   if (amt == null || !(amt >= 0)) { toast('Enter a value', 'A blank contract value is not zero — cancel instead'); return; }
   try { await api.updateJob(jobId, { contract_value: amt, deal_type: _v('cvDeal') }); }
-  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   PENDING_CONTRACT = null;
   closeM();
   toast('Contract value saved', fmtMoney(amt) + ' — margin now computes on this job');
@@ -4674,7 +4726,7 @@ async function bkCommit() {
   try {
     if (p.id) await api.updateBooking(p.id, body);
     else await api.createBooking(p.showId, body);
-  } catch (e) { toast(p.id ? 'Not saved' : 'Not booked', String(e && e.message || e)); return; }
+  } catch (e) { toast(p.id ? 'Not saved' : 'Not booked', String(e && e.message || e), 'err'); return; }
   var showId = p.showId, wasNew = !p.id;
   PENDING_BOOK = null;
   closeM();
@@ -4694,7 +4746,7 @@ async function bkDeleteAct(id) {
       'document attached to it stays on the show’s Files tab.')) return;
   if (bk && bk.show_id) showId = bk.show_id;
   try { await api.deleteBooking(id); }
-  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
   PENDING_BOOK = null;
   closeM();
   toast('Booking cancelled',
@@ -4806,7 +4858,7 @@ async function roomCommit() {
   var saved;
   try {
     saved = p.id ? await api.updateRooming(p.id, body) : await api.addRooming(p.showId, body);
-  } catch (e) { toast(p.id ? 'Not saved' : 'Not added', String(e && e.message || e)); return; }
+  } catch (e) { toast(p.id ? 'Not saved' : 'Not added', String(e && e.message || e), 'err'); return; }
   var showId = p.showId, wasEdit = !!p.id;
   PENDING_ROOM = null;
   closeM();
@@ -4818,7 +4870,7 @@ async function roomCommit() {
 async function roomSeedCrewAct(showId) {
   var r;
   try { r = await api.seedRoomingFromCrew(showId); }
-  catch (e) { toast('Nothing added', String(e && e.message || e)); return; }
+  catch (e) { toast('Nothing added', String(e && e.message || e), 'err'); return; }
   var n = (r && r.added ? r.added.length : 0);
   toast(n ? 'Crew roomed' : 'Nothing to add',
     n ? n + (n === 1 ? ' person' : ' people') + ' added — fill in hotels and conf numbers per row'
@@ -4833,7 +4885,7 @@ async function roomDeleteAct(id) {
   if (!askConfirm('Take ' + ((row && row.person) || 'this person') + ' off the rooming list?\n\n' +
       'The row goes and the removal is logged. Any linked booking is untouched.')) return;
   try { await api.deleteRooming(id); }
-  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  catch (e) { toast('Not removed', String(e && e.message || e), 'err'); return; }
   PENDING_ROOM = null;
   closeM();
   toast('Off the rooming list', ((row && row.person) || 'The row') + ' — logged to activity');
@@ -4862,7 +4914,7 @@ async function poEtaCommit() {
   stageNotifies();
   var po;
   try { po = await api.updatePO(poId, { expected_date: _v('poEta') || null, tracking: _v('poTrk') || null }); }
-  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   PENDING_POETA = null;
   closeM();
   var suffix = await sendNotifies('po', poId, 'set the delivery date on ' + po.po_number + ' —');
@@ -4892,7 +4944,7 @@ async function pushSched(showId) {
   try { feats = await api.features(); } catch (e) { feats = {}; }
   if (SR.isApi() && !feats.schedulerPush) {
     toast('Scheduler not configured',
-      'This server has no SCHEDULER_BASE_URL — there is nothing to push to');
+      'This server has no SCHEDULER_BASE_URL — there is nothing to push to', 'err');
     return;
   }
   var show = await api.getShow(showId);
@@ -4931,7 +4983,7 @@ async function pushChoiceNewAct(showId) {
 async function pushChoiceLinkAct(showId) {
   var events;
   try { events = await api.listSchedulerEvents(); }
-  catch (e) { toast('Could not list staffing events', String(e && e.message || e)); return; }
+  catch (e) { toast('Could not list staffing events', String(e && e.message || e), 'err'); return; }
   PENDING_PUSH = { showId: Number(showId), linked: false };
   var rows = (events || []).map(function (ev) {
     var when = (ev.setup || ev.eventDate || '—') + (ev.breakdown ? ' → ' + ev.breakdown : '');
@@ -4968,7 +5020,7 @@ async function pushPickEventAct(eventId) {
   if (!showId) { closeM(); return; }
   var r;
   try { r = await api.linkSchedulerEvent(showId, eventId); }
-  catch (e) { toast('Could not link', String(e && e.message || e)); return; }
+  catch (e) { toast('Could not link', String(e && e.message || e), 'err'); return; }
   toast('Linked to the staffing app',
     'event #' + eventId + (r && r.event && r.event.name ? ' — ' + r.event.name : '') +
     ' · nothing sent yet');
@@ -4983,7 +5035,7 @@ async function openPushConfirm(show) {
   var showId = Number(show.id);
   var dry;
   try { dry = await api.pushToScheduler(showId, { live: false }); }
-  catch (e) { toast('Could not build the push', String(e && e.message || e)); return; }
+  catch (e) { toast('Could not build the push', String(e && e.message || e), 'err'); return; }
   PENDING_PUSH = { showId: showId, linked: !!show.scheduler_event_id };
   /* The dry run answers { dryRun, ready, problems[], rosterNote, targets, payloads }
      — `payloads` PLURAL, and it is the only place the crew list and the child
@@ -5083,7 +5135,7 @@ async function doPushLive(showId, mode) {
   var linked = !!(PENDING_PUSH && PENDING_PUSH.linked);
   var r;
   try { r = await api.pushToScheduler(showId, { live: true, force: linked, mode: mode }); }
-  catch (e) { toast('Push refused', String(e && e.message || e)); return; }
+  catch (e) { toast('Push refused', String(e && e.message || e), 'err'); return; }
   PENDING_PUSH = null;
   closeM();
   var c = r.counts || {};
@@ -5097,7 +5149,7 @@ async function doPushLive(showId, mode) {
 /* ── unlink — clears the binding HERE; deletes nothing over there ─────────── */
 async function unlinkSchedAct(showId) {
   var show = await api.getShow(showId);
-  if (!show.scheduler_event_id) { toast('Not linked', 'This show has no staffing event to unlink'); return; }
+  if (!show.scheduler_event_id) { toast('Not linked', 'This show has no staffing event to unlink', 'err'); return; }
   openModal('Unlink from staffing event #' + esc(show.scheduler_event_id) + '?',
     '<div class="hint" style="margin:0 0 12px">' + icon('link') + '<span>This clears the link on the ' +
     'Showrunner side only. <b>Nothing is deleted in the staffing app</b> — the event and every row on it ' +
@@ -5109,7 +5161,7 @@ async function unlinkSchedAct(showId) {
 async function unlinkGoAct(showId) {
   var r;
   try { r = await api.unlinkSchedulerEvent(showId); }
-  catch (e) { toast('Could not unlink', String(e && e.message || e)); return; }
+  catch (e) { toast('Could not unlink', String(e && e.message || e), 'err'); return; }
   closeM();
   toast('Unlinked', 'event #' + (r && r.unlinkedEventId || '—') +
     ' still exists in the staffing app, untouched');
@@ -5159,7 +5211,7 @@ async function prCommit() {
   try {
     if (p.id) await api.updateProof(p.id, body);
     else await api.createProof(p.showId, body);
-  } catch (e) { toast(p.id ? 'Not saved' : 'Not created', String(e && e.message || e)); return; }
+  } catch (e) { toast(p.id ? 'Not saved' : 'Not created', String(e && e.message || e), 'err'); return; }
   var showId = p.showId, wasNew = !p.id;
   PENDING_PROOF = null;
   closeM();
@@ -5169,7 +5221,7 @@ async function prCommit() {
 async function prDeleteAct(id) {
   var showId = PENDING_PROOF ? PENDING_PROOF.showId : CUR.showId;
   try { await api.deleteProof(id); }
-  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
   PENDING_PROOF = null;
   closeM();
   toast('Proof deleted', '');
@@ -5191,7 +5243,7 @@ async function proofAction(proofId, approve) {
         status: 'markup', note: 'changes requested' });
       await api.updateProof(proofId, { status: 'markup' });
     }
-  } catch (e) { toast(approve ? 'Not approved' : 'Not reopened', String(e && e.message || e)); return; }
+  } catch (e) { toast(approve ? 'Not approved' : 'Not reopened', String(e && e.message || e), 'err'); return; }
   toast(approve ? 'Approved' : 'Changes requested',
     (p.name || p.code) + (approve ? ' — the show has been told' : ' — a new round is open'));
   return refreshShowTab(showId, 'proofs');
@@ -5297,7 +5349,7 @@ async function exCommit() {
   if (_v('exeDate')) patch.txn_date = _v('exeDate');
   stageNotifies();
   try { await api.updateExpense(p.id, patch); }
-  catch (err) { toast('Not saved', String(err && err.message || err)); return; }
+  catch (err) { toast('Not saved', String(err && err.message || err), 'err'); return; }
   PENDING_EXPEDIT = null;
   closeM();
   var suffix = await sendNotifies('expense', p.id, 'corrected a cost — ' + vendor + ' —');
@@ -5313,7 +5365,7 @@ async function exVoidAct(expenseId) {
       'It comes off the books and off every burn bar. Any PO line pointing at it is ' +
       'unpicked, its notes go with it, and the void is logged with the amount it carried.')) return;
   try { await api.deleteExpense(expenseId); }
-  catch (err) { toast('Not voided', String(err && err.message || err)); return; }
+  catch (err) { toast('Not voided', String(err && err.message || err), 'err'); return; }
   PENDING_EXPEDIT = null;
   closeM();
   toast('Cost voided', (e.vendor || 'The expense') + ' is off the books — the void is on the trail.');
@@ -5352,7 +5404,7 @@ async function deleteShowAct(showId) {
     return;
   }
   try { await api.deleteShow(show.id); }
-  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
   toast('Show deleted', nm + ' and everything on it is off the record.');
   await updateMineCount();
   await updateFinCount();
@@ -5372,7 +5424,7 @@ async function deleteProjectAct(projectId) {
     return;
   }
   try { await api.deleteProject(p.id); }
-  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
   toast('Folder deleted', p.name + ' — ' + n + ' show' + (n === 1 ? '' : 's') + ', its jobs, budgets and records are gone.');
   await updateFinCount();
   return render('projects');
@@ -5435,7 +5487,7 @@ async function nsCommit() {
       on_site_poc: _v('nsPoc'),
       template_id: templateId, seed_template: seed
     });
-  } catch (e) { toast('Not added', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not added', String(e && e.message || e), 'err'); return; }
   PENDING_NEWSHOW = null;
   closeM();
   var suffix = await sendNotifies('show', show.id, 'added the show “' + name + '” —');
@@ -5462,7 +5514,7 @@ async function seedPipelineAct(showId) {
   }
   var r;
   try { r = await api.instantiateTemplate(showId, templateId); }
-  catch (e) { toast('Not seeded', String(e && e.message || e)); return; }
+  catch (e) { toast('Not seeded', String(e && e.message || e), 'err'); return; }
   toast('Pipeline seeded', (r.instantiated_steps || 0) + ' steps landed' +
     (show.event_date ? ', back-scheduled off ' + fmtDate(show.event_date) : ' — set an event date to back-schedule them'));
   await updateMineCount();
@@ -5507,7 +5559,7 @@ async function njCommit() {
   if (_v('njQb')) body.qb_job_number = _v('njQb');
   var j;
   try { j = await api.createJob(pid, body); }
-  catch (e) { toast('Not opened', String(e && e.message || e)); return; }
+  catch (e) { toast('Not opened', String(e && e.message || e), 'err'); return; }
   PENDING_NEWJOB = null;
   closeM();
   toast('Job opened', j.qb_job_number + ' · ' + client +
@@ -5554,7 +5606,7 @@ async function msCommit() {
   try {
     if (p.id) await api.updateMilestone(p.id, { label: label, date: _v('msDate') });
     else await api.addMilestone(p.showId, { label: label, date: _v('msDate') });
-  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   var showId = p.showId, wasEdit = !!p.id;
   PENDING_MS = null;
   closeM();
@@ -5565,7 +5617,7 @@ async function msCommit() {
 async function msDeleteAct(milestoneId) {
   var showId = PENDING_MS ? PENDING_MS.showId : CUR.showId;
   try { await api.deleteMilestone(milestoneId); }
-  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  catch (e) { toast('Not removed', String(e && e.message || e), 'err'); return; }
   PENDING_MS = null;
   closeM();
   toast('Milestone removed', 'Off the header strip and the Calendar');
@@ -5606,7 +5658,7 @@ async function keyMintCommit() {
   if (_c('akPropose')) scopes.push('agent:propose');
   var r;
   try { r = await api.createApiKey({ label: _v('akLabel'), scopes: scopes.length ? scopes : ['agent:read'] }); }
-  catch (e) { toast('Not minted', String(e && e.message || e)); return; }
+  catch (e) { toast('Not minted', String(e && e.message || e), 'err'); return; }
   /* the one-time reveal — same lifecycle as the temp password */
   TEMP_REVEAL = { username: r.key_prefix, password: r.key };
   openModal('API key minted · shown once',
@@ -5628,7 +5680,7 @@ async function keyRevokeAct(keyId) {
       'Every request it makes fails from the next call. The row stays on the list as revoked — ' +
       'keys are never deleted, because a credential’s history is part of the record.')) return;
   try { await api.revokeApiKey(keyId); }
-  catch (e) { toast('Not revoked', String(e && e.message || e)); return; }
+  catch (e) { toast('Not revoked', String(e && e.message || e), 'err'); return; }
   toast('Key revoked', 'It stops working immediately; the row stays for the record');
   return render('settings');
 }
@@ -5646,7 +5698,7 @@ async function noteDeleteAct(noteId) {
         ? 'Its ' + replies + (replies === 1 ? ' reply goes' : ' replies go') + ' with it — a headless reply reads as noise.'
         : 'It comes off the thread everywhere it renders.'))) return;
   try { await api.deleteNote(noteId); }
-  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
   toast('Note deleted', replies ? 'Along with ' + replies + (replies === 1 ? ' reply' : ' replies') : 'Off the record');
   return refreshFinanceUI();
 }
@@ -5699,7 +5751,7 @@ async function feCommitAct() {
   if (!name) { toast('A file needs a name', 'Type one, or cancel'); return; }
   var f;
   try { f = await api.updateFile(id, { name: name, kind: _v('feKind') }); }
-  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   PENDING_FILEEDIT = null;
   closeM();
   toast('File updated', fileNameWithExt(f) + ' · ' + fileKindLabel(f.kind));
@@ -5745,7 +5797,7 @@ async function openRagOverride(showId) {
 async function ragSetAct(showId, val) {
   var patch = { rag_override: val === 'derived' ? null : val };
   try { await api.updateShow(showId, patch); }
-  catch (e) { toast('Not set', String(e && e.message || e)); return; }
+  catch (e) { toast('Not set', String(e && e.message || e), 'err'); return; }
   closeM();
   toast(val === 'derived' ? 'Back to derived' : 'Health overridden',
     val === 'derived'
@@ -5795,7 +5847,7 @@ async function tplSaveAct(type) {
   }
   var id = rec && rec.meta ? rec.meta.id : null;
   try { await api.updateTemplate(id, { event_type: type, steps: steps }); }
-  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   toast('Template saved', steps.length + ' steps — every show seeded from the ' +
     typeLabel(type) + ' template from now on inherits this grid');
   return render('templates');
@@ -5812,7 +5864,7 @@ async function tplBankAct(type) {
       description: 'Banked copy of the ' + typeLabel(type) + ' SOP grid (' + TODAY_ISO + ')',
       steps: steps
     });
-  } catch (e) { toast('Not banked', String(e && e.message || e)); return; }
+  } catch (e) { toast('Not banked', String(e && e.message || e), 'err'); return; }
   toast('Copy banked', 'A snapshot of this grid is in the versions list — the live SOP is untouched');
   return render('templates');
 }
@@ -5827,7 +5879,7 @@ async function tplDeleteAct(id, type) {
         : 'It is a banked copy — the live SOP is untouched.') +
       '\n\nShows already seeded keep their steps either way; instantiation copies rows.')) return;
   try { await api.deleteTemplate(id); }
-  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
   toast('Version deleted', isLive ? 'The next version is live now' : 'The banked copy is gone');
   return render('templates');
 }
@@ -5992,7 +6044,7 @@ async function phTagAddAct(fileId) {
   if (tags.indexOf(t) >= 0) { toast('Already tagged', '“' + t + '” is on this photo'); return; }
   tags.push(t);
   try { await api.updatePhoto(f.id, { tags: tags }); }
-  catch (e) { toast('Not tagged', String(e && e.message || e)); return; }
+  catch (e) { toast('Not tagged', String(e && e.message || e), 'err'); return; }
   toast('Tagged', '“' + t + '”');
   if (CUR.view === 'viewer') return drawViewer(await api.getShow(VIEWER.showId));
 }
@@ -6001,7 +6053,7 @@ async function phTagDelAct(fileId, tag) {
   if (!f) return;
   var tags = (f.tags || []).filter(function (x) { return x !== tag; });
   try { await api.updatePhoto(f.id, { tags: tags }); }
-  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  catch (e) { toast('Not removed', String(e && e.message || e), 'err'); return; }
   toast('Tag removed', '“' + tag + '”');
   if (CUR.view === 'viewer') return drawViewer(await api.getShow(VIEWER.showId));
 }
@@ -6066,6 +6118,7 @@ var ACTIONS = {
   commitAddFile: function (t, id) { return commitAddFile(id); },
   commitUpload:  function () { return commitUpload(); },
   downloadFile:  function (t, id) { return downloadFile(id); },
+  uploadMissingBytes: function (t, id) { return uploadMissingBytesAct(id); },
   deleteFile:    function (t, id) { return deleteFileAct(id); },
   vOpenTab:      function (t, id) { return vOpenTab(id); },
   vMax:          function () { return vMax(); },
@@ -6381,7 +6434,7 @@ document.addEventListener('click', function (ev) {
   var idAttr = t.getAttribute('data-id');
   var id = idAttr === null || idAttr === '' ? null : Number(idAttr);
   var r = fn(t, id, t.getAttribute('data-k'));
-  if (r && r.catch) r.catch(function (e) { console.error(e); toast('Something went wrong', String(e && e.message || e)); });
+  if (r && r.catch) r.catch(function (e) { console.error(e); toast('Something went wrong', String(e && e.message || e), 'err'); });
 });
 
 /* ---- dropzone (modeled) ---- */

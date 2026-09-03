@@ -1046,8 +1046,9 @@ function fileCard(f) {
   return '<div class="file-cell">' +
     '<button class="file" ' + act('openViewer', f.id) + '>' +
     '<div class="thumb">' + icon(fileIcon(f)) + '<span class="ext">' + esc(f.ext) + '</span></div>' +
-    '<div class="fb"><b>' + esc(f.name) + '</b><span>' + esc(line) + '</span></div></button>' +
-    fileDownloadChip(f) + fileDeleteChip(f) + '</div>';
+    '<div class="fb"><b>' + esc(f.name) + '</b><span>' + esc(line) + '</span>' +
+    fileBytelessFlag(f) + '</div></button>' +
+    fileDownloadChip(f) + fileUploadChip(f) + fileDeleteChip(f) + '</div>';
 }
 /* documents only — photos have their own gallery tab next door (photo pass) */
 function tabFiles(show) {
@@ -1079,8 +1080,13 @@ function tabBookings(show) {
     var s = normStatus(b.status);
     var lbl = s === 'done' ? 'Confirmed' : s === 'in_progress' ? 'Pending' : s === 'blocked' ? 'Blocked' : 'Needed';
     var override = b.job_id && b.job_id !== show.default_job_id ? JOBS_BY_ID[b.job_id] : null;
+    /* The attached confirmation, checked for SUBSTANCE, not just presence —
+       Brendon's Rhino doc had a file_id and zero bytes, and this row looked
+       exactly like a booking whose paperwork was done. */
+    var bkFile = b.file_id ? FILES_BY_ID[b.file_id] : null;
     return '<tr><td><b style="font-weight:600">' + esc(b.category) + '</b>' +
-      (override ? ' <span class="tag" title="' + esc(override.client + ' · ' + override.description) + '">Job ' + esc(override.qb_job_number) + '</span>' : '') + '</td>' +
+      (override ? ' <span class="tag" title="' + esc(override.client + ' · ' + override.description) + '">Job ' + esc(override.qb_job_number) + '</span>' : '') +
+      (bkFile ? ' ' + fileBytelessFlag(bkFile) : '') + '</td>' +
       '<td>' + esc(b.vendor) + '</td>' +
       '<td><span class="pill ' + esc(STATUS[s].pill) + '"><span class="dot"></span>' + esc(lbl) + '</span></td>' +
       '<td style="text-align:right"><span style="display:inline-flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">' +
@@ -1090,6 +1096,12 @@ function tabBookings(show) {
          what landed. Once the paperwork is on, the button says so. */
       '<button class="btn sm ghost" ' + act('attachBooking', b.id) + '>' + icon('link') +
       (b.file_id ? 'Replace confirmation' : 'Attach confirmation') + '</button>' +
+      /* the byteless record's one-click recovery: the SAME PUT the original
+         attach uses, aimed at the row that already exists */
+      (bkFile && fileIsByteless(bkFile) && canDeleteFile(bkFile, show)
+        ? '<button class="btn sm ghost" ' + act('uploadMissingBytes', bkFile.id) + '>' +
+          icon('upload') + 'Upload the missing document</button>'
+        : '') +
       /* The two buttons that used to sit here — "Paperwork" and "Assign" — were
          toastAttrs fakes, on a table of rows that could not be created in the
          first place. One real edit affordance replaces both. */

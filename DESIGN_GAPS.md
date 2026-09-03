@@ -915,6 +915,21 @@ the join the bell needs and the route does not project it. `memo` and
 schedulerPush` is served and ignored. Each is one line; together they are why the
 most carefully engineered subsystem in the product does not work end to end.
 
+**P13 · The failure state exists in the data and dies at the renderer.** (live
+testing, 2026-09-03.) Every toast wore the success check no matter what it said —
+"Could not list staffing events" and "Filed, but the bytes did not land" looked
+exactly like done, which is how a failed upload was walked away from as a
+finished one. A metadata-only file row (size 0, bytes never landed) rendered
+identically to a real document on four screens while only the viewer's download
+error knew the truth. And the scope write seam trusted pasted text down to
+invisible codepoints, so combining overlay strokes rode a PDF paste into
+`scope_cabinet_type`/`scope_pitch` and struck through every chip that printed
+them. Same disease three ways: the server records the honest state; the render
+and write seams flatten it. Fixed 2026-09-03 — explicit toast kinds held
+mechanically over the source (walk §38), the byteless flag + one-click byte
+recovery on every file surface (walk §39), `printable()` at the scope/spec write
+seams (smoke F4 HYGIENE).
+
 ---
 
 ## The pre-build checklist — so a brief stops shipping these

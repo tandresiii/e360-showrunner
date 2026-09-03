@@ -107,6 +107,7 @@ function icon(n) {
     chevR: '<path d="m9 18 6-6-6-6"/>',
     chevD: '<path d="m6 9 6 6 6-6"/>',
     download: '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
+    upload: '<path d="M12 15V3M7 8l5-5 5 5M5 21h14"/>',
     pencil: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
     shield: '<path d="M12 3 5 6v5c0 4.5 3 7.5 7 9 4-1.5 7-4.5 7-9V6Z"/>',
     eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
@@ -318,10 +319,19 @@ function jobsChip(jobs) {
 }
 
 /* ---------------- toast / modal ---------------- */
-function toast(b, s) {
+/* THE GREEN CHECKMARK LIE (Tom, 2026-09-03). Every toast wore icon('check'),
+   so "Could not list staffing events" and "Filed, but the bytes did not land"
+   looked exactly like success — which is how a failed upload was walked away
+   from as a done one. `kind` is explicit at the call site, never inferred from
+   the words: 'err' gets the alert triangle on the crit accent, 'warn' the same
+   triangle on warn, and everything else keeps the check. The walk holds the
+   call sites to it mechanically — a toast fired from a catch block, or titled
+   like a failure, must say 'err' or the suite goes red. */
+function toast(b, s, kind) {
+  var k = kind === 'err' || kind === 'warn' ? kind : 'ok';
   var t = document.createElement('div');
-  t.className = 'toast';
-  t.innerHTML = icon('check') + '<div><b>' + esc(b) + '</b><span>' + esc(s || '') + '</span></div>';
+  t.className = 'toast' + (k === 'ok' ? '' : ' ' + k);
+  t.innerHTML = icon(k === 'ok' ? 'check' : 'alert') + '<div><b>' + esc(b) + '</b><span>' + esc(s || '') + '</span></div>';
   $('#toasts').appendChild(t);
   setTimeout(function () {
     t.style.opacity = 0; t.style.transform = 'translateX(20px)';
@@ -562,6 +572,43 @@ function filePreviewKind(f) {
   if (PREVIEW_IMG_EXT[e]) return 'img';
   return null;
 }
+/* ── THE BYTES, MISSING ────────────────────────────────────────────────────
+   Brendon's Rhino booking doc (2026-09-03, production): a metadata row filed,
+   size 0, no bytes on the NAS — and every list and card showed it like any
+   other document. Tom learned the truth from a download error. A row the
+   two-tier model deliberately allows to exist half-finished must LOOK
+   half-finished everywhere it renders, or the model's honesty is private.
+
+   API mode only, real rows only (the bell renders agent proposals as
+   synthetic files with a negative id), and keyed on the size the server owns:
+   0/null means no bytes ever landed. The moment a real upload lands, PUT
+   /files/:id/content replaces size with the true count and this reads false —
+   that is how the flag clears, with no second bookkeeping bit to drift. */
+function fileIsByteless(f) {
+  return !!(f && typeof SR !== 'undefined' && SR.isApi() &&
+            Number(f.id) > 0 && !(Number(f.size) > 0));
+}
+/* The flag itself — honest words, warn accent, rendered wherever a file row
+   or card draws. A <span>, so it nests legally inside the card's <button>. */
+function fileBytelessFlag(f) {
+  if (!fileIsByteless(f)) return '';
+  return '<span class="file-nobytes" title="The record was filed but the bytes never landed on the NAS — ' +
+    'there is nothing to download or preview yet.">' + icon('alert') + 'no document — metadata only</span>';
+}
+/* RECOVERY IN ONE CLICK. The row already exists and already has its nas_path;
+   what is missing is the second half of the two-tier upload — so this re-runs
+   exactly that half (uploadFileBytes -> PUT /files/:id/content) with a file
+   picker, instead of making the person delete and re-type the record. Offered
+   under the SAME gate as the original attach: the route reads "canEditProject
+   OR the uploader", and canDeleteFile() is the client mirror of that exact
+   sentence. Takes the download chip's spot — a byteless row has no Download. */
+function fileUploadChip(f) {
+  if (!fileIsByteless(f) || !canDeleteFile(f)) return '';
+  return '<button class="file-upl" ' + act('uploadMissingBytes', f.id) +
+    ' title="Upload the missing document — the bytes land on this existing record">' +
+    icon('upload') + 'Upload</button>';
+}
+
 /* The card-corner Download chip. It is a real <button>, so it must live OUTSIDE
    the card's own <button> — a nested one is hoisted out by the HTML parser and
    lands wherever it likes. Both grids therefore wrap the card in `.file-cell`

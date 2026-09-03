@@ -4264,7 +4264,12 @@ function _applyScopeLocal(show, patch) {
   var txtF = function (k, cur) {
     var v = pick(k);
     if (v === undefined) return cur;
-    var t = String(v == null ? '' : v).trim().slice(0, 60);
+    /* mirrors printable() in lib/enums.js: strip controls, zero-widths, bidi
+       marks and the U+0334–U+0338 combining overlay strokes (the jumbled-chip
+       bug) before trimming — never accents. Escaped, never literal. */
+    var t = String(v == null ? '' : v).replace(new RegExp(
+      '[\\u0000-\\u001F\\u007F-\\u009F\\u0334-\\u0338\\u200B-\\u200F\\u2028\\u2029' +
+      '\\u202A-\\u202E\\u2060\\u2066-\\u2069\\uFEFF]', 'g'), '').trim().slice(0, 60);
     return t || null;
   };
   var kindIn = pick('kind');

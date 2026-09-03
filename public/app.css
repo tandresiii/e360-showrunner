@@ -210,6 +210,25 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
    from the thumb it is sitting on. Keyed on the CELL so hovering either one
    moves both. */
 .file-cell:hover .file-dl{transform:translateY(-2px)}
+/* THE BYTELESS ROW, FLAGGED. A metadata-only record (size 0 in API mode) says
+   so on its face, in warn — the honest words live in components.js
+   fileBytelessFlag(). Inline-flex so it reads the same on a card and in a
+   table cell. */
+.file-nobytes{display:inline-flex; align-items:center; gap:4px; margin-top:5px;
+  font-family:var(--font-mono); font-size:9.5px; font-weight:600; letter-spacing:.04em; text-transform:uppercase;
+  color:var(--warn)}
+.file-nobytes svg{width:11px; height:11px; flex:none}
+/* The recovery chip — takes the Download chip's spot (a byteless row has no
+   Download) and wears warn at rest, because it marks a row that needs a
+   person, not a row that is fine. */
+.file-upl{position:absolute; top:78px; left:8px; z-index:2; display:inline-flex; align-items:center; gap:5px;
+  font-family:var(--font-mono); font-size:9.5px; font-weight:600; letter-spacing:.04em; text-transform:uppercase;
+  padding:4px 8px; border-radius:6px; cursor:pointer;
+  background:var(--bg); color:var(--warn); border:1px solid color-mix(in srgb, var(--warn) 45%, transparent)}
+.file-upl svg{width:12px; height:12px}
+.file-upl:hover{color:var(--warn); border-color:var(--warn); background:var(--warn-ghost)}
+.file-upl:focus-visible{outline:2px solid var(--accent); outline-offset:1px}
+.file-cell:hover .file-upl{transform:translateY(-2px)}
 
 /* ---------- activity ---------- */
 .timeline{position:relative; padding-left:26px}
@@ -240,6 +259,11 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
 .toasts{position:fixed; bottom:20px; right:20px; display:flex; flex-direction:column; gap:10px; z-index:60}
 .toast{background:var(--surface); border:1px solid var(--border-strong); border-left:3px solid var(--accent); border-radius:var(--r); padding:12px 16px; box-shadow:var(--shadow); display:flex; align-items:center; gap:11px; min-width:280px; animation:slidein .25s ease}
 .toast svg{width:18px;height:18px;color:var(--accent);flex:none}
+/* the honest faces — a failure must not wear the success accent */
+.toast.err{border-left-color:var(--crit)}
+.toast.err svg{color:var(--crit)}
+.toast.warn{border-left-color:var(--warn)}
+.toast.warn svg{color:var(--warn)}
 .toast b{font-weight:600; font-size:13px}
 .toast span{color:var(--muted); font-size:12px; display:block}
 @keyframes slidein{from{opacity:0; transform:translateX(20px)}to{opacity:1; transform:none}}

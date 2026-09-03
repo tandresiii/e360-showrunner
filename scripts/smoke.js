@@ -362,6 +362,23 @@ const DEL = (p, o) => call('DELETE', p, o);
   const ghostGet = await GET(`/api/files/${ghostFile.body.id}/content`, { token: A });
   ok('a metadata row with no bytes is a 404 that SAYS so, not a 500',
      ghostGet.status === 404 && /No bytes at/.test(JSON.stringify(ghostGet.body)), ghostGet.body);
+  // ── the RECOVERY path (Brendon's Rhino doc, 2026-09-03) ──────────────────
+  // A metadata-only row is retryable BY DESIGN — the second half of the
+  // two-tier upload lands on the row that already exists. This is the exact
+  // PUT the "Upload the missing document" affordance fires: the 0-byte row
+  // takes the bytes, and size becomes the TRUE count, which is also what
+  // clears the client's metadata-only flag (fileIsByteless keys on size).
+  ok('...and the row honestly claims size 0 while it waits',
+     Number(ghostFile.body.size) === 0, ghostFile.body.size);
+  const ghostBytes = await call('PUT', `/api/files/${ghostFile.body.id}/content`,
+    { token: A, raw: Buffer.from('the bytes, landing at last') });
+  ok('the content PUT on an existing 0-byte row stores and reports the TRUE size',
+     ghostBytes.status === 200 && ghostBytes.body.size === 26, ghostBytes.body);
+  ok('...and the row now carries that size — the byteless state is gone by arithmetic',
+     Number((await GET(`/api/files/${ghostFile.body.id}`, { token: A })).body.size) === 26);
+  ok('...and the bytes stream back',
+     (await call('GET', `/api/files/${ghostFile.body.id}/content`,
+        { token: A, wantBytes: true })).bytes.toString() === 'the bytes, landing at last');
 
   const invoice = await POST('/api/files', {
     show_id: S, name: TAG + " O'Brien freight", ext: '.pdf', kind: 'invoice',
@@ -2563,6 +2580,40 @@ const DEL = (p, o) => call('DELETE', p, o);
   const noSpecShow = await POST(`/api/shows/${LS}/scope/from-spec`, {}, { token: A });
   ok('F4: a show with no usable spec says so instead of inventing numbers',
      noSpecShow.status === 409 && /No bound spec/.test(String(noSpecShow.body.error)), noSpecShow.body);
+
+  // ── F4 · THE JUMBLED CHIP (Tom's screenshot, 2026-09-03, Big Ten) ─────────
+  // The scope chip rendered struck-through and overlapping with no line-through
+  // CSS anywhere: the text fields carried invisible COMBINING OVERLAY STROKES
+  // (U+0334–U+0338 — classic PDF-paste residue) and applyScope's textField
+  // kept them, because String(v).trim() keeps everything invisible. The write
+  // side now strips controls, zero-widths, bidi marks and the overlay strokes
+  // (lib/enums.js printable()) — and NEVER legitimate accents. Re-saving a
+  // dirty row through the same writer is also how it gets clean.
+  // The dirty payload spells its overlays as \u escapes on purpose — literal
+  // combining strokes in a test file ARE the invisible payload this bug
+  // shipped on, and no reviewer could see them.
+  const dirtyScope = await PUT(`/api/shows/${S}/scope`, {
+    kind: 'led', linear_feet: 800, cabinet_count: 90,
+    cabinet_type: '5\u033600\u0336×\u0336500mm',  // "500×500mm" struck through
+    pitch: '3\u0335.\u03359\u200B'                    // "3.9" + short strokes + ZWSP
+  }, { token: A });
+  ok('F4 HYGIENE: a scope write carrying U+0336 overlay strokes comes back CLEAN',
+     dirtyScope.status === 200 && dirtyScope.body.scope_cabinet_type === '500×500mm' &&
+     dirtyScope.body.scope_pitch === '3.9',
+     { type: dirtyScope.body.scope_cabinet_type, pitch: dirtyScope.body.scope_pitch });
+  const unprintableRe = new RegExp(
+    '[\\u0000-\\u001F\\u007F-\\u009F\\u0334-\\u0338\\u200B-\\u200F\\u2028\\u2029' +
+    '\\u202A-\\u202E\\u2060\\u2066-\\u2069\\uFEFF]');
+  ok('F4 HYGIENE: ...and scope_line renders printable end to end',
+     !unprintableRe.test(dirtyScope.body.scope_line) &&
+     dirtyScope.body.scope_line === 'LED · 800′ · 90× 500×500mm 3.9',
+     JSON.stringify(dirtyScope.body.scope_line));
+  ok('F4 HYGIENE: ...and it is the STORED value that is clean, not a display trim',
+     (await GET(`/api/shows/${S}/scope`, { token: A })).body.scope.cabinet_type === '500×500mm');
+  const accented = await PUT(`/api/shows/${S}/scope`,
+    { cabinet_type: 'Écran présenté' }, { token: A });
+  ok('F4 HYGIENE: ...while a legitimate accent is NOT damage and survives untouched',
+     accented.body.scope_cabinet_type === 'Écran présenté', accented.body.scope_cabinet_type);
   await PUT(`/api/shows/${S}/scope`, { kind: 'led', linear_feet: 800, cabinet_count: 144,
                                        pitch: 'P10', cabinet_type: null, source: 'manual' }, { token: A });
 
