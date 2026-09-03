@@ -4438,6 +4438,125 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('19 ...the step lives on the override target, due re-derived off ITS event date',
      ovStep.rows[0].show_id === S && ovStep.rows[0].due_date === '2026-11-11', ovStep.rows[0]);
 
+  // ── rooming lists (TEAM_FEEDBACK 2026-08-27) ──────────────────────────────
+  section('R. rooming lists — who sleeps where, beside the bookings');
+  // floors first. Writes mirror the bookings family: pm+ RANK and ownership,
+  // delete included (the manager→pm alignment from the H-pass is the sibling
+  // convention). Reads are open to anyone signed in — a tech finds their own
+  // hotel here the same way they read the bookings tab.
+  const rmTech = await POST(`/api/shows/${S}/rooming`, { person: 'X' }, { token: TECHT });
+  ok('R GATE: a tech cannot write the rooming list (rank)', rmTech.status === 403, rmTech.body);
+  const rmPm2 = await POST(`/api/shows/${S}/rooming`, { person: 'X' }, { token: PM2T });
+  ok('R GATE: a pm who owns nothing cannot either (ownership)', rmPm2.status === 403, rmPm2.body);
+
+  const rm1 = await POST(`/api/shows/${S}/rooming`, {
+    person: 'Dana Fields', hotel: 'Hampton Inn Madison', room_type: 'Double',
+    confirmation: 'HI-4471', check_in: '2026-11-12', check_out: '2026-11-15',
+    notes: 'local hire — no login'
+  }, { token: PMT });
+  ok('R POST /api/shows/:id/rooming — a free-text person (local hire)',
+     rm1.status === 200 && rm1.body.person === 'Dana Fields' && rm1.body.user_username === null,
+     rm1.body);
+  const rm2 = await POST(`/api/shows/${S}/rooming`, { user_username: techUser }, { token: PMT });
+  ok('R ...a roster pick fills `person` from the roster',
+     rm2.status === 200 && rm2.body.user_username === techUser
+     && rm2.body.person === techUser.toUpperCase(), rm2.body);
+
+  const rmRead = await GET(`/api/shows/${S}/rooming`, { token: TECHT });
+  ok('R READ floor: a tech SEES the list, like the bookings tab',
+     rmRead.status === 200 && rmRead.body.length >= 2, rmRead.body.length);
+  ok('R ...an unauthenticated read does not', (await GET(`/api/shows/${S}/rooming`)).status === 401);
+
+  const rmBadUser = await POST(`/api/shows/${S}/rooming`, { user_username: 'nobody-here' }, { token: PMT });
+  ok('R an unknown username is a 400 that names it',
+     rmBadUser.status === 400 && /unknown username/.test(rmBadUser.body.error), rmBadUser.body);
+  const rmNoOne = await POST(`/api/shows/${S}/rooming`, { hotel: 'The Void' }, { token: PMT });
+  ok('R a row with nobody in it is refused', rmNoOne.status === 400, rmNoOne.body);
+  const rmBadDate = await POST(`/api/shows/${S}/rooming`,
+    { person: 'Z', check_in: 'not-a-date' }, { token: PMT });
+  ok('R a malformed check_in is a 400 naming the field',
+     rmBadDate.status === 400 && /check_in/.test(rmBadDate.body.error), rmBadDate.body);
+  const rmBackwards = await POST(`/api/shows/${S}/rooming`,
+    { person: 'Z', check_in: '2026-11-15', check_out: '2026-11-12' }, { token: PMT });
+  ok('R a stay that ends before it starts is a 400 naming check_out',
+     rmBackwards.status === 400 && /check_out/.test(rmBackwards.body.error), rmBackwards.body);
+  const rmPatchBack = await PUT(`/api/rooming/${rm1.body.id}`, { check_out: '2026-11-01' }, { token: PMT });
+  ok('R ...and the rule holds on a PATCH against the date it kept',
+     rmPatchBack.status === 400 && /check_out/.test(rmPatchBack.body.error), rmPatchBack.body);
+
+  // link to a booked hotel — and the honesty rule about whose booking it is
+  const rmBk = await POST('/api/bookings', { show_id: S, category: 'Lodging — crew block',
+    vendor: 'Hampton Inn', status: 'done', amount: 1900 }, { token: PMT });
+  const rmLink = await PUT(`/api/rooming/${rm1.body.id}`, { booking_id: rmBk.body.id }, { token: PMT });
+  ok('R a row links to the show\'s hotel booking',
+     rmLink.status === 200 && rmLink.body.booking_id === rmBk.body.id, rmLink.body);
+  const rmShow2 = await POST('/api/shows', { project_id: P, name: TAG + ' Rooming scratch',
+    venue: 'x', event_date: '2026-12-05', seed_template: false }, { token: A });
+  const RS2 = rmShow2.body.id;
+  const rmBk2 = await POST('/api/bookings', { show_id: RS2, category: 'Lodging',
+    vendor: 'Elsewhere Inn' }, { token: PMT });
+  const rmCross = await PUT(`/api/rooming/${rm1.body.id}`, { booking_id: rmBk2.body.id }, { token: PMT });
+  ok('R a booking from ANOTHER show cannot be linked',
+     rmCross.status === 400 && /another show/.test(rmCross.body.error), rmCross.body);
+
+  const rmEdit = await PUT(`/api/rooming/${rm1.body.id}`, { confirmation: 'HI-9990' }, { token: PMT });
+  ok('R PUT corrects a confirmation number', rmEdit.status === 200 && rmEdit.body.confirmation === 'HI-9990');
+  const rmActs = await pool.query(
+    `SELECT * FROM activity WHERE show_id=$1 AND action='rooming.update' ORDER BY id DESC`, [S]);
+  ok('R ...and leaves a diff behind',
+     rmActs.rows.length > 0 && (rmActs.rows[0].changes || []).some((c) => c.field === 'confirmation'),
+     rmActs.rows[0] && rmActs.rows[0].changes);
+
+  // THE rule this feature exists for, pinned at the table: cancelling the
+  // block's paperwork must not un-sleep anybody. Mutation-tested (delete the
+  // UPDATE..SET booking_id=NULL line in routes/files.js and this goes red).
+  const rmDelBk = await DEL(`/api/bookings/${rmBk.body.id}`, { token: PMT });
+  ok('R the hotel booking is cancelled', rmDelBk.status === 200, rmDelBk.body);
+  const rmSurvivor = await pool.query('SELECT * FROM room_assignments WHERE id=$1', [rm1.body.id]);
+  ok('R BOOKING DELETE NULLS, NEVER DELETES — the person keeps their row',
+     rmSurvivor.rows.length === 1 && rmSurvivor.rows[0].booking_id === null
+     && rmSurvivor.rows[0].confirmation === 'HI-9990', rmSurvivor.rows[0]);
+
+  // the bulk affordance, on a fresh show with a crew of two
+  await POST(`/api/shows/${RS2}/crew`, { username: techUser, role_on_site: 'LED tech' }, { token: PMT });
+  await POST(`/api/shows/${RS2}/crew`, { name: TAG + ' Localhand', phone: '555-0100',
+    role_on_site: 'hand' }, { token: PMT });
+  const rmSeed1 = await POST(`/api/shows/${RS2}/rooming/from-crew`, {}, { token: PMT });
+  ok('R "Add crew" rooms the whole crew in one click',
+     rmSeed1.status === 200 && rmSeed1.body.added.length === 2, rmSeed1.body);
+  const rmSeed2 = await POST(`/api/shows/${RS2}/rooming/from-crew`, {}, { token: PMT });
+  ok('R ...idempotently — the second click adds nobody',
+     rmSeed2.status === 200 && rmSeed2.body.added.length === 0 && rmSeed2.body.skipped === 2,
+     rmSeed2.body);
+
+  const rmTarget = rmSeed1.body.added[0].id;
+  ok('R DELETE floor, rank half: a tech is refused',
+     (await DEL(`/api/rooming/${rmTarget}`, { token: TECHT })).status === 403);
+  ok('R DELETE floor, ownership half: the pm who owns nothing is refused',
+     (await DEL(`/api/rooming/${rmTarget}`, { token: PM2T })).status === 403);
+  ok('R a rooming id that never existed is a 404, not {ok:true}',
+     (await DEL('/api/rooming/999999', { token: PMT })).status === 404);
+  const rmDel = await DEL(`/api/rooming/${rmTarget}`, { token: PMT });
+  ok('R the owner pm deletes a row', rmDel.status === 200 && rmDel.body.ok === true, rmDel.body);
+
+  // the assembled call sheet answers "where does each person sleep"
+  const rmSheet = await GET(`/api/shows/${S}/call-sheet`, { token: TECHT });
+  ok('R the assembled call sheet carries the rooming list',
+     rmSheet.status === 200 && Array.isArray(rmSheet.body.rooming) && rmSheet.body.rooming.length >= 2,
+     rmSheet.body.rooming && rmSheet.body.rooming.length);
+
+  // the SHOW cascade, pinned at the table (mutation target: remove the
+  // room_assignments line from deleteShowCascade and this goes red). The rows
+  // still on S ride into section 6's project-level zero-orphan sweep.
+  const rs2Before = await pool.query(
+    'SELECT COUNT(*)::int AS n FROM room_assignments WHERE show_id=$1', [RS2]);
+  ok('R the scratch show still has rooming rows', rs2Before.rows[0].n > 0, rs2Before.rows[0]);
+  await DEL(`/api/shows/${RS2}`, { token: A });
+  const rs2After = await pool.query(
+    'SELECT COUNT(*)::int AS n FROM room_assignments WHERE show_id=$1', [RS2]);
+  ok('R SHOW DELETE takes the rooming list with it — zero orphans',
+     rs2After.rows[0].n === 0, rs2After.rows[0]);
+
   section('6. cascade integrity — a folder with a child of EVERY type');
   const before = await childCounts(P);
   ok('the smoke folder has children of every wired type',
@@ -4445,6 +4564,7 @@ const DEL = (p, o) => call('DELETE', p, o);
      && before.shows > 0 && before.steps > 0 && before.files > 0 && before.expenses > 0
      && before.jobs > 0 && before.budget_lines > 0 && before.notes > 0 && before.note_reads > 0
      && before.note_mentions > 0 && before.schedule_items > 0 && before.crew_assignments > 0
+     && before.room_assignments > 0
      && before.deliverables > 0 && before.milestones > 0 && before.proposals > 0
      && before.purchase_orders > 0 && before.po_lines > 0 && before.purchase_needs > 0
      && before.activity > 0
@@ -4600,6 +4720,9 @@ async function childCounts(projectId) {
     note_mentions:    await q(`SELECT COUNT(*) n FROM note_mentions WHERE note_id IN (SELECT id FROM notes WHERE project_id=$1)`),
     schedule_items:   await q(`SELECT COUNT(*) n FROM schedule_items WHERE show_id ${inShows}`),
     crew_assignments: await q(`SELECT COUNT(*) n FROM crew_assignments WHERE show_id ${inShows}`),
+    // the rooming list is a show child like the crew it beds down — a table
+    // not counted here leaks rows on every folder delete
+    room_assignments: await q(`SELECT COUNT(*) n FROM room_assignments WHERE show_id ${inShows}`),
     deliverables:     await q(`SELECT COUNT(*) n FROM deliverables WHERE project_id=$1 OR show_id ${inShows}`),
     milestones:       await q(`SELECT COUNT(*) n FROM milestones WHERE project_id=$1 OR show_id ${inShows}`),
     proofs:           await q(`SELECT COUNT(*) n FROM proofs WHERE show_id ${inShows}`),

@@ -1125,11 +1125,80 @@ function tabBookings(show) {
         ? '<div style="display:flex;gap:9px;justify-content:center;margin-top:16px">' +
           '<button class="btn primary" ' + act('addBooking', show.id) + '>' + icon('plus') +
           'Book a vendor</button></div>'
-        : '') + '</div>';
+        : '') + '</div>' +
+      /* the rooming list renders below the empty state too — a crew usually
+         has beds before the first vendor row lands, and the bulk button is
+         what fills it */
+      roomingSection(show);
   }
   return bkHead + '<div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Booking</th><th>Vendor</th><th>Status</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></div>' +
     '<div class="hint">' + icon('bolt') + 'Every confirmed booking keeps its paperwork here — so anyone can pick up the event and see exactly what’s locked. On push, these map to staffing <b>/api/bookings</b>.</div>' +
-    (split ? '<div class="hint">' + icon('scale') + 'Rows tagged with a different <b>job number</b> bill to another deal in this folder — this show’s costs split across two jobs.</div>' : '');
+    (split ? '<div class="hint">' + icon('scale') + 'Rows tagged with a different <b>job number</b> bill to another deal in this folder — this show’s costs split across two jobs.</div>' : '') +
+    roomingSection(show);
+}
+
+/* -------------------------------------------------------- rooming list -- */
+/* TEAM_FEEDBACK "Rooming lists": a hotel booking is ONE row for a whole block,
+   so who actually sleeps in it lived in somebody's head. This table is the
+   per-person half — person · hotel · room · conf # · nights — right under the
+   bookings it can link to. Anyone signed in reads it (a tech checks their own
+   hotel here); writes are the folder's edit gate, same rank+ownership pair as
+   the booking rows above. */
+function roomingSection(show) {
+  var rooms = roomingForShow(show.id);
+  var editable = canEditFolderOf(show);
+  var head = '<div class="files-head" style="margin-top:22px"><h3>Rooming · ' + rooms.length + '</h3>' +
+    (editable
+      ? '<span style="display:inline-flex;gap:8px">' +
+        /* the bulk affordance: every crew member gets a row in one click —
+           the six-techs-one-booking gap is exactly what this closes */
+        '<button class="btn ghost" ' + act('roomSeedCrew', show.id) + ' title="' +
+        esc('One row per person on the crew — anyone already listed is skipped.') + '">' +
+        icon('users') + 'Add crew</button>' +
+        '<button class="btn primary" ' + act('roomAdd', show.id) + '>' + icon('plus') + 'Add person</button>' +
+        '</span>'
+      : '') + '</div>';
+  if (!rooms.length) {
+    return head + '<div class="gear-empty">' + icon('moon') +
+      '<div style="font-weight:600;font-size:14px">No rooming list yet</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:470px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+      'Who sleeps where: one row per person — hotel, room type, confirmation number and nights. ' +
+      'A hotel booking above covers the whole block; this list covers the people in it, and it prints on ' +
+      'the call sheet so nobody stands at a front desk at midnight without a confirmation number.</div>' +
+      (editable
+        ? '<div style="display:flex;gap:9px;justify-content:center;margin-top:16px">' +
+          '<button class="btn primary" ' + act('roomSeedCrew', show.id) + '>' + icon('users') +
+          'Add the crew</button>' +
+          '<button class="btn ghost" ' + act('roomAdd', show.id) + '>' + icon('plus') + 'Add a person</button></div>'
+        : '') + '</div>';
+  }
+  var rows = rooms.map(function (r) {
+    var bk = r.booking_id ? BOOKINGS_BY_ID[r.booking_id] : null;
+    var nights = (r.check_in || r.check_out)
+      ? esc(fmtDate(r.check_in)) + ' – ' + esc(fmtDate(r.check_out))
+      : '<span style="color:var(--muted)">—</span>';
+    return '<tr><td><b style="font-weight:600">' + esc(r.person) + '</b>' +
+      (r.user_username ? '' : ' <span class="mini auto" title="Not a login — free-text person">local</span>') + '</td>' +
+      '<td>' + (r.hotel ? esc(r.hotel) : '<span style="color:var(--muted)">—</span>') +
+      (bk ? ' <span class="tag" title="' + esc('Linked to the booking: ' + bk.category + (bk.vendor ? ' · ' + bk.vendor : '')) + '">' +
+        esc(bk.vendor || bk.category) + '</span>' : '') + '</td>' +
+      '<td>' + (r.room_type ? esc(r.room_type) : '<span style="color:var(--muted)">—</span>') + '</td>' +
+      '<td class="mono" style="font-size:11.5px">' + (r.confirmation ? esc(r.confirmation) : '—') + '</td>' +
+      '<td style="font-size:12px">' + nights + '</td>' +
+      '<td style="font-size:12px;color:var(--text-2)">' + esc(r.notes || '') + '</td>' +
+      '<td style="text-align:right"><span style="display:inline-flex;gap:6px;justify-content:flex-end">' +
+      (editable
+        ? '<button class="btn sm ghost" ' + act('roomEdit', r.id, String(show.id)) + '>' + icon('pencil') + 'Edit</button>' +
+          '<button class="btn sm ghost" ' + act('roomDelete', r.id) + '>' + icon('trash') + 'Delete</button>'
+        : '') +
+      '</span></td></tr>';
+  }).join('');
+  return head + '<div class="card"><div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+    '<th>Person</th><th>Hotel</th><th>Room</th><th>Conf #</th><th>Check-in / out</th><th>Notes</th><th></th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div></div>' +
+    '<div class="hint">' + icon('moon') + 'One row per bed. These rows print on the call sheet when any exist; ' +
+    'a linked booking’s tag ties the person back to the paperwork above — cancelling that booking ' +
+    'clears the tag but never the person’s row.</div>';
 }
 
 
@@ -1163,6 +1232,8 @@ var ACTION_LABELS = {
   'callsheet.update': 'changed the call sheet',
   'booking.add': 'made a booking', 'booking.update': 'changed a booking',
   'booking.delete': 'cancelled a booking',
+  'rooming.add': 'added to the rooming list', 'rooming.update': 'changed a room',
+  'rooming.remove': 'removed a room',
   'budget.line.add': 'set an allotment', 'budget.line.update': 'changed an allotment',
   'budget.line.delete': 'removed an allotment',
   'job.create': 'opened a job', 'job.update': 'changed the job',
@@ -1227,6 +1298,7 @@ var CHANGE_FILTERS = [
   { k: 'callsheet.', label: 'Call sheet' },
   { k: 'schedule.', label: 'Schedule' },
   { k: 'booking.', label: 'Bookings' },
+  { k: 'rooming.', label: 'Rooming' },
   { k: 'budget.', label: 'Budget' },
   { k: 'po.', label: 'Purchasing' }
 ];

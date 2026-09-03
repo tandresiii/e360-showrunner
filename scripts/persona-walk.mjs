@@ -1698,6 +1698,90 @@ async function main() {
   ok('…and the history is honestly empty again',
      (await GET(`/api/shows/${SHOW}/gear-snapshots`, { token: T.brenden })).body.length === 0);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('36 · the rooming list — one hotel block, everybody sleeps  (TEAM_FEEDBACK 2026-08-27)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // The integration-testing finding: a hotel booking is ONE row for a block of
+  // six, so five techs opened their packet to no lodging. The rooming list is
+  // the per-person half, and Brenden fills it the way a PM actually would —
+  // the whole crew in one click, then the stragglers by name.
+  reach('Rooming — bulk-add the crew', { seam: 'seedRoomingFromCrew', action: 'roomSeedCrew' });
+  reach('Rooming — add / edit / delete a row', {
+    seam: ['listRooming', 'addRooming', 'updateRooming', 'deleteRooming'],
+    action: ['roomAdd', 'roomEdit', 'roomCommit', 'roomDelete']
+  });
+
+  const wmCrew = await GET(`/api/shows/${SHOW}/crew`, { token: T.brenden });
+  const wmSeed = await POST(`/api/shows/${SHOW}/rooming/from-crew`, {}, { token: T.brenden });
+  ok('one click rooms the whole crew — a row per person, the local hire included',
+     wmSeed.status === 200 && wmSeed.body.added.length === wmCrew.body.length
+     && wmSeed.body.added.some((r) => !r.user_username),
+     { crew: wmCrew.body.length, added: wmSeed.body?.added?.length });
+  ok('…idempotently — the second click adds nobody',
+     (await POST(`/api/shows/${SHOW}/rooming/from-crew`, {}, { token: T.brenden })).body.added.length === 0);
+
+  const wmLocal = await POST(`/api/shows/${SHOW}/rooming`, {
+    person: 'Reggie Beaumont', hotel: 'Best Western Ltd', room_type: 'Double',
+    notes: 'client’s AV guy — rides our block'
+  }, { token: T.brenden });
+  ok('a free-text add — no login needed to have a bed',
+     wmLocal.status === 200 && wmLocal.body.user_username === null, wmLocal.body);
+
+  const wmRow = wmSeed.body.added.filter((r) => r.user_username === 'omar')[0];
+  const wmConf = await PUT(`/api/rooming/${wmRow.id}`, {
+    hotel: 'Drury Plaza', room_type: 'King', confirmation: 'DP-20443',
+    check_in: plus(29), check_out: plus(32)
+  }, { token: T.brenden });
+  ok('the row takes its hotel, room and conf number',
+     wmConf.status === 200 && wmConf.body.confirmation === 'DP-20443', wmConf.body);
+
+  ok('Omar — a tech — SEES the list; his own bed is on it',
+     ((await GET(`/api/shows/${SHOW}/rooming`, { token: T.omar })).body || [])
+       .some((r) => r.user_username === 'omar'));
+  ok('…but cannot edit it (rank)',
+     (await PUT(`/api/rooming/${wmRow.id}`, { hotel: 'x' }, { token: T.omar })).status === 403);
+  ok('…and Pat, the pm who owns nothing, cannot either (ownership)',
+     (await PUT(`/api/rooming/${wmRow.id}`, { hotel: 'x' }, { token: T.pat })).status === 403);
+
+  // link the bed to the booked block, then cancel the block — the link goes,
+  // the bed stays. This is the exact null-not-delete rule smoke pins at the
+  // table, walked here through the affordances a person clicks.
+  const wmBk = await POST('/api/bookings', { show_id: SHOW, category: 'Lodging — crew block',
+    vendor: 'Drury Plaza', status: 'done', amount: 2600 }, { token: T.brenden });
+  const wmLink = await PUT(`/api/rooming/${wmRow.id}`, { booking_id: wmBk.body.id }, { token: T.brenden });
+  ok('the row links to the booked hotel block',
+     wmLink.status === 200 && wmLink.body.booking_id === wmBk.body.id, wmLink.body);
+  await DEL(`/api/bookings/${wmBk.body.id}`, { token: T.brenden });
+  const wmKept = ((await GET(`/api/shows/${SHOW}/rooming`, { token: T.brenden })).body || [])
+    .filter((r) => r.id === wmRow.id)[0];
+  ok('cancelling the booking clears the LINK and keeps the BED',
+     wmKept && wmKept.booking_id === null && wmKept.confirmation === 'DP-20443', wmKept);
+
+  const wmBad = await PUT(`/api/rooming/${wmRow.id}`,
+    { check_in: plus(32), check_out: plus(29) }, { token: T.brenden });
+  ok('a stay that ends before it starts is refused, naming check_out',
+     wmBad.status === 400 && /check_out/.test(wmBad.body.error), wmBad.body);
+
+  ok('a row comes off the list',
+     (await DEL(`/api/rooming/${wmLocal.body.id}`, { token: T.brenden })).status === 200);
+  ok('…and the trail carries the whole story — the bulk add, the straggler, the removal',
+     (await activityFor(SHOW, 'rooming.add')).length >= 2
+     && (await activityFor(SHOW, 'rooming.remove')).length === 1);
+
+  const wmSheet = await GET(`/api/shows/${SHOW}/call-sheet`, { token: T.omar });
+  ok('the assembled call sheet now answers "where do I sleep"',
+     wmSheet.status === 200 && (wmSheet.body.rooming || []).some((r) => r.user_username === 'omar'),
+     wmSheet.body.rooming?.length);
+
+  // a scratch show's whole rooming list dies with the show — zero orphans
+  const wmShow = await POST('/api/shows', { project_id: PROJ, name: 'Rooming scratch',
+    venue: 'x', event_date: plus(60), seed_template: false }, { token: T.brenden });
+  await POST(`/api/shows/${wmShow.body.id}/rooming`, { person: 'Ghost Guest' }, { token: T.brenden });
+  await DEL(`/api/shows/${wmShow.body.id}`, { token: T.brenden });
+  ok('a deleted show takes its rooming list with it — zero orphans',
+     (await pool.query('SELECT COUNT(*)::int AS n FROM room_assignments WHERE show_id=$1',
+       [wmShow.body.id])).rows[0].n === 0);
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

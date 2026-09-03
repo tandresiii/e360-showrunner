@@ -386,6 +386,28 @@ agent-authored note is **immutable to humans**.
 `travel` mirrors the staffing app's `travel_info` shape (INTEGRATION.md B.6)
 1:1 so the future read-back swaps in without reshaping.
 
+**`room_assignments`** *(idx: `show_id`, `booking_id`)*
+`id · show_id · person (NOT NULL) · user_username · hotel · booking_id · room_type · confirmation · check_in · check_out · notes · sort_order · created_at · created_by · updated_at · updated_by`
+
+> **The rooming list (TEAM_FEEDBACK "Rooming lists", 2026-08-27).** One row per
+> bed. The finding: a hotel booking is ONE row for a block of six techs, so
+> five of them had no lodging on any per-person surface. `person` is free text
+> and required — crew names come and go, and a local hire is not a user —
+> with `user_username` filled beside it when the row came off the show's crew
+> (the `from-crew` bulk route seeds one row per crew member, idempotently, by
+> username for roster crew and by name for locals). `booking_id` links a row
+> to the show's booked hotel entity — validated to THIS show's bookings — and
+> a **booking delete NULLS it, never the row** (cancelling the paperwork does
+> not un-sleep anybody; mutation-tested). The row itself dies only with its
+> show. `check_in`/`check_out` are ISO text dates like `bookings.booked_date`;
+> `check_out < check_in` is a 400 naming the field. Gates mirror the bookings
+> family exactly: reads open to anyone signed in (a tech finds their own hotel
+> here), writes pm+ rank AND `canEditProject`, delete at the same pm floor the
+> H-pass aligned bookings to. The assembled call sheet carries the list as
+> `rooming: []` and the printable renders the section only when rows exist.
+> **No notifications in v1**, deliberately — the needs-list precedent; feeding
+> the scheduler push's per-person hotel rows stays open with the push work.
+
 ### Deliverables
 
 **`deliverables`** *(idx: `(show_id, kind)`)* — `id · project_id · show_id · kind · status · body JSONB · generated_by · generated_at · edited_by · edited_at · approved_by · approved_at · sent_at · sent_to · provenance JSONB`
@@ -672,13 +694,15 @@ or the per-user agents of `ARCHITECTURE.md`; this app does not fake one.
 | Entry point | Reaches |
 |---|---|
 | `deletePoCascade(poId)` | po-anchored `notes` (+ their reads/mentions), `po_lines`, `activity`, nulls `expenses.po_id`, **reopens `purchase_needs` this PO was covering** (`covered_by_po_id` nulled, `covered` → `open`), the PO |
-| `deleteShowCascade(showId)` | notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, **`gear_snapshots`**, `proposals`, **`tech_reports`**, **`notification_outbox`**, **`show_contacts`** (the LINK — the contact row survives, deliberately), `activity`, nulls `po_lines.show_id` and `purchase_needs.show_id`, the show |
+| `deleteShowCascade(showId)` | notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, **`room_assignments`**, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, **`gear_snapshots`**, `proposals`, **`tech_reports`**, **`notification_outbox`**, **`show_contacts`** (the LINK — the contact row survives, deliberately), `activity`, nulls `po_lines.show_id` and `purchase_needs.show_id`, the show |
 | `deleteProjectCascade(projectId)` | every show (via the show cascade), every PO (via the PO cascade), job- and project-anchored notes, `budget_lines`, **`purchase_needs`**, `jobs`, project-level `steps`/`files`/`expenses`/`milestones`/`deliverables`/`proposals`/**`tech_reports`**/**`notification_outbox`**, `activity`, the project |
 | `DELETE /api/jobs/:id` (`routes/finance.js`) | refuses while shows/expenses/po_lines still attach; then `budget_lines`, **`purchase_needs`**, job-anchored `notes`, the job |
 | `DELETE /api/files/:id` (single file, `routes/files.js`) | file-anchored `notes` (+ reads/mentions), **`spec_renders` by `file_id`**, nulls `expenses.file_id` / `bookings.file_id` / `purchase_orders.quote_file_id` / `.invoice_file_id`, the file. The NAS bytes are left on disk deliberately. `spec_renders` was added in the 2026-08-27 hardening pass: `spec_renders.file_id` is `NOT NULL`, so a render cannot be orphaned the way a nullable FK can — it goes with the file or it is a dangling row |
 
+| `DELETE /api/bookings/:id` (`routes/files.js`) | nulls `room_assignments.booking_id` — cancelling a hotel block's paperwork never deletes who sleeps where — then the booking. Mutation-tested in smoke ("BOOKING DELETE NULLS, NEVER DELETES") |
+
 The smoke test builds a folder carrying a child of **every** one of these tables,
-deletes it, and asserts **zero orphans** in all 27.
+deletes it, and asserts **zero orphans** in all 28.
 
 ---
 
@@ -758,6 +782,9 @@ Schedule    GET /api/shows/:id/call-sheet   (the assembled sheet — CANONICAL)
                                                 resource: list · create)
             PUT/DELETE /api/schedule/:id · GET/POST /api/shows/:id/crew
             PUT/DELETE /api/crew/:id · PUT /api/shows/:id/call-sheet · GET /api/shows/:id/travel
+Rooming     GET/POST /api/shows/:id/rooming · POST /api/shows/:id/rooming/from-crew
+            PUT/DELETE /api/rooming/:id      (reads open; writes pm+ AND ownership,
+                                              the bookings floor exactly)
 Photos      GET /api/shows/:id/photos · GET /api/photos[/:id] · GET /api/shows/:id/photo-facets
             GET /api/shows/:id/recap-picks · POST /api/shows/:id/photos
             PUT /api/photos/:id · /pick · /content · PATCH /api/photos/:id/thumb
@@ -890,6 +917,7 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | `listNotes(t, id)` / `addNote` / `editNote` | `GET /api/notes?anchor_type=&anchor_id=` · `POST /api/notes` · `PUT /api/notes/:id` |
 | `myInbox` / `markNotesRead` / `markAllNotesRead` / `notesUnreadCount` | `GET /api/me/inbox` · `POST /api/me/inbox/read {ids}` · `{all:true}` · `GET /api/me/inbox/count` |
 | `getSchedule` / `addScheduleItem` / `updateScheduleItem` / `removeScheduleItem` | `GET /api/shows/:id/call-sheet` (alias `/run-of-show`) · `POST /api/shows/:id/schedule` · `PUT`/`DELETE /api/schedule/:id` |
+| `listRooming` / `addRooming` / `updateRooming` / `deleteRooming` / `seedRoomingFromCrew` | `GET`/`POST /api/shows/:id/rooming` · `PUT`/`DELETE /api/rooming/:id` · `POST /api/shows/:id/rooming/from-crew` |
 | `listPhotos` / `listAllPhotos` / `updatePhoto` / `setRecapPick` | `GET /api/shows/:id/photos` · `GET /api/photos` · `PUT /api/photos/:id` · `/pick` |
 | `confirmPhoto` / `rejectPhoto` | same proposal routes as `confirmDoc`/`rejectDoc` |
 | `getDeliverables` / `getRecap` / `generateRecap` / `updateRecap` | `GET /api/shows/:id/deliverables` · `/recap` · `POST /api/shows/:id/recap` · `PUT /api/shows/:id/recap` |

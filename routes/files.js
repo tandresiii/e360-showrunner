@@ -1587,6 +1587,11 @@ router.delete('/bookings/:id', requireRole('pm'), asyncH(async (req, res) => {
   const show = await loadShow(cur.show_id);
   const project = show ? await loadProject(show.project_id) : null;
   if (!canEditProject(req.session, project)) throw forbidden('Not allowed to delete this booking');
+  // The rooming list survives its booking: cancelling the block's paperwork
+  // does not un-sleep anybody. The link nulls (mirroring how a file delete
+  // nulls bookings.file_id) and the person/hotel/conf text stays — smoke
+  // mutation-tests this NULL-not-DELETE line specifically.
+  await pool.query('UPDATE room_assignments SET booking_id=NULL WHERE booking_id=$1', [id]);
   await pool.query('DELETE FROM bookings WHERE id=$1', [id]);
   await logActivity(pool, {
     projectId: show ? show.project_id : null, showId: cur.show_id || null,

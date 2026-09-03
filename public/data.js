@@ -633,7 +633,11 @@ var P_LOVB = {
       bookings: [
         mkBooking('Advance freight (6 legs)', 'TBD', 'todo'),
         mkBooking('Crew travel — leg 1', 'AmTrav', 'todo'),
-        mkBooking('Stagehands', 'Local labor', 'todo')
+        mkBooking('Stagehands', 'Local labor', 'todo'),
+        /* the booked room block the rooming list (seedSchedule) links into —
+           one booking row for six beds is exactly the gap TEAM_FEEDBACK's
+           "Rooming lists" entry names */
+        mkBooking('Lodging — crew room block', "The Governor's Inn", 'done', null, { amount: 2140, booked_off: -5 })
       ],
       activity: [
         mkAct('tandres', 'banked the season content spec — every match inherits it', null, 67, '14:10', true),
@@ -2681,8 +2685,8 @@ var SCHED_KIND_ORDER = ['travel', 'work', 'show', 'meal', 'strike'];
 /* schedule edit rights — pm and up (viewer/tech read the sheet, never edit it) */
 var SCHED_EDIT_ROLES = { admin: 1, manager: 1, pm: 1 };
 
-var _schedSeq = 0, _crewSeq = 0;
-var SCHEDULE_BY_ID = {}, CREW_BY_ID = {};
+var _schedSeq = 0, _crewSeq = 0, _roomSeq = 0;
+var SCHEDULE_BY_ID = {}, CREW_BY_ID = {}, ROOMING_BY_ID = {};
 
 function mkSched(show, day, start, title, x) {
   x = x || {};
@@ -2711,6 +2715,28 @@ function mkCrew(show, who, roleOnSite, callTime, travel) {
   CREW_BY_ID[c.id] = c;
   return c;
 }
+/* mkRoom(show, {person, username, hotel, booking_id, room_type, conf,
+   check_in, check_out, notes}) — one rooming-list row, the room_assignments
+   shape 1:1. `person` is the printed truth; `username` links a roster person
+   the way a crew line does; `booking_id` points at the show's booked room
+   block when there is one (a booking delete nulls it, never the row). */
+function mkRoom(show, o) {
+  o = o || {};
+  /* data.js loads BEFORE components.js (index.html), so userName() does not
+     exist yet at seed time — seeds pass `person` explicitly; the roster
+     fallback serves only the runtime demo twins in api.js. */
+  var r = { id: ++_roomSeq, show_id: show.id,
+            person: o.person ||
+              (o.username && typeof userName === 'function' ? userName(o.username) : o.username || ''),
+            user_username: o.username || null,
+            hotel: o.hotel || '', booking_id: o.booking_id || null,
+            room_type: o.room_type || '', confirmation: o.conf || '',
+            check_in: o.check_in || null, check_out: o.check_out || null,
+            notes: o.notes || '', sort_order: o.sort_order || 0 };
+  (show.room_assignments = show.room_assignments || []).push(r);
+  ROOMING_BY_ID[r.id] = r;
+  return r;
+}
 
 /* sorted schedule for a show; days come out chronological, items by time */
 function scheduleForShow(showId) {
@@ -2738,6 +2764,15 @@ function schedItemFor(item, username) {
 function crewForShow(showId) {
   var s = SHOWS_BY_ID[Number(showId)];
   return ((s && s.crew_assignments) || []).slice();
+}
+/* the rooming list, in the order the server would answer it */
+function roomingForShow(showId) {
+  var s = SHOWS_BY_ID[Number(showId)];
+  var rows = ((s && s.room_assignments) || []).slice();
+  rows.sort(function (a, b) {
+    return (a.sort_order || 0) - (b.sort_order || 0) || a.id - b.id;
+  });
+  return rows;
 }
 function crewFor(showId, username) {
   return crewForShow(showId).filter(function (c) { return c.username === username; })[0] || null;
@@ -3006,6 +3041,25 @@ function demoSchedulerPush(s, opts) {
   });
   mkCrew(S_MAD, { name: 'Mike Deroche', phone: '(608) 555-0144' }, 'Local stagehand', '07:30', null);
   mkCrew(S_MAD, { name: 'Sam Okafor', phone: '(608) 555-0171' }, 'Local stagehand · forklift cert', '07:30', null);
+
+  /* ---- Madison's rooming list (TEAM_FEEDBACK "Rooming lists") -------------
+     Three beds off the crew: the show lead on the booked room block (the
+     'Lodging — crew room block' booking above carries the money; this row
+     carries HIS bed in it), a tech on a free-text hotel, and a local hire who
+     is a name and a phone number — no login, but he still sleeps somewhere.
+     Every other show renders the rooming empty state on purpose. */
+  var madLodging = (S_MAD.bookings || []).filter(function (b) {
+    return b.category.indexOf('Lodging') === 0;
+  })[0] || null;
+  mkRoom(S_MAD, { person: 'Brendon Sawyer', username: 'bsawyer', hotel: "The Governor's Inn",
+    booking_id: madLodging ? madLodging.id : null, room_type: 'King',
+    conf: 'GI-88213', check_in: mD(-2), check_out: mD(1) });
+  mkRoom(S_MAD, { person: 'Aaron', username: 'aramos', hotel: "The Governor's Inn",
+    room_type: 'Double', conf: 'GI-88215', check_in: mD(-2), check_out: mD(1),
+    notes: 'late arrival — front desk holds the key' });
+  mkRoom(S_MAD, { person: 'Mike Deroche', hotel: "The Governor's Inn",
+    room_type: 'Double', conf: 'GI-88217', check_in: mD(-1), check_out: mD(1),
+    notes: 'local hire — room only on show nights' });
 
   /* ---- Bucks (12) · the crew who now owe show reports (F2) ---------------
      Four logins and one local hand. The local hand has NO login, so nobody can

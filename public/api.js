@@ -414,6 +414,7 @@ var SR = (function () {
     },
     sched: function (i) { return keep(SCHEDULE_BY_ID, i); },
     crew: function (c) { return keep(CREW_BY_ID, c); },
+    rooming: function (r) { return keep(ROOMING_BY_ID, r); },
     deliverable: function (d) {
       if (!d) return d;
       (d.photos || []).forEach(A.file);
@@ -797,7 +798,8 @@ var api = (function () {
       SR.get('/api/expenses' + SR.qs({ show_id: sid })),
       SR.get('/api/shows/' + sid + '/schedule'),
       SR.get('/api/shows/' + sid + '/crew'),
-      SR.get('/api/shows/' + sid + '/contacts')
+      SR.get('/api/shows/' + sid + '/contacts'),
+      SR.get('/api/shows/' + sid + '/rooming')
     ]).then(function (r) {
       var show = r[0];
       if (show.project) A.project(show.project);
@@ -813,6 +815,7 @@ var api = (function () {
       /* rolodex links — the "People on this show" panel reads the flat store
          synchronously (contactsForShow), the demo way */
       (r[10] || []).forEach(A.showContact);
+      show.room_assignments = (r[11] || []).map(A.rooming);
       if (show.job) A.job(show.job);
       var rec = A.show(show);
       /* the folder header renders from the project's own shape */
@@ -849,6 +852,7 @@ var api = (function () {
         if (!rec.activity) rec.activity = [];
         if (!rec.expenses) rec.expenses = [];
         if (!rec.schedule_items) rec.schedule_items = [];
+        if (!rec.room_assignments) rec.room_assignments = [];
         if (!rec.chain) rec.chain = {};
         if (!rec.gear) rec.gear = { linked: false, pulled: false, elementId: null };
         rec.project = PROJECTS_BY_ID[rec.project_id] || rec.project || null;
@@ -3888,6 +3892,126 @@ var api = (function () {
         return ok({ ok: true, show_id: c.show_id });
       }
       return SR.del('/api/crew/' + Number(id), null, { notifyOk: true });
+    },
+
+    /* ---- rooming list — who sleeps where (TEAM_FEEDBACK "Rooming lists") --
+       The demo twins enforce the SAME rules the routes do — an unknown
+       username, a stay that ends before it starts, or a booking from another
+       show all refuse with the server's wording — so the demo teaches the
+       walls, not just the happy path. */
+    listRooming: function (showId) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        return s ? ok(roomingForShow(s.id)) : fail('show ' + showId + ' not found');
+      }
+      return SR.get('/api/shows/' + Number(showId) + '/rooming')
+        .then(function (rows) { return (rows || []).map(A.rooming); });
+    },
+    addRooming: function (showId, body) {
+      body = body || {};
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        var un = String(body.user_username || '').trim();
+        if (un && !ROSTER[un]) return fail('unknown username "' + un + '" — free-text rows carry person only');
+        var person = String(body.person || '').trim() || (un ? userName(un) : '');
+        if (!person) return fail('a room row needs a person — a name, or a username from the roster');
+        if (body.check_in && body.check_out && body.check_out < body.check_in) {
+          return fail('check_out must be on or after check_in — got check_in ' +
+            body.check_in + ', check_out ' + body.check_out);
+        }
+        if (body.booking_id) {
+          var lk = BOOKINGS_BY_ID[Number(body.booking_id)];
+          if (!lk) return fail('booking ' + body.booking_id + ' not found');
+          if (lk.show_id !== s.id) return fail('booking ' + body.booking_id +
+            " belongs to another show — a room links only to its own show's bookings");
+        }
+        var r = mkRoom(s, { person: person, username: un || null, hotel: body.hotel,
+          booking_id: body.booking_id ? Number(body.booking_id) : null,
+          room_type: body.room_type, conf: body.confirmation,
+          check_in: body.check_in || null, check_out: body.check_out || null,
+          notes: body.notes });
+        s.activity.unshift(mkAct(ME, 'rooming.add',
+          person + (body.hotel ? ' · ' + body.hotel : ''), 0, _nowHM()));
+        return ok(r);
+      }
+      var b = {}; Object.keys(body).forEach(function (k) { b[k] = body[k]; });
+      return SR.post('/api/shows/' + Number(showId) + '/rooming', b).then(A.rooming);
+    },
+    updateRooming: function (id, patch) {
+      patch = patch || {};
+      if (!API()) {
+        var r = ROOMING_BY_ID[Number(id)];
+        if (!r) return fail('room assignment ' + id + ' not found');
+        var ci = patch.check_in !== undefined ? patch.check_in : r.check_in;
+        var co = patch.check_out !== undefined ? patch.check_out : r.check_out;
+        if (ci && co && co < ci) {
+          return fail('check_out must be on or after check_in — got check_in ' + ci + ', check_out ' + co);
+        }
+        if (patch.person !== undefined && !String(patch.person || '').trim()) {
+          return fail('a room row needs a person — delete the row instead of blanking the name');
+        }
+        if (patch.booking_id) {
+          var lk = BOOKINGS_BY_ID[Number(patch.booking_id)];
+          if (!lk) return fail('booking ' + patch.booking_id + ' not found');
+          if (lk.show_id !== r.show_id) return fail('booking ' + patch.booking_id +
+            " belongs to another show — a room links only to its own show's bookings");
+        }
+        Object.keys(patch).forEach(function (k) { r[k] = patch[k]; });
+        var s = SHOWS_BY_ID[r.show_id];
+        if (s) s.activity.unshift(mkAct(ME, 'rooming.update',
+          r.person + (r.hotel ? ' · ' + r.hotel : ''), 0, _nowHM()));
+        return ok(r);
+      }
+      return SR.put('/api/rooming/' + Number(id), patch).then(A.rooming);
+    },
+    deleteRooming: function (id) {
+      if (!API()) {
+        var r = ROOMING_BY_ID[Number(id)];
+        if (!r) return fail('room assignment ' + id + ' not found');
+        var s = SHOWS_BY_ID[r.show_id];
+        if (s && s.room_assignments) {
+          s.room_assignments = s.room_assignments.filter(function (x) { return x.id !== r.id; });
+        }
+        delete ROOMING_BY_ID[r.id];
+        if (s) s.activity.unshift(mkAct(ME, 'rooming.remove', r.person, 0, _nowHM(), true));
+        return ok({ ok: true, show_id: r.show_id });
+      }
+      return SR.del('/api/rooming/' + Number(id));
+    },
+    /* the bulk affordance: everyone on the crew who is not already listed gets
+       a row — matched by username for roster crew, by name for local hires.
+       Idempotent, same as the route. */
+    seedRoomingFromCrew: function (showId) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        var crew = s.crew_assignments || [];
+        var rows = s.room_assignments || [];
+        var haveUser = {}, havePerson = {};
+        rows.forEach(function (r) {
+          if (r.user_username) haveUser[r.user_username.toLowerCase()] = 1;
+          havePerson[String(r.person || '').trim().toLowerCase()] = 1;
+        });
+        var added = [];
+        crew.forEach(function (c) {
+          var person = c.username ? userName(c.username) : String(c.name || '').trim();
+          if (!person) return;
+          if (c.username && haveUser[c.username.toLowerCase()]) return;
+          if (!c.username && havePerson[person.toLowerCase()]) return;
+          added.push(mkRoom(s, { person: person, username: c.username || null }));
+          if (c.username) haveUser[c.username.toLowerCase()] = 1;
+          havePerson[person.toLowerCase()] = 1;
+        });
+        if (added.length) s.activity.unshift(mkAct(ME, 'rooming.add',
+          added.length + ' room' + (added.length === 1 ? '' : 's') + ' from the crew', 0, _nowHM(), true));
+        return ok({ added: added, skipped: crew.length - added.length });
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/rooming/from-crew', {})
+        .then(function (r) {
+          (r && r.added || []).forEach(A.rooming);
+          return r;
+        });
     },
 
     /* ---- B2. the call-sheet header — rendered everywhere, editable nowhere */

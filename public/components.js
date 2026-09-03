@@ -1129,6 +1129,25 @@ function callSheetSheet(show) {
       '<table class="cs-tbl cs-crew"><thead><tr><th>Who</th><th>Call</th><th>Travel</th><th>Hotel</th></tr></thead><tbody>' + crewRows + '</tbody></table></div>'
     : '';
 
+  /* rooming list — who sleeps where, per PERSON (the crew grid's hotel column
+     is the block; this is the bed). Renders only when rows exist, so a show
+     with no rooming list prints exactly the sheet it always did. */
+  var rooms = roomingForShow(show.id);
+  var roomRows = rooms.map(function (r) {
+    var nights = (r.check_in || r.check_out)
+      ? fmtDate(r.check_in) + ' – ' + fmtDate(r.check_out) : '—';
+    return '<tr><td><b>' + esc(r.person) + '</b>' +
+      (r.notes ? '<span class="cs-d">' + esc(r.notes) + '</span>' : '') + '</td>' +
+      '<td>' + esc(r.hotel || '—') + '</td>' +
+      '<td>' + esc(r.room_type || '—') + '</td>' +
+      '<td class="cs-t">' + esc(r.confirmation || '—') + '</td>' +
+      '<td class="cs-l">' + esc(nights) + '</td></tr>';
+  }).join('');
+  var roomBlock = rooms.length
+    ? '<div class="cs-day"><div class="cs-dh"><b>Rooming · ' + rooms.length + '</b><span>who sleeps where</span></div>' +
+      '<table class="cs-tbl"><thead><tr><th>Who</th><th>Hotel</th><th>Room</th><th>Conf #</th><th>Nights</th></tr></thead><tbody>' + roomRows + '</tbody></table></div>'
+    : '';
+
   /* POC block — the numbers that fix problems at 6am */
   var pocs = [];
   if (poc) pocs.push(['On-site lead', poc.name, poc.phone]);
@@ -1148,7 +1167,7 @@ function callSheetSheet(show) {
        6am; "what are we putting up" should not require a phone. */
     (hasScope(show) ? '<div class="sh-scope">' + esc(scopeLine(show)) + '</div>' : '') +
     '<div class="cs-times">' + times + '</div>' + factLine + '<hr>' +
-    dayBlocks + crewBlock + pocBlock +
+    dayBlocks + crewBlock + roomBlock + pocBlock +
     '<div class="sh-cap">Questions on site → ' + esc(poc ? poc.name + ' ' + (poc.phone || '') : 'production office') + ' · generated from the event folder</div>' +
     '</div></div>';
 }

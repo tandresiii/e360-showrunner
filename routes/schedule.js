@@ -56,10 +56,10 @@
 const express = require('express');
 const { pool, withTx, loadShow, loadProject } = require('../lib/db');
 const {
-  SCHEDULE_KINDS, ALL_ROLES, oneOf, isISODate, isHHMM
+  SCHEDULE_KINDS, ALL_ROLES, oneOf, isISODate, isHHMM, intOrNull
 } = require('../lib/enums');
 const {
-  pick, has, dbToScheduleItem, dbToCrew, dbToProject, dbToUser
+  pick, has, dbToScheduleItem, dbToCrew, dbToRoomAssignment, dbToProject, dbToUser
 } = require('../lib/mappers');
 const { asyncH, badRequest, forbidden, notFound, idParam } = require('../lib/http');
 const { requireAuth, requireRole, canEditProject } = require('../lib/auth');
@@ -106,6 +106,15 @@ const pmPlus = requireRole('pm');
 const MATERIAL_CREW_FIELDS = {
   username: 'person', name: 'name', phone: 'phone',
   role_on_site: 'role on site', call_time: 'call time', travel: 'travel'
+};
+// Rooming: `notes` is absent on purpose, same argument as the booking set —
+// it is the routine field. Who, where, which room, which nights and under what
+// confirmation is what somebody standing at a front desk at midnight needs to
+// be true.
+const MATERIAL_ROOMING_FIELDS = {
+  person: 'person', hotel: 'hotel', room_type: 'room type',
+  confirmation: 'confirmation', check_in: 'check-in', check_out: 'check-out',
+  booking_id: 'booking'
 };
 const MATERIAL_CALLSHEET_FIELDS = {
   load_in_time: 'load-in time', doors_time: 'doors', event_time: 'show time',
@@ -403,6 +412,11 @@ const assembledSheet = asyncH(async (req, res) => {
     days,
     schedule: items,
     crew,
+    // The rooming list rides the assembled sheet so the printable (and any
+    // agent reading this document) answers "where does each person sleep"
+    // without a second fetch. Empty array when nobody is roomed — the sheet
+    // renders the section only when rows exist.
+    rooming: await roomingRows(showId),
     pocs: {
       onsite: onsite ? dbToUser(onsite) : null,
       venue: show.venue_poc || null,
@@ -784,6 +798,256 @@ router.delete('/crew/:id', pmPlus, asyncH(async (req, res) => {
   });
 
   res.json({ ok: true, show_id: existing.show_id, notified });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// ROOMING LIST (TEAM_FEEDBACK "Rooming lists", 2026-08-27)
+// ────────────────────────────────────────────────────────────────────────────
+// Who sleeps where: person ↔ hotel / room / confirmation / nights, one row per
+// bed. The finding behind it: a hotel booking is ONE row for a block of six
+// techs, so five of them had no lodging anywhere a per-person surface could
+// read. This table is that per-person surface.
+//
+// GATES mirror the bookings family exactly (routes/files.js): reads are open
+// to anyone signed in — a tech checks their own hotel off this list the same
+// way they read the bookings tab — and every write is pm+ RANK plus
+// canEditProject OWNERSHIP, delete included (the booking-delete floor was
+// deliberately aligned manager→pm in the H-pass; the sibling keeps that
+// convention rather than re-litigating it).
+//
+// NO NOTIFICATIONS in v1, deliberately — the needs-list precedent. A room
+// changing hands the night before is real, but the channel for it is the
+// call sheet these rows print on; wiring announceShowChange here can come
+// with the push integration.
+// ════════════════════════════════════════════════════════════════════════════
+
+// The pm+ / ownership gate, worded for this surface (editableShow's message
+// says "the schedule", which would send a refused caller to the wrong tab).
+async function editableRooming(req, showId, q = pool) {
+  const { show, project } = await showAndProject(showId, q);
+  if (!canEditProject(req.session, project)) {
+    throw forbidden('editing the rooming list requires pm, manager or admin on this project');
+  }
+  return { show, project };
+}
+
+function roomDateOrNull(value, label) {
+  if (value === null || value === undefined || value === '') return null;
+  const s = String(value).trim();
+  if (!isISODate(s)) throw badRequest(`${label} must be an ISO date (YYYY-MM-DD) or null — got "${value}"`);
+  return s;
+}
+// The one sanity rule dates get: a stay may be a single night (equal dates are
+// somebody day-rooming) but it may not end before it starts.
+function checkStayOrder(checkIn, checkOut) {
+  if (checkIn && checkOut && checkOut < checkIn) {
+    throw badRequest(`check_out must be on or after check_in — got check_in ${checkIn}, check_out ${checkOut}`);
+  }
+}
+// A linked booking must be a real one ON THIS SHOW — a rooming row quietly
+// pointing at another show's paperwork is exactly the cross-wiring this
+// validation refuses to let an agent (or a stale screen) create.
+async function roomBookingOrNull(rawId, showId, q = pool) {
+  const bookingId = intOrNull(rawId);
+  if (!bookingId) return null;
+  const r = await q.query('SELECT id, show_id FROM bookings WHERE id=$1', [bookingId]);
+  if (!r.rows.length) throw badRequest(`booking ${bookingId} not found`);
+  if (r.rows[0].show_id !== showId) {
+    throw badRequest(`booking ${bookingId} belongs to another show — a room links only to its own show's bookings`);
+  }
+  return bookingId;
+}
+async function roomingRows(showId, q = pool) {
+  const r = await q.query(
+    'SELECT * FROM room_assignments WHERE show_id=$1 ORDER BY sort_order, id', [showId]);
+  return r.rows.map(dbToRoomAssignment);
+}
+function roomLabel(row) {
+  return `${row.person}${row.hotel ? ' · ' + row.hotel : ''}${row.room_type ? ' · ' + row.room_type : ''}`;
+}
+
+// GET /api/shows/:id/rooming — anyone signed in, like the bookings list.
+router.get('/shows/:id/rooming', asyncH(async (req, res) => {
+  const showId = idParam(req);
+  await showAndProject(showId);
+  res.json(await roomingRows(showId));
+}));
+
+// POST /api/shows/:id/rooming — pm+ on this project.
+router.post('/shows/:id/rooming', pmPlus, asyncH(async (req, res) => {
+  const showId = idParam(req);
+  const body = req.body || {};
+  const { show } = await editableRooming(req, showId);
+  const roster = await loadRoster();
+
+  // person is the printable truth; user_username is the optional roster link.
+  // Picking a user without typing a name fills person from the roster, so the
+  // sheet never prints a blank line for a real human.
+  let username = null;
+  const rawUser = String(pick(body, 'user_username') || '').trim();
+  if (rawUser) {
+    const u = roster.get(rawUser);
+    if (!u) throw badRequest(`unknown username "${rawUser}" — free-text rows carry person only`);
+    username = u.username;
+  }
+  let person = String(pick(body, 'person') || '').trim();
+  if (!person && username) person = roster.get(username).name || username;
+  if (!person) throw badRequest('a room row needs a person — a name, or a username from the roster');
+
+  const checkIn = roomDateOrNull(pick(body, 'check_in'), 'check_in');
+  const checkOut = roomDateOrNull(pick(body, 'check_out'), 'check_out');
+  checkStayOrder(checkIn, checkOut);
+  const bookingId = await roomBookingOrNull(pick(body, 'booking_id'), showId);
+
+  const room = await withTx(async (c) => {
+    const r = await c.query(
+      `INSERT INTO room_assignments
+         (show_id, person, user_username, hotel, booking_id, room_type, confirmation,
+          check_in, check_out, notes, sort_order, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [showId, person, username, String(pick(body, 'hotel') || '').trim(), bookingId,
+       String(pick(body, 'room_type') || '').trim(), String(pick(body, 'confirmation') || '').trim(),
+       checkIn, checkOut, String(pick(body, 'notes') || '').trim(),
+       parseInt(pick(body, 'sort_order'), 10) || 0, req.actor]);
+    const row = r.rows[0];
+    await logActivity(c, {
+      projectId: show.project_id, showId,
+      actor: req.actor, action: 'rooming.add',
+      detail: roomLabel(row)
+    });
+    return dbToRoomAssignment(row);
+  });
+
+  res.json(room);
+}));
+
+// POST /api/shows/:id/rooming/from-crew — the bulk affordance: one click gives
+// everyone on the crew a rooming row, skipping anyone already listed. Matching
+// is by username for roster crew and by name for local hires — the same two
+// identities a crew line can carry. Idempotent: a second click adds nobody.
+router.post('/shows/:id/rooming/from-crew', pmPlus, asyncH(async (req, res) => {
+  const showId = idParam(req);
+  const { show } = await editableRooming(req, showId);
+  const roster = await loadRoster();
+  const crew = await crewRows(showId);
+  const existing = await roomingRows(showId);
+  const haveUser = new Set(existing.filter((r) => r.user_username)
+    .map((r) => r.user_username.toLowerCase()));
+  const havePerson = new Set(existing.map((r) => String(r.person || '').trim().toLowerCase()));
+
+  const added = [];
+  await withTx(async (c) => {
+    for (const line of crew) {
+      const u = line.username ? roster.get(line.username) : null;
+      const person = u ? (u.name || u.username) : String(line.name || '').trim();
+      if (!person) continue;                       // a crew line with no identity has no bed to book
+      if (u && haveUser.has(u.username.toLowerCase())) continue;
+      if (!u && havePerson.has(person.toLowerCase())) continue;
+      const r = await c.query(
+        `INSERT INTO room_assignments (show_id, person, user_username, created_by)
+         VALUES ($1,$2,$3,$4) RETURNING *`,
+        [showId, person, u ? u.username : null, req.actor]);
+      added.push(dbToRoomAssignment(r.rows[0]));
+      if (u) haveUser.add(u.username.toLowerCase());
+      havePerson.add(person.toLowerCase());
+    }
+    // One activity row for the gesture, not one per bed — the add was one act.
+    if (added.length) {
+      await logActivity(c, {
+        projectId: show.project_id, showId,
+        actor: req.actor, action: 'rooming.add', accent: true,
+        detail: `${added.length} room${added.length === 1 ? '' : 's'} from the crew`
+      });
+    }
+  });
+
+  res.json({ added, skipped: crew.length - added.length });
+}));
+
+// PUT /api/rooming/:id — partial patch, same gate, same validation.
+router.put('/rooming/:id', pmPlus, asyncH(async (req, res) => {
+  const id = idParam(req);
+  const body = req.body || {};
+  const existing = (await pool.query('SELECT * FROM room_assignments WHERE id=$1', [id])).rows[0];
+  if (!existing) throw notFound(`room assignment ${id} not found`);
+  const { show } = await editableRooming(req, existing.show_id);
+  const roster = await loadRoster();
+
+  const sets = [];
+  const params = [];
+  const set = (col, val) => { params.push(val); sets.push(`${col}=$${params.length}`); };
+
+  if (has(body, 'user_username')) {
+    const raw = pick(body, 'user_username');
+    if (raw === null || String(raw).trim() === '') set('user_username', null);
+    else {
+      const u = roster.get(raw);
+      if (!u) throw badRequest(`unknown username "${raw}"`);
+      set('user_username', u.username);
+    }
+  }
+  if (has(body, 'person')) {
+    const person = String(pick(body, 'person') || '').trim();
+    if (!person) throw badRequest('a room row needs a person — delete the row instead of blanking the name');
+    set('person', person);
+  }
+  for (const col of ['hotel', 'room_type', 'confirmation', 'notes']) {
+    if (has(body, col)) set(col, String(pick(body, col) || '').trim());
+  }
+  // the stay-order rule holds on whatever the PATCH leaves behind, so a date
+  // moved on its own is checked against the one it kept
+  const nextIn = has(body, 'check_in')
+    ? roomDateOrNull(pick(body, 'check_in'), 'check_in') : existing.check_in;
+  const nextOut = has(body, 'check_out')
+    ? roomDateOrNull(pick(body, 'check_out'), 'check_out') : existing.check_out;
+  checkStayOrder(nextIn, nextOut);
+  if (has(body, 'check_in')) set('check_in', nextIn);
+  if (has(body, 'check_out')) set('check_out', nextOut);
+  if (has(body, 'booking_id')) {
+    set('booking_id', await roomBookingOrNull(pick(body, 'booking_id'), existing.show_id));
+  }
+  if (has(body, 'sort_order')) set('sort_order', parseInt(pick(body, 'sort_order'), 10) || 0);
+  if (!sets.length) throw badRequest('nothing to update');
+  sets.push('updated_at=NOW()');
+  params.push(req.actor);
+  sets.push(`updated_by=$${params.length}`);
+  params.push(id);
+
+  const room = await withTx(async (c) => {
+    const r = await c.query(
+      `UPDATE room_assignments SET ${sets.join(', ')} WHERE id=$${params.length} RETURNING *`, params);
+    const row = r.rows[0];
+    const changes = diffFields(existing, row, MATERIAL_ROOMING_FIELDS);
+    await logActivity(c, {
+      projectId: show.project_id, showId: show.id,
+      actor: req.actor, action: 'rooming.update',
+      detail: changes.length ? `${row.person} · ${changeSummary(changes)}` : roomLabel(row),
+      changes
+    });
+    return dbToRoomAssignment(row);
+  });
+
+  res.json(room);
+}));
+
+// DELETE /api/rooming/:id — pm+, 404 on a row that never existed (the H3 rule:
+// a stale screen must not be told it deleted nothing successfully).
+router.delete('/rooming/:id', pmPlus, asyncH(async (req, res) => {
+  const id = idParam(req);
+  const existing = (await pool.query('SELECT * FROM room_assignments WHERE id=$1', [id])).rows[0];
+  if (!existing) throw notFound(`room assignment ${id} not found`);
+  const { show } = await editableRooming(req, existing.show_id);
+
+  await withTx(async (c) => {
+    await c.query('DELETE FROM room_assignments WHERE id=$1', [id]);
+    await logActivity(c, {
+      projectId: show.project_id, showId: show.id,
+      actor: req.actor, action: 'rooming.remove', accent: true,
+      detail: roomLabel(existing)
+    });
+  });
+
+  res.json({ ok: true, show_id: existing.show_id });
 }));
 
 // ════════════════════════════════════════════════════════════════════════════

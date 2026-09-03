@@ -3847,7 +3847,7 @@ var PENDING_CREW = null, PENDING_SHOWEDIT = null, PENDING_FOLDEDIT = null,
     PENDING_SHEET = null, PENDING_TASK = null, PENDING_BUDGET = null,
     PENDING_BOOK = null, PENDING_POETA = null, PENDING_PROOF = null,
     PENDING_CONTRACT = null, PENDING_PUSH = null,
-    PENDING_CONTACT = null, PENDING_SC = null;
+    PENDING_CONTACT = null, PENDING_SC = null, PENDING_ROOM = null;
 
 /* the three shared readers every commit below uses, and nothing else */
 function _v(id) { var el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; }
@@ -4699,6 +4699,144 @@ async function bkDeleteAct(id) {
   closeM();
   toast('Booking cancelled',
     ((bk && bk.category) || 'The booking') + (bk && bk.vendor ? ' · ' + bk.vendor : '') + ' — logged to activity');
+  return refreshShowTab(showId, 'bookings');
+}
+
+/* ── ROOMING LIST — who sleeps where (TEAM_FEEDBACK "Rooming lists") ────────── */
+async function openRoom(showId, roomId) {
+  var show = await api.getShow(showId);
+  var room = null;
+  if (roomId) {
+    var all = await api.listRooming(showId);
+    room = all.filter(function (r) { return r.id === Number(roomId); })[0] || null;
+  }
+  PENDING_ROOM = { showId: Number(showId), id: room ? room.id : null };
+
+  /* the single-add crew picker: crew lines not yet on the list. The BULK
+     affordance ("Add crew" on the section header) is the one-click path; this
+     select is for adding one person while typing the rest of the row. */
+  var listed = {};
+  (await api.listRooming(showId)).forEach(function (r) {
+    if (r.user_username) listed['u:' + r.user_username.toLowerCase()] = 1;
+    listed['p:' + String(r.person || '').trim().toLowerCase()] = 1;
+  });
+  var crewOpts = (show.crew_assignments || []).filter(function (c) {
+    var person = c.username ? userName(c.username) : (c.name || '');
+    if (!person) return false;
+    if (c.username) return !listed['u:' + c.username.toLowerCase()];
+    return !listed['p:' + person.trim().toLowerCase()];
+  }).map(function (c) {
+    var person = c.username ? userName(c.username) : c.name;
+    return '<option value="' + Number(c.id) + '">' + esc(person + (c.role_on_site ? ' · ' + c.role_on_site : '')) + '</option>';
+  }).join('');
+
+  /* link-to-booking: bookings.category is FREE TEXT, so "which rows are
+     hotels" is not knowable here — the select lists ALL of this show's
+     bookings rather than guessing at substrings, and the label carries the
+     category so a person can tell the hotel from the truck. */
+  var bkOpts = '<option value="">— not linked to a booking —</option>' +
+    (show.bookings || []).map(function (b) {
+      var sel = room && room.booking_id === b.id ? ' selected' : '';
+      return '<option value="' + Number(b.id) + '"' + sel + '>' +
+        esc(b.category + (b.vendor ? ' · ' + b.vendor : '')) + '</option>';
+    }).join('');
+
+  openModal((room ? 'Edit room · ' + room.person : 'Add to the rooming list') + ' · ' + showLabel(show),
+    '<div class="hint" style="margin:0 0 12px">' + icon('moon') + '<span>One row per bed — who, which hotel, ' +
+    'which room, which nights, under what confirmation. Prints on the call sheet, so the person at the front ' +
+    'desk at midnight is holding their own conf number.</span></div>' +
+    (room
+      ? '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+        finLabelWrap('Person', '<input id="rmPerson" class="cell-in" value="' + esc(room.person || '') + '">') + '</div>'
+      : '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+        finLabelWrap('From the crew', '<select id="rmCrew" class="cell-in">' +
+          '<option value="">— pick, or type a name →</option>' + crewOpts + '</select>') +
+        finLabelWrap('Anyone else (name)', '<input id="rmPerson" class="cell-in" placeholder="local hire, client, driver…">') +
+        '</div>') +
+    '<div class="fin-inputs" style="grid-template-columns:1.4fr 1fr">' +
+    finLabelWrap('Hotel', '<input id="rmHotel" class="cell-in" placeholder="where they sleep" value="' +
+      esc(room ? room.hotel || '' : '') + '">') +
+    finLabelWrap('Room type', '<input id="rmType" class="cell-in" placeholder="King · Double · Suite" value="' +
+      esc(room ? room.room_type || '' : '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr">' +
+    finLabelWrap('Confirmation #', '<input id="rmConf" class="cell-in" value="' +
+      esc(room ? room.confirmation || '' : '') + '">') +
+    finLabelWrap('Check-in', '<input id="rmIn" class="cell-in" type="date" value="' +
+      esc(room ? room.check_in || '' : '') + '">') +
+    finLabelWrap('Check-out', '<input id="rmOut" class="cell-in" type="date" value="' +
+      esc(room ? room.check_out || '' : '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1.4fr">' +
+    finLabelWrap('Booking', '<select id="rmBooking" class="cell-in">' + bkOpts + '</select>',
+      'Ties this bed to the booked room block above, so the paperwork and the person point at each other.') +
+    finLabelWrap('Notes', '<input id="rmNotes" class="cell-in" placeholder="late arrival · shares with…" value="' +
+      esc(room ? room.notes || '' : '') + '">') + '</div>' +
+    _foot(act('roomCommit'), room ? 'Save room' : 'Add to the list', room ? 'check' : 'plus',
+      room ? '<button class="btn ghost" ' + act('roomDelete', room.id) + '>' + icon('trash') + 'Delete</button>' : ''));
+}
+async function roomCommit() {
+  if (!PENDING_ROOM) return;
+  var p = PENDING_ROOM;
+  var body = { hotel: _v('rmHotel'), room_type: _v('rmType'), confirmation: _v('rmConf'),
+               check_in: _v('rmIn') || null, check_out: _v('rmOut') || null,
+               notes: _v('rmNotes') };
+  var bkEl = document.getElementById('rmBooking');
+  if (bkEl) body.booking_id = bkEl.value ? Number(bkEl.value) : null;
+  if (body.check_in && body.check_out && body.check_out < body.check_in) {
+    toast('Dates are backwards', 'Check-out lands before check-in — the server would refuse this too');
+    return;
+  }
+  if (p.id) {
+    body.person = _v('rmPerson');
+    if (!body.person) { toast('Who is it?', 'A room row needs a person — delete the row instead of blanking the name'); return; }
+  } else {
+    /* typed name wins; otherwise the crew pick carries both the printed name
+       and the roster link */
+    var typed = _v('rmPerson');
+    var crewId = _v('rmCrew');
+    if (typed) { body.person = typed; }
+    else if (crewId) {
+      var line = null;
+      try { line = (await api.listCrew(p.showId)).filter(function (c) { return c.id === Number(crewId); })[0]; }
+      catch (_) { line = null; }
+      if (!line) { toast('Crew line not found', 'Re-open the dialog — the crew changed under it'); return; }
+      if (line.username) { body.user_username = line.username; }
+      else { body.person = line.name; }
+    } else { toast('Who is it?', 'Pick someone from the crew, or type a name'); return; }
+  }
+  var saved;
+  try {
+    saved = p.id ? await api.updateRooming(p.id, body) : await api.addRooming(p.showId, body);
+  } catch (e) { toast(p.id ? 'Not saved' : 'Not added', String(e && e.message || e)); return; }
+  var showId = p.showId, wasEdit = !!p.id;
+  PENDING_ROOM = null;
+  closeM();
+  toast(wasEdit ? 'Room saved' : 'On the rooming list',
+    saved.person + (saved.hotel ? ' · ' + saved.hotel : '') +
+    (saved.confirmation ? ' · conf ' + saved.confirmation : ''));
+  return refreshShowTab(showId, 'bookings');
+}
+async function roomSeedCrewAct(showId) {
+  var r;
+  try { r = await api.seedRoomingFromCrew(showId); }
+  catch (e) { toast('Nothing added', String(e && e.message || e)); return; }
+  var n = (r && r.added ? r.added.length : 0);
+  toast(n ? 'Crew roomed' : 'Nothing to add',
+    n ? n + (n === 1 ? ' person' : ' people') + ' added — fill in hotels and conf numbers per row'
+      : 'Everyone on the crew is already on the list');
+  return refreshShowTab(showId, 'bookings');
+}
+async function roomDeleteAct(id) {
+  var showId = PENDING_ROOM ? PENDING_ROOM.showId : CUR.showId;
+  var row = null;
+  try { row = (await api.listRooming(showId)).filter(function (r) { return r.id === Number(id); })[0]; }
+  catch (_) { row = null; }
+  if (!askConfirm('Take ' + ((row && row.person) || 'this person') + ' off the rooming list?\n\n' +
+      'The row goes and the removal is logged. Any linked booking is untouched.')) return;
+  try { await api.deleteRooming(id); }
+  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  PENDING_ROOM = null;
+  closeM();
+  toast('Off the rooming list', ((row && row.person) || 'The row') + ' — logged to activity');
   return refreshShowTab(showId, 'bookings');
 }
 
@@ -6037,6 +6175,12 @@ var ACTIONS = {
   editBooking:   function (t, id, k) { return openBooking(Number(k), id); },
   bkCommit:      function () { return bkCommit(); },
   bkDelete:      function (t, id) { return bkDeleteAct(id); },
+  /* rooming list (TEAM_FEEDBACK "Rooming lists") */
+  roomAdd:       function (t, id) { return openRoom(id, null); },
+  roomEdit:      function (t, id, k) { return openRoom(Number(k), id); },
+  roomCommit:    function () { return roomCommit(); },
+  roomDelete:    function (t, id) { return roomDeleteAct(id); },
+  roomSeedCrew:  function (t, id) { return roomSeedCrewAct(id); },
   /* B8 the delivery-risk alarm's inputs */
   editPOEta:     function (t, id) { return openPOEta(id); },
   poEtaCommit:   function () { return poEtaCommit(); },
