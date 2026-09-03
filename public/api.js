@@ -1495,6 +1495,90 @@ var api = (function () {
         });
     },
 
+    /* ---- spec lifecycle (Tom 2026-08-28: "can i update these when changes
+       are made?") — history, the outdated flag, unbind. The demo twins mutate
+       the local store with the SAME state vocabulary the server derives
+       (current / outdated / superseded / unbound), so the chips teach the
+       real model from file://. */
+    listSpecHistory: function (showId) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        return ok({ showId: s.id, versions: (s.spec_history || []).slice(), chain: s.chain });
+      }
+      return SR.get('/api/shows/' + Number(showId) + '/spec-history');
+    },
+    getSpecRender: function (showId, node, rev) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        return ok(demoSpecRenderFor(s, node, rev == null ? (s.chain[node] || {}).rev : rev));
+      }
+      var q = rev == null ? '' : '?rev=' + encodeURIComponent(rev);
+      return SR.get('/api/shows/' + Number(showId) + '/spec-render/' + encodeURIComponent(node) + q);
+    },
+    outdateSpec: function (showId, node, opts) {
+      opts = opts || {};
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s || !s.chain[node]) return fail('chain node ' + node + ' not found');
+        if (!s.chain[node].gen) return fail('nothing is bound to the ' + node + ' node');
+        var n = s.chain[node];
+        n.outdated = !opts.undo;
+        n.outdatedBy = opts.undo ? null : ME;
+        n.outdatedAt = opts.undo ? null : new Date().toISOString();
+        n.outdatedNote = opts.undo ? '' : String(opts.note || '');
+        (s.spec_history || []).forEach(function (v) {
+          if (v.node === node && v.rev === n.rev && (v.state === 'current' || v.state === 'outdated')) {
+            v.state = opts.undo ? 'current' : 'outdated';
+          }
+        });
+        s.spec_outdated = ['content', 'cabling', 'power'].some(function (k) {
+          return s.chain[k].gen && s.chain[k].outdated; });
+        s.activity.unshift(mkAct(ME, opts.undo ? 'spec.outdate.clear' : 'spec.outdate',
+          node + ' v' + n.rev + (opts.undo ? ' — outdated flag withdrawn'
+            : ' flagged outdated' + (opts.note ? ' — ' + opts.note : '')), 0, _nowHM(), !opts.undo));
+        return ok({ ok: true, node: node, chain: s.chain });
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/spec-outdate',
+        { node: node, note: opts.note || '', undo: !!opts.undo }, { notifyOk: true })
+        .then(function (r) {
+          var s2 = SHOWS_BY_ID[Number(showId)];
+          if (s2 && r && r.chain) {
+            s2.chain = r.chain;
+            s2.spec_outdated = ['content', 'cabling', 'power'].some(function (k) {
+              return r.chain[k] && r.chain[k].gen && r.chain[k].outdated; });
+          }
+          return r;
+        });
+    },
+    unbindSpec: function (showId, node) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s || !s.chain[node]) return fail('chain node ' + node + ' not found');
+        if (!s.chain[node].gen) return fail('nothing is bound to the ' + node + ' node');
+        var n = s.chain[node];
+        var rev = n.rev;
+        n.gen = false; n.outdated = false; n.outdatedBy = null; n.outdatedAt = null; n.outdatedNote = '';
+        /* the file survives as a plain document — exactly the server's write */
+        s.files.forEach(function (f) { if (f.chain_key === node) f.chain_key = null; });
+        (s.spec_history || []).forEach(function (v) {
+          if (v.node === node && (v.state === 'current' || v.state === 'outdated')) v.state = 'unbound';
+        });
+        s.spec_outdated = ['content', 'cabling', 'power'].some(function (k) {
+          return s.chain[k].gen && s.chain[k].outdated; });
+        s.activity.unshift(mkAct(ME, 'spec.unbind',
+          node + ' v' + rev + ' unbound — the file stays in Files as a plain document', 0, _nowHM(), true));
+        return ok({ ok: true, node: node, chain: s.chain });
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/spec-unbind', { node: node }, { notifyOk: true })
+        .then(function (r) {
+          var s2 = SHOWS_BY_ID[Number(showId)];
+          if (s2 && r && r.chain) s2.chain = r.chain;
+          return r;
+        });
+    },
+
     /* ---- Flex gear state ----------------------------------------------- */
     getGear: function (showId) {
       if (!API()) {
@@ -1566,6 +1650,69 @@ var api = (function () {
       if (!API()) return fail('flexPullSheet is API-mode only — demo mode simulates locally');
       var q = listId ? '?listId=' + encodeURIComponent(listId) : '';
       return SR.get('/api/shows/' + Number(showId) + '/flex/pull-sheet' + q);
+    },
+
+    /* ---- gear snapshots (Tom 2026-08-28: "look back and see what gear was
+       used on previous events") — the explicit, human-pressed exception to
+       the live-read-never-stored rule. The demo twins bank the modeled kit
+       reshaped into the real sheet grammar; the API branch posts the parsed
+       sheet the screen is showing. Both make the same record. */
+    listGearSnapshots: function (showId) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        /* the list is bodiless on the wire; mirror that so a renderer that
+           forgets to fetch the detail fails the same way in both worlds */
+        return ok((s.gear_snapshots || []).map(function (g) {
+          var x = {}; Object.keys(g).forEach(function (k) { if (k !== 'sheet') x[k] = g[k]; });
+          return x;
+        }));
+      }
+      return SR.get('/api/shows/' + Number(showId) + '/gear-snapshots');
+    },
+    getGearSnapshot: function (id) {
+      if (!API()) return ok(GEAR_SNAPSHOTS_BY_ID[Number(id)] || null);
+      return SR.get('/api/gear-snapshots/' + Number(id)).then(null, function () { return null; });
+    },
+    saveGearSnapshot: function (showId, body) {
+      body = body || {};
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        var sheet = body.sheet;
+        if (!sheet || !sheet.groups) return fail('sheet must be the parsed pull-sheet document');
+        var kind = sheet.type === 'pull-sheet' || sheet.type === 'manifest' ? sheet.type : '';
+        var snap = mkGearSnapshot({
+          label: kind === 'pull-sheet' ? 'Pull Sheet' : kind === 'manifest' ? 'Manifest'
+               : (body.label || sheet.name || 'Equipment list'),
+          kind: kind, docNumber: sheet.docNumber || '', name: sheet.name || '',
+          off: 0, fetched_off: 0, by: ME, sheet: sheet,
+          element_id: s.gear ? s.gear.elementId : null, list_id: sheet.listId || null
+        });
+        snap.show_id = s.id;
+        snap.fetched_at = sheet.fetchedAt || snap.fetched_at;
+        s.gear_snapshots = s.gear_snapshots || [];
+        s.gear_snapshots.unshift(snap);
+        GEAR_SNAPSHOTS_BY_ID[snap.id] = snap;
+        s.activity.unshift(mkAct(ME, 'gear.snapshot',
+          snap.doc_label + ' ' + (snap.doc_number || '') + ' snapshotted — ' +
+          snap.lines_count + ' lines · ' + snap.units_count + ' units', 0, _nowHM(), true));
+        return ok(snap);
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/gear-snapshots', body, { notifyOk: true });
+    },
+    deleteGearSnapshot: function (id) {
+      if (!API()) {
+        var g = GEAR_SNAPSHOTS_BY_ID[Number(id)];
+        if (!g) return fail('gear snapshot ' + id + ' not found');
+        var s = SHOWS_BY_ID[g.show_id];
+        if (s) s.gear_snapshots = (s.gear_snapshots || []).filter(function (x) { return x.id !== g.id; });
+        delete GEAR_SNAPSHOTS_BY_ID[g.id];
+        if (s) s.activity.unshift(mkAct(ME, 'gear.snapshot.delete',
+          g.doc_label + ' ' + (g.doc_number || '') + ' deleted', 0, _nowHM(), true));
+        return ok({ ok: true, show_id: g.show_id });
+      }
+      return SR.del('/api/gear-snapshots/' + Number(id));
     },
 
     /* ---- templates ----------------------------------------------------- */

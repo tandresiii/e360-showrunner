@@ -220,11 +220,20 @@ path on confirm**; a rejected proposal leaves nothing behind.
 The NAS thumbnailer writes `{name}_t320.jpg` beside the original and PATCHes
 `files.thumb_path`.
 
-**`spec_chain`** *(unique `(show_id, node)`)* — `id · show_id · node · gen · rev · derived_from_rev · by · when_at · file_id · updated_at`
+**`spec_chain`** *(unique `(show_id, node)`)* — `id · show_id · node · gen · rev · derived_from_rev · by · when_at · file_id · updated_at · outdated · outdated_by · outdated_at · outdated_note`
 Nodes: `content → cabling → power → pull`. A child is **stale** when
 `derived_from_rev ≠ parent.rev`; staleness is *derived on read*, never stored.
+The four `outdated*` columns (lifecycle pass, 2026-09-03) are a **flag on the
+current bind**, not a status on the file: a pm states "the client changed the
+design and nothing new is bound yet" (`POST /shows/:id/spec-outdate`, undoable),
+every surface says so (the Specs tab, and `spec_outdated` on the show payload
+feeding the scope chip), and a fresh bind clears it in the same statement that
+writes the new rev. **Unbind** (`POST /shows/:id/spec-unbind`) sets `gen=FALSE`
+with the **rev kept** — a later rebind continues the numbering — clears the
+detached file's `chain_key` (it stays `filed`, an ordinary document), and
+retires the node's renders.
 
-**`spec_renders`** *(idx: `(show_id, node)`, `file_id`)* — `id · file_id · show_id · node · spec_type · rev · svg · html · png · json JSONB · tool_version · source_url · created_by · created_at`
+**`spec_renders`** *(idx: `(show_id, node)`, `file_id`)* — `id · file_id · show_id · node · spec_type · rev · svg · html · png · json JSONB · tool_version · source_url · created_by · created_at · retired`
 The **render bundle** the three browser tools produce, one row per bind, so
 history comes free and `files` stays narrow. Showrunner stores the spec *file*
 (`files` + NAS bytes) and the chain *state* (`spec_chain`); without this table a
@@ -257,6 +266,20 @@ a PowerSpec bind there tells the user it attached a `.nsf`.
 > and `POST /flex/create-element` REPLACES one instead of answering 409. The
 > `deepLink` field is derived per request from `FLEX_BASE_URL` — never stored,
 > so relocating the tenant relocates every link in the app.
+
+**`gear_snapshots`** *(idx: `show_id`)* — `id · show_id · element_id · list_id · kind · doc_label · doc_number · name · groups_count · lines_count · units_count · sheet JSONB · fetched_at · saved_by · created_at`
+The **look-back** (Tom, 2026-08-28: "see what gear was used on previous
+events"). The Flex read path is live-and-never-stored by policy; this table is
+the explicit exception — a human presses *Save snapshot* on a sheet they are
+looking at and the **parsed document** (the `flexReadPullSheet` shape:
+groups/lines/units/pack-status) is banked on the show. Never automatic, never a
+cache: `fetched_at` says when Flex was read, `created_at` when a person chose to
+keep it, and the record survives unlink, Flex edits and archival. `kind` is
+whitelisted (`pull-sheet` / `manifest` / `''` — unknown said, not guessed);
+`element_id` is stamped from `flex_state` server-side, never taken from the
+client. The three count columns duplicate `sheet.totals` so the history list
+never loads a body. Save is the gear-write gate (tech floor + this show's tech);
+delete is pm-with-ownership — removing history is the narrower act.
 
 **`proofs`** / **`proof_rounds`** *(idx: `show_id` / `proof_id`)* — the print proof chain.
 
@@ -649,7 +672,7 @@ or the per-user agents of `ARCHITECTURE.md`; this app does not fake one.
 | Entry point | Reaches |
 |---|---|
 | `deletePoCascade(poId)` | po-anchored `notes` (+ their reads/mentions), `po_lines`, `activity`, nulls `expenses.po_id`, **reopens `purchase_needs` this PO was covering** (`covered_by_po_id` nulled, `covered` → `open`), the PO |
-| `deleteShowCascade(showId)` | notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, `proposals`, **`tech_reports`**, **`notification_outbox`**, **`show_contacts`** (the LINK — the contact row survives, deliberately), `activity`, nulls `po_lines.show_id` and `purchase_needs.show_id`, the show |
+| `deleteShowCascade(showId)` | notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, **`gear_snapshots`**, `proposals`, **`tech_reports`**, **`notification_outbox`**, **`show_contacts`** (the LINK — the contact row survives, deliberately), `activity`, nulls `po_lines.show_id` and `purchase_needs.show_id`, the show |
 | `deleteProjectCascade(projectId)` | every show (via the show cascade), every PO (via the PO cascade), job- and project-anchored notes, `budget_lines`, **`purchase_needs`**, `jobs`, project-level `steps`/`files`/`expenses`/`milestones`/`deliverables`/`proposals`/**`tech_reports`**/**`notification_outbox`**, `activity`, the project |
 | `DELETE /api/jobs/:id` (`routes/finance.js`) | refuses while shows/expenses/po_lines still attach; then `budget_lines`, **`purchase_needs`**, job-anchored `notes`, the job |
 | `DELETE /api/files/:id` (single file, `routes/files.js`) | file-anchored `notes` (+ reads/mentions), **`spec_renders` by `file_id`**, nulls `expenses.file_id` / `bookings.file_id` / `purchase_orders.quote_file_id` / `.invoice_file_id`, the file. The NAS bytes are left on disk deliberately. `spec_renders` was added in the 2026-08-27 hardening pass: `spec_renders.file_id` is `NOT NULL`, so a render cannot be orphaned the way a nullable FK can — it goes with the file or it is a dangling row |

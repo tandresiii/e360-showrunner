@@ -1520,6 +1520,184 @@ async function main() {
      (await DEL('/api/contacts/' + WCT, { token: T.tom })).status === 200 &&
      (await GET('/api/contacts/' + WCT, { token: T.tom })).status === 404);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('34 · the spec\'s whole life — bind v2 over v1, flag it, unbind it, rebind  (Tom 2026-08-28)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "can i update these when changes are made?" The month's spec story, walked
+  // end to end: Brenden binds the content spec, the tool re-binds a revision
+  // (v1 auto-supersedes, KEPT), the client changes the design so he flags the
+  // record outdated, then detaches it entirely, then binds the real
+  // replacement — and at every step the history answers for every version.
+  reach('Spec history (Specs tab)', { seam: 'listSpecHistory', action: ['specHistory', 'specViewRev'] });
+  reach('Mark a spec outdated / un-flag it', { seam: 'outdateSpec',
+                                               action: ['specOutdate', 'specOutdateClear'] });
+  reach('Unbind a spec', { seam: 'unbindSpec', action: 'specUnbind' });
+  ok('the scope chip gained the outdated warn state — the season row says it too',
+     /sc-od/.test(SRC['components.js']) && /scope-chip\.od/.test(fs.readFileSync(path.join(PUB, 'app.css'), 'utf8')));
+
+  // a minimal honest .e360: truthy `version`, no `_app` (lib/speccheck's sniff)
+  const walkE360 = (label) => ({
+    version: 1, layoutMode: 'complex', complexUnit: 'ft',
+    fields: { clientName: 'AVCA', venueName: 'Fiserv Forum', cabinetType: 'BP2V2',
+              fieldLength: '110', fieldWidth: '59', totalCabinets: '144' },
+    complexSections: [], zones: [], clientLogoDataUrl: null, _walkLabel: label
+  });
+
+  // ── production shape FIRST: the atomic bind refuses cleanly with no NAS ───
+  // This server runs with no storage on purpose (§12), and spec-bind writes
+  // real bytes INSIDE its transaction by design — so here the honest answer is
+  // a 501 that leaves NO half-bound show: no chain bump, no files row, no
+  // render. That atomicity claim is exactly what a walk in this shape can
+  // prove and the storage-backed suites cannot.
+  const wbNoStore = await POST(`/api/shows/${SHOW}/spec-bind`,
+    { specType: 'e360', json: walkE360('v0'), suggestedName: 'doomed' }, { token: T.brenden });
+  ok('with no storage the bind is a 501 — not a half-write', wbNoStore.status === 501, wbNoStore.status);
+  ok('…and NOTHING half-bound: no chain rev, no files row, no render row',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM spec_chain WHERE show_id=$1 AND node='content' AND gen`, [SHOW])).rows[0].n === 0 &&
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM files WHERE show_id=$1 AND chain_key='content'`, [SHOW])).rows[0].n === 0 &&
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM spec_renders WHERE show_id=$1`, [SHOW])).rows[0].n === 0);
+
+  // ── the binds themselves run in a CHILD server on the same database with a
+  // throwaway STORAGE_ROOT — the same out-of-process trick §12's probe uses,
+  // because lib/storage.js reads its env once at require time. Everything
+  // else in the story (history, outdate, unbind) is storage-free and runs
+  // against the main server like every other step.
+  const bindViaStorageServer = (binds) => {
+    const script =
+      `(async () => {
+        const srv = require(${JSON.stringify(path.join(APP, 'server.js').replace(/\\/g, '/'))});
+        const server = await srv.boot();
+        const base = 'http://127.0.0.1:' + server.address().port;
+        const login = await fetch(base + '/api/auth/login', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: 'brenden', password: ${JSON.stringify(PW)} }) });
+        const tok = (await login.json()).token;
+        const out = [];
+        for (const b of JSON.parse(process.env.WALK_BINDS)) {
+          const r = await fetch(base + '/api/shows/' + ${Number(SHOW)} + '/spec-bind', {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-auth-token': tok },
+            body: JSON.stringify(b) });
+          out.push({ status: r.status, body: await r.json() });
+        }
+        console.log('WALKBIND ' + JSON.stringify(out));
+        server.close();
+        process.exit(0);
+      })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });`;
+    const r = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      env: { ...process.env, PORT: '0', SWEEP_ON_BOOT: '0',
+             WALK_BINDS: JSON.stringify(binds),
+             STORAGE_ROOT: path.join(os.tmpdir(), 'sr-walk-bind-storage') }
+    });
+    const m = String(r.stdout || '').match(/WALKBIND (.*)/);
+    if (!m) console.error('  (bind child failed)', String(r.stderr || '').slice(0, 400));
+    return m ? JSON.parse(m[1]) : [];
+  };
+
+  const [wb1, wb2] = bindViaStorageServer([
+    { specType: 'e360', json: walkE360('v1'), suggestedName: 'AVCA content v1' },
+    { specType: 'e360', json: walkE360('v2'), suggestedName: 'AVCA content v2' }
+  ]);
+  ok('Brenden binds the content spec at v1 (child server with storage — see §12)',
+     wb1 && wb1.status === 200 && wb1.body.rev === 1, wb1 && wb1.body);
+  ok('the tool re-binds — v2 SUPERSEDES v1, never deletes it',
+     wb2 && wb2.status === 200 && wb2.body.rev === 2
+     && wb2.body.supersededFileIds.includes(wb1.body.fileId),
+     wb2 && wb2.body.supersededFileIds);
+  ok('…v1\'s file is still on the record, marked',
+     (await GET(`/api/files/${wb1.body.fileId}`, { token: T.omar })).body?.status === 'superseded');
+
+  const wh1 = await GET(`/api/shows/${SHOW}/spec-history`, { token: T.omar });
+  ok('Spec history shows BOTH — v2 current, v1 superseded, and Omar may look',
+     wh1.status === 200 &&
+     wh1.body.versions.some((v) => v.rev === 2 && v.state === 'current') &&
+     wh1.body.versions.some((v) => v.rev === 1 && v.state === 'superseded'),
+     wh1.body.versions?.map((v) => [v.rev, v.state]));
+  ok('…and v1 still OPENS — history means viewable',
+     (await GET(`/api/shows/${SHOW}/spec-render/content?rev=1`, { token: T.omar })).status === 200);
+
+  ok('a pm who owns nothing cannot flag the spec outdated',
+     (await POST(`/api/shows/${SHOW}/spec-outdate`, { node: 'content' }, { token: T.pat })).status === 403);
+  const wOd = await POST(`/api/shows/${SHOW}/spec-outdate`,
+    { node: 'content', note: 'client added a second wall' }, { token: T.brenden });
+  ok('Brenden flags it — the client changed the design, nothing new bound yet',
+     wOd.status === 200 && wOd.body.chain.content.outdated === true, wOd.body.chain?.content);
+  ok('…the show payload now carries spec_outdated for every season-row chip',
+     (await GET(`/api/shows/${SHOW}`, { token: T.omar })).body.spec_outdated === true);
+  ok('…and the flag is a statement on the record, not a deletion',
+     (await activityFor(SHOW, 'spec.outdate')).some((r) => /second wall/.test(r.detail)));
+
+  ok('a pm who owns nothing cannot unbind either',
+     (await POST(`/api/shows/${SHOW}/spec-unbind`, { node: 'content' }, { token: T.pat })).status === 403);
+  const wUb = await POST(`/api/shows/${SHOW}/spec-unbind`, { node: 'content' }, { token: T.brenden });
+  ok('Brenden unbinds — the show carries no content spec now',
+     wUb.status === 200 && wUb.body.chain.content.gen === false, wUb.body);
+  const wDetached = (await pool.query('SELECT * FROM files WHERE id=$1', [wb2.body.fileId])).rows[0];
+  ok('…the file SURVIVES as a plain document (filed, chain_key cleared)',
+     !!wDetached && wDetached.status === 'filed' && wDetached.chain_key === null, wDetached);
+  ok('…and the history keeps v2 as `unbound`, still openable',
+     (await GET(`/api/shows/${SHOW}/spec-history`, { token: T.brenden }))
+       .body.versions.some((v) => v.rev === 2 && v.state === 'unbound') &&
+     (await GET(`/api/shows/${SHOW}/spec-render/content?rev=2`, { token: T.brenden })).status === 200);
+
+  const [wb3] = bindViaStorageServer([
+    { specType: 'e360', json: walkE360('v3'), suggestedName: 'AVCA content v3 — the real replacement' }
+  ]);
+  ok('the replacement binds at v3 — numbering continues, never a second v1',
+     wb3 && wb3.status === 200 && wb3.body.rev === 3, wb3 && wb3.body.rev);
+  ok('…outdated is gone and the node is live again',
+     wb3 && wb3.body.chain.content.outdated === false &&
+     (await GET(`/api/shows/${SHOW}/spec-render/content`, { token: T.omar })).status === 200);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('35 · gear history — Omar banks the pull sheet, the folder remembers  (Tom 2026-08-28)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "would like to look back and see what gear was used on previous events."
+  // The live Flex read stays live; what Omar banks here is the parsed sheet he
+  // is looking at, saved as a dated record on the show — listed, opened
+  // read-only, and deletable only by the pm who owns the folder.
+  reach('Save snapshot (gear tab)', { seam: 'saveGearSnapshot', action: 'gearSnapSave' });
+  reach('Gear history — list, open, back', { seam: ['listGearSnapshots', 'getGearSnapshot'],
+                                             action: ['gearSnapOpen', 'gearSnapBack'] });
+  reach('Delete a snapshot', { seam: 'deleteGearSnapshot', action: 'gearSnapDelete' });
+
+  const wSheet = {
+    listId: '9e8d7c6b-1111-4222-8333-444455556666', name: 'AVCA First Serve',
+    docNumber: 'PS-2201', type: 'pull-sheet', fetchedAt: new Date().toISOString(),
+    status: { stages: [] },
+    groups: [
+      { id: 'wg1', name: 'LED Cabinets', path: 'LED Cabinets', type: 'category', containerSerial: '',
+        items: [{ name: 'BP2 V2 cabinet', qty: 144, barcode: '00500', serial: '', note: '',
+                  resourceId: 'res-bp2', contains: 0, qtyAssumed: false }] }
+    ],
+    totals: { groups: 1, lines: 1, units: 144 }, empty: false, rowCount: 1
+  };
+  ok('a pm who owns nothing cannot bank a snapshot',
+     (await POST(`/api/shows/${SHOW}/gear-snapshots`, { sheet: wSheet }, { token: T.pat })).status === 403);
+  const wSnap = await POST(`/api/shows/${SHOW}/gear-snapshots`, { sheet: wSheet }, { token: T.omar });
+  ok('Omar — the tech ON this crew — banks the sheet he read',
+     wSnap.status === 200 && wSnap.body.kind === 'pull-sheet' && wSnap.body.units_count === 144,
+     wSnap.body);
+  const wHist = await GET(`/api/shows/${SHOW}/gear-snapshots`, { token: T.candice });
+  ok('the history lists it for anyone signed in — label, counts, who, when — with no sheet body',
+     wHist.status === 200 && wHist.body.length === 1 && wHist.body[0].doc_label === 'Pull Sheet'
+     && wHist.body[0].saved_by === 'omar' && !('sheet' in wHist.body[0]), wHist.body[0]);
+  const wOpen = await GET(`/api/gear-snapshots/${wSnap.body.id}`, { token: T.candice });
+  ok('the detail renders the STORED lines — 144 cabinets, barcode intact',
+     wOpen.status === 200 && wOpen.body.sheet.groups[0].items[0].qty === 144
+     && wOpen.body.sheet.groups[0].items[0].barcode === '00500', wOpen.body.sheet?.totals);
+  ok('the banked record leaves a trail',
+     (await activityFor(SHOW, 'gear.snapshot')).some((r) => /144 units/.test(r.detail)));
+
+  ok('Omar cannot delete what he banked — removing history is the pm\'s narrower act',
+     (await DEL(`/api/gear-snapshots/${wSnap.body.id}`, { token: T.omar })).status === 403);
+  ok('…nor can the pm who owns nothing',
+     (await DEL(`/api/gear-snapshots/${wSnap.body.id}`, { token: T.pat })).status === 403);
+  ok('Brenden deletes it — plain confirm in front, this gate behind',
+     (await DEL(`/api/gear-snapshots/${wSnap.body.id}`, { token: T.brenden })).status === 200);
+  ok('…and the history is honestly empty again',
+     (await GET(`/api/shows/${SHOW}/gear-snapshots`, { token: T.brenden })).body.length === 0);
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

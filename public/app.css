@@ -1402,6 +1402,11 @@ table.tbl td.money,table.tbl th.money{text-align:right}
 .scope-chip.none{border-style:dashed; color:var(--muted); font-family:var(--font-body); font-weight:600}
 .scope-chip.q{border-color:color-mix(in srgb,var(--warn) 42%,transparent); color:var(--text)}
 .scope-chip .sc-q{display:inline-grid; place-items:center; width:14px; height:14px; border-radius:50%; background:var(--warn-ghost); color:var(--warn); font-size:10px; font-weight:800; font-family:var(--font-body)}
+/* the lifecycle pass: a pm flagged a bound spec outdated. A stated fact, so it
+   wears the warn colour flatly rather than the question mark's raised hand. */
+.scope-chip.od{border-color:color-mix(in srgb,var(--warn) 55%,transparent)}
+.scope-chip .sc-od{display:inline-flex; align-items:center; color:var(--warn)}
+.scope-chip .sc-od svg{width:11px; height:11px; color:var(--warn)}
 .ef-scope{display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin:8px 0 2px}
 .sched-scope svg{color:var(--muted)}
 /* a plain text link that behaves like a button — used where a full .btn would

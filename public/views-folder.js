@@ -635,13 +635,23 @@ function chainStrip(show) {
     { k: 'pull', cx: 'pull sheet', cn: 'Flex gear list', tool: 'Flex' }];
   var html = nodes.map(function (nd, i) {
     var n = chain[nd.k], up = CHAIN_UP[nd.k], upgen = up ? chain[up].gen : true, stale = isStale(chain, nd.k);
-    var cls = !n.gen ? 'ungen' : (stale ? 'stale' : '');
+    var cls = !n.gen ? 'ungen' : (stale || n.outdated ? 'stale' : '');
     /* FIX (was '<span class="cs">awaiting '+st[up]+'</span>' -> [object Object]) */
     var status = !n.gen
       ? (upgen ? '<span class="cs">ready to generate</span>' : '<span class="cs">awaiting ' + esc(CHAIN_LABEL[up]) + '</span>')
       : stale
         ? '<span class="stale-chip">' + icon('alert') + 'stale · built vs rev ' + n.derivedRev + ', upstream ' + chain[up].rev + '</span>'
         : '<span class="fresh-chip">in sync · rev ' + n.rev + '</span>';
+    /* the lifecycle flag, beside (not instead of) the derived staleness: a pm
+       STATING "the design changed" and the chain COMPUTING "built against an
+       old parent" are different facts, and a node can carry both. */
+    if (n.gen && n.outdated) {
+      status += ' <span class="stale-chip" title="' +
+        esc('Flagged by ' + (firstName(n.outdatedBy) || n.outdatedBy || 'a pm') +
+            (n.outdatedNote ? ' — ' + n.outdatedNote : '') +
+            '. The spec stays bound and viewable; binding a replacement clears this.') + '">' +
+        icon('alert') + 'OUTDATED — new spec pending</span>';
+    }
     var meta = n.gen ? ('v' + n.rev + ' · ' + firstName(n.by) + ' · ' + fmtDate(n.when)) : (upgen ? 'not generated' : 'blocked upstream');
     var btns;
     if (nd.k === 'pull') {
@@ -660,6 +670,18 @@ function chainStrip(show) {
       btns = '<button class="btn sm ' + (stale ? 'primary' : 'ghost') + '" ' + act('specGen', show.id, nd.k) + '>' + icon('refresh') + (stale ? 'Regenerate' : 'Regen') + '</button>' +
         '<button class="btn sm ghost" ' + act('openChainFile', show.id, nd.k) + '>' + icon('eye') + 'View</button>';
     }
+    /* the manual lifecycle — pm+ on a folder they may edit, spec nodes only.
+       The pull node's lifecycle IS the Flex link on the gear tab; a second
+       door here would be the same room with a different lock. */
+    if (nd.k !== 'pull' && n.gen && canEditFolderOf(show)) {
+      btns += n.outdated
+        ? '<button class="btn sm ghost" ' + act('specOutdateClear', show.id, nd.k) +
+          ' title="Withdraw the outdated flag — the spec reads as current again">' + icon('refresh') + 'Un-flag</button>'
+        : '<button class="btn sm ghost" ' + act('specOutdate', show.id, nd.k) +
+          ' title="The design changed and nothing new is bound yet — mark the record known-stale">' + icon('alert') + 'Outdated</button>';
+      btns += '<button class="btn sm ghost" ' + act('specUnbind', show.id, nd.k) +
+        ' title="Detach from the show — the file stays in Files, every version stays in Spec history">' + icon('x') + 'Unbind</button>';
+    }
     var arrow = i < nodes.length - 1 ? '<div class="carrow">' + icon('chevR') + '</div>' : '';
     return '<div class="cnode ' + cls + '"><div class="ct"><span class="cx">' + esc(nd.cx) + '</span><span class="cn">' + esc(nd.cn) + '</span></div>' +
       '<div class="cs">' + esc(nd.tool) + ' · ' + esc(meta) + '</div><div>' + status + '</div><div class="cbtns">' + btns + '</div></div>' + arrow;
@@ -674,10 +696,24 @@ function tabSpecs(show) {
       '<p>Showrunner stores specs; it does not author them. Open the drawing in <b>E360 Spec Sheet Gen</b>, <b>NovaSpec</b> or <b>PowerSpec</b> and bind from there — the tool pushes its real render bundle into this folder and the node below fills in. Nothing on this tab creates a file on its own.</p></div></div>'
     : '<div class="callout"><div class="ci">' + icon('layers') + '</div><div><b>Generate a spec, and it binds to this folder</b>' +
       '<p>The three generators produce a <b>derivation chain</b>: content <code>.e360</code> derives cabling <code>.nsf</code>, which derives power <code>.pcfg</code>, which derives the Flex <b>pull sheet</b>. Each generated spec caches a render bundle to the DB (viewable + printable by anyone) with the source file on the NAS. <b>Demo — the contents are generated locally.</b></p></div></div>';
+  /* the lifecycle banner: a pm STATED the design changed. Louder than a
+     checker question (it is a decision, not a divergence) and quieter than
+     stale-crit (nothing is broken — the record is just known-old). */
+  var outdatedNodes = ['content', 'cabling', 'power'].filter(function (k) {
+    return show.chain[k] && show.chain[k].gen && show.chain[k].outdated; });
   return head +
+    (outdatedNodes.length ? '<div class="hint" style="margin:-6px 0 16px;color:var(--warn)">' + icon('alert') +
+      '<b>Flagged outdated</b> — ' + esc(outdatedNodes.map(function (k) { return CHAIN_LABEL[k]; }).join(', ')) +
+      ' ' + (outdatedNodes.length === 1 ? 'is' : 'are') + ' marked as no longer matching the design. ' +
+      'The record stands and stays viewable; binding a replacement clears the flag.</div>' : '') +
     (stale ? '<div class="hint" style="margin:-6px 0 16px;color:var(--crit)">' + icon('alert') + '<b>Stale downstream specs</b> — an upstream spec was regenerated. Re-generate the flagged nodes so cabling / power / pull sheet match the current content revision.</div>' : '') +
-    '<div class="panel" style="margin-bottom:16px"><h3>Derivation chain — content → cabling → power → pull sheet</h3>' + chainStrip(show) +
-    '<div class="perm-note">' + inlineIcon('bolt') + ' Regenerating any upstream spec bumps its revision, which flags every downstream artifact <b>stale</b> until re-generated. Mirrors the staffing spec columns (<span class="mono">e360_spec_* / nsf_* / pcfg_*</span>) + rev-based stale-flagging.</div></div>' +
+    '<div class="panel" style="margin-bottom:16px"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+    '<h3 style="flex:1">Derivation chain — content → cabling → power → pull sheet</h3>' +
+    /* the versions door. Binding a new spec retires the old one automatically;
+       this is where every retired one stays reachable. */
+    '<button class="btn sm ghost" ' + act('specHistory', show.id) + ' title="Every version ever bound — superseded and unbound ones included, all viewable">' +
+      icon('layers') + 'Spec history</button></div>' + chainStrip(show) +
+    '<div class="perm-note">' + inlineIcon('bolt') + ' Regenerating any upstream spec bumps its revision, which flags every downstream artifact <b>stale</b> until re-generated. Binding a new spec <b>supersedes</b> the old one automatically — superseded versions are kept, never deleted, and live under Spec history.</div></div>' +
     '<div class="panel"><h3>Two-tier storage</h3>' + twoTier(show) + '</div>';
 }
 
@@ -728,6 +764,11 @@ function tabGear(show) {
   /* API MODE owns its own body. `pulled` is a demo flag over a demo kit; in API
      mode the gear on screen is whatever the last live read returned, or an
      honest statement that nothing has been read yet. */
+  /* the look-back panel rides EVERY state of this tab, linked or not: the
+     whole point of a banked snapshot is that it outlives the link, the list
+     and Flex's own memory of the job. */
+  var hist = gearHistPanel(show);
+
   if (live) {
     if (!realLink) {
       return flexbar + note + poGearStrip(show) + '<div class="gear-empty">' + icon('box') +
@@ -736,19 +777,20 @@ function tabGear(show) {
         (fabricated
           ? 'This show carries an element id the prototype generated in a browser. It exists in no Flex tenant, so there is nothing to read. <b>Create the real folder</b> to replace it.'
           : 'Create the Event Folder — or link an existing one by its element id — and then <b>Load from Flex</b> will list the equipment lists inside it.') +
-        '</div></div>';
+        '</div></div>' + hist;
     }
-    return flexbar + note + poGearStrip(show) + flexSheetBody(show, sheetState);
+    return flexbar + note + poGearStrip(show) + flexSheetBody(show, sheetState) + hist;
   }
 
   if (!g.pulled) {
-    return flexbar + note + poGearStrip(show) + '<div class="gear-empty">' + icon('box') + '<div style="font-weight:600;font-size:14px">No gear list pulled yet</div><div style="font-size:12.5px;margin-top:7px;max-width:440px;margin-left:auto;margin-right:auto;line-height:1.5">Once the Flex Event Folder is linked, <b>Pull from Flex</b> walks the folder tree, identifies the Pull Sheet + Manifest by definition ID, and caches them here — viewable and printable by anyone with folder access.</div></div>';
+    return flexbar + note + poGearStrip(show) + '<div class="gear-empty">' + icon('box') + '<div style="font-weight:600;font-size:14px">No gear list pulled yet</div><div style="font-size:12.5px;margin-top:7px;max-width:440px;margin-left:auto;margin-right:auto;line-height:1.5">Once the Flex Event Folder is linked, <b>Pull from Flex</b> walks the folder tree, identifies the Pull Sheet + Manifest by definition ID, and caches them here — viewable and printable by anyone with folder access.</div></div>' + hist;
   }
   var vk = g.view === 'manifest' ? 'manifest' : 'pull';
   var toggle = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px"><div class="gear-toggle">' +
     '<button class="' + (g.view === 'pull-sheet' ? 'on' : '') + '" ' + act('gearView', show.id, 'pull-sheet') + '>' + icon('box') + 'Pull Sheet</button>' +
     '<button class="' + (g.view === 'manifest' ? 'on' : '') + '" ' + act('gearView', show.id, 'manifest') + '>' + icon('truck') + 'Manifest</button></div>' +
     '<span style="flex:1"></span>' +
+    '<button class="btn sm ghost" ' + act('gearSnapSave', show.id) + ' title="Bank the sheet on screen as a dated record on this show">' + icon('download') + 'Save snapshot</button>' +
     '<button class="btn sm ghost" ' + act('openChainFile', show.id, vk) + '>' + icon('eye') + 'Open in Viewer</button>' +
     '<button class="btn sm primary" ' + act('printChainFile', show.id, vk) + '>' + icon('print') + 'Print</button></div>';
   var pd = chain.power.gen
@@ -756,7 +798,96 @@ function tabGear(show) {
     : '<span class="cs">not yet derived from a .pcfg power spec</span>';
   var deriveLine = '<div class="perm-note" style="margin:0 0 12px">' + inlineIcon('server') + ' Gear count derives from the power layout — ' + pd + '</div>';
   var body = g.view === 'manifest' ? manifestBody(g) : pullBody(g);
-  return flexbar + note + poGearStrip(show) + toggle + deriveLine + body;
+  return flexbar + note + poGearStrip(show) + toggle + deriveLine + body + hist;
+}
+
+/* ── GEAR HISTORY — the banked snapshots (Tom, 2026-08-28) ──────────────────
+   Renders from GEAR_HIST[showId] (app.js view state; the tab arms the load on
+   first paint). A snapshot is the one thing on this tab that is STORAGE by
+   design: the parsed sheet a human chose to keep, listed cheap (counts only)
+   and opened read-only with its stored groups/lines. */
+function gearHistPanel(show) {
+  var st = (typeof GEAR_HIST !== 'undefined') ? GEAR_HIST[show.id] : null;
+  if (!st) {
+    /* first paint: arm the one load. gearHistLoad writes {loading:true}
+       synchronously, so a re-render cannot arm it twice. */
+    if (typeof gearHistLoad === 'function') gearHistLoad(show.id);
+    st = { loading: true };
+  }
+  var head = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h3 style="flex:1">Gear history — banked snapshots</h3>' +
+    '<span class="cs" style="font-size:11px">what actually went out, kept even after Flex moves on</span></div>';
+  var body;
+  if (st.loading) {
+    body = '<div class="cs" style="padding:10px 2px">Reading the banked snapshots…</div>';
+  } else if (st.open) {
+    body = gearSnapshotDetail(show, st.open);
+  } else if (st.error) {
+    body = '<div class="hint" style="color:var(--crit)">' + icon('alert') + esc(st.error) + '</div>';
+  } else if (!(st.list || []).length) {
+    body = '<div class="cs" style="padding:10px 2px;line-height:1.5">No snapshots banked yet. ' +
+      'Read a pull sheet or manifest and press <b>Save snapshot</b> — the parsed document is kept on this ' +
+      'show as a dated record, so "what gear did we send last year" has an answer even after the Flex ' +
+      'folder changes or archives.</div>';
+  } else {
+    body = st.list.map(function (g2) {
+      return '<div style="display:flex;align-items:center;gap:10px;padding:8px 2px;border-bottom:1px solid var(--border);flex-wrap:wrap">' +
+        '<span class="fresh-chip" title="' + esc(g2.kind || 'kind unknown — labeled from the list name') + '">' + esc(g2.doc_label || 'Sheet') + '</span>' +
+        '<span class="mono" style="font-size:11px">' + esc(g2.doc_number || '—') + '</span>' +
+        '<span style="font-size:12.5px;font-weight:600">' + esc(g2.name || '') + '</span>' +
+        '<span class="cs" style="font-size:11.5px">saved ' + esc(fmtDate(String(g2.created_at || '').slice(0, 10))) +
+          ' · ' + esc(userName(g2.saved_by) || g2.saved_by || '—') + '</span>' +
+        '<span style="flex:1"></span>' +
+        '<span class="cs" style="font-family:var(--font-mono);font-size:11px">' +
+          g2.lines_count + ' lines · ' + g2.units_count + ' units</span>' +
+        '<button class="btn sm ghost" ' + act('gearSnapOpen', g2.id) + '>' + icon('eye') + 'Open</button>' +
+        (canEditFolderOf(show)
+          ? '<button class="btn sm ghost" ' + act('gearSnapDelete', g2.id) + ' title="Delete the banked record (plain confirm) — Flex is untouched">' + icon('trash') + '</button>'
+          : '') +
+        '</div>';
+    }).join('');
+  }
+  return '<div class="panel" style="margin-top:16px">' + head + body + '</div>';
+}
+/* the read-only detail: the STORED groups/lines, rendered in the same visual
+   language as the live sheet (.gtotals / .gcat / .gitem) because it is the
+   same document — only its tense changed from "is" to "was". */
+function gearSnapshotDetail(show, snap) {
+  var s = snap.sheet || { groups: [], totals: { groups: 0, lines: 0, units: 0 } };
+  var bar = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0">' +
+    '<button class="btn sm ghost" ' + act('gearSnapBack', show.id) + '>' + icon('chevL') + 'All snapshots</button>' +
+    '<b style="font-family:var(--font-display);font-size:14px">' + esc(snap.doc_label || 'Sheet') +
+      (snap.doc_number ? ' · ' + esc(snap.doc_number) : '') + '</b>' +
+    '<span class="cs" style="font-family:var(--font-mono);font-size:11px">read from Flex ' +
+      esc(fmtTs(snap.fetched_at) || '—') + ' · banked by ' + esc(userName(snap.saved_by) || snap.saved_by || '—') + '</span>' +
+    '<span style="flex:1"></span>' +
+    (canEditFolderOf(show)
+      ? '<button class="btn sm ghost" ' + act('gearSnapDelete', snap.id) + '>' + icon('trash') + 'Delete snapshot</button>'
+      : '') + '</div>';
+  var t = s.totals || { groups: 0, lines: 0, units: 0 };
+  var totals = '<div class="gtotals">' +
+    '<div class="gt"><div class="k">Groups</div><div class="v">' + (t.groups || 0) + '</div></div>' +
+    '<div class="gt"><div class="k">Line items</div><div class="v">' + (t.lines || 0) + '</div></div>' +
+    '<div class="gt"><div class="k">Total units</div><div class="v">' + (t.units || 0) + '</div></div>' +
+    '<div class="gt"><div class="k">' + esc(snap.doc_label || 'Sheet') + '</div><div class="v" style="font-size:15px">' + esc(snap.doc_number || '—') + '</div></div></div>';
+  var cats = (s.groups || []).map(function (c) {
+    var items = (c.items || []).map(function (it) {
+      var tag = it.barcode || (it.resourceId ? String(it.resourceId).slice(0, 8) : '');
+      return '<div class="gitem"><span class="gnm">' + esc(it.name) +
+        (it.serial ? ' <span class="ser">s/n ' + esc(it.serial) + '</span>' : '') +
+        (it.note ? '<span style="display:block;color:var(--muted);font-size:11.5px">' + esc(it.note) + '</span>' : '') +
+        '</span>' +
+        (tag ? '<span class="gid">' + esc(tag) + '</span>' : '') +
+        '<span class="gqty">× ' + esc(it.qty) + '</span></div>';
+    }).join('');
+    return '<div class="gcat"><div class="gch"><b>' + esc(c.path || c.name || '') + '</b>' +
+      (c.containerSerial ? '<span class="ser">' + esc(c.containerSerial) + '</span>' : '') +
+      '<span class="gn">' + (c.items || []).length + ' line' + ((c.items || []).length === 1 ? '' : 's') + '</span></div>' + items + '</div>';
+  }).join('');
+  return bar +
+    '<div class="perm-note" style="margin:0 0 12px">' + inlineIcon('lock') +
+    ' Read-only record — this is what the sheet said when it was banked, not what Flex says now. ' +
+    'For the live list, use Load from Flex above.</div>' +
+    totals + '<div style="margin-top:12px">' + cats + '</div>';
 }
 /* ── the LIVE gear body (2026-08-28) ────────────────────────────────────────
    Same visual language as pullBody() — .gtotals / .gcat / .gitem — because it
@@ -811,8 +942,12 @@ function flexSheetBody(show, st) {
   var switcher = others.length
     ? '<div class="hint" style="margin:0 0 12px">' + icon('layers') + 'Also in this folder: ' +
       others.map(function (l) {
+        /* the tree exposes no document kind (type:null, on purpose — see
+           lib/flex.js), so the label is guessed from the NAME and keeps its
+           "?" — flexDocKindLabel says which world each label came from */
         return '<button class="btn sm ghost" ' + act('flexPickSheet', show.id, l.id) + '>' +
-          esc(l.docNumber || l.name || l.id.slice(0, 8)) + '</button>';
+          esc(l.docNumber || l.name || l.id.slice(0, 8)) +
+          ' <span class="cs" style="font-size:10px">' + esc(flexDocKindLabel(l)) + '</span></button>';
       }).join(' ') + '</div>'
     : '';
 
@@ -827,6 +962,10 @@ function flexSheetBody(show, st) {
     '<span class="cs" style="font-family:var(--font-mono);font-size:11px">read ' + esc(flexWhen(s.fetchedAt)) + ' · live, not cached</span>' +
     '<span style="flex:1"></span>' +
     (s.deepLink ? '<a class="btn sm ghost" href="' + esc(s.deepLink) + '" target="_blank" rel="noopener noreferrer">' + icon('link') + 'Open in Flex</a>' : '') +
+    /* the look-back's front door: bank THIS sheet, exactly as read, on the
+       show. Explicit save only — a read stays a read. */
+    '<button class="btn sm ghost" ' + act('gearSnapSave', show.id) + ' title="Bank this sheet as a dated record on the show — the copy survives whatever happens to the list in Flex">' +
+      icon('download') + 'Save snapshot</button>' +
     '<button class="btn sm primary" ' + act('flexPrintSheet', show.id) + '>' + icon('print') + 'Print</button></div>';
 
   /* BUG 5's dangerous half. 200 + [] is what Flex answers both for an empty

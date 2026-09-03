@@ -539,6 +539,209 @@ async function printChainFile(showId, key) {
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
+   SPEC LIFECYCLE (Tom, 2026-08-28: "can i update these when changes are made?")
+   ────────────────────────────────────────────────────────────────────────────
+   Supersede-on-rebind always existed and needed no button — binding v2 retires
+   v1 by itself. These are the three doors the record never had: SEE the
+   versions, FLAG the current one as outdated when the client changed the
+   design and nothing new is bound yet, and UNBIND when the show should carry
+   no spec at all. All of it works in both worlds: the demo store speaks the
+   same state vocabulary the server derives.
+   ══════════════════════════════════════════════════════════════════════════ */
+var SPEC_STATE_CHIP = {
+  current:    ['fresh-chip', 'current'],
+  outdated:   ['stale-chip', 'outdated'],
+  superseded: ['cs', 'superseded'],
+  unbound:    ['cs', 'unbound']
+};
+async function specHistoryAct(showId) {
+  var r;
+  try { r = await api.listSpecHistory(showId); }
+  catch (e) { toast('Could not read the spec history', String((e && e.message) || e)); return; }
+  var versions = (r && r.versions) || [];
+  var rows = versions.map(function (v) {
+    var chip = SPEC_STATE_CHIP[v.state] || ['cs', v.state || '?'];
+    return '<div style="display:flex;align-items:center;gap:10px;padding:8px 2px;border-bottom:1px solid var(--border)">' +
+      '<span class="mono" style="font-size:11px;min-width:118px">' + esc(CHAIN_LABEL[v.node] || v.node) + '</span>' +
+      '<b style="font-size:12.5px">v' + esc(v.rev) + '</b>' +
+      '<span class="' + chip[0] + '">' + esc(chip[1]) + '</span>' +
+      '<span class="cs" style="font-size:11.5px">' + esc(firstName(v.boundBy) || v.boundBy || '—') +
+        ' · ' + esc(fmtDate(String(v.boundAt || '').slice(0, 10))) + '</span>' +
+      '<span style="flex:1"></span>' +
+      '<button class="btn sm ghost" ' + act('specViewRev', showId, v.node + ':' + v.rev) + '>' +
+        icon('eye') + 'View</button></div>';
+  }).join('');
+  openModal('Spec history',
+    '<p style="margin:0 0 10px;color:var(--text-2);font-size:13px">Every version ever bound to this show, ' +
+    'newest first. Binding a new spec retires the previous one automatically — <b>superseded and unbound ' +
+    'versions are kept, never deleted</b>, and any of them opens from here.</p>' +
+    (rows || '<div class="gear-empty">' + icon('layers') +
+      '<div style="font-weight:600;font-size:14px">No bound versions on record</div>' +
+      /* honest edge: a chain node bound the manual/legacy way carries no render
+         bundle, and this history lists render-bundle binds — say which */
+      '<div style="font-size:12.5px;margin-top:7px;max-width:440px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+      'The history lists specs bound from the tools (the bind popup). Nothing has been bound that way on this show yet.</div></div>'));
+}
+async function specViewRevAct(showId, key) {
+  var parts = String(key || '').split(':');
+  var node = parts[0], rev = parseInt(parts[1], 10);
+  var r;
+  try { r = await api.getSpecRender(showId, node, rev); }
+  catch (e) { toast('No banked render for that version', String((e && e.message) || e)); return; }
+  var body;
+  if (r.png) {
+    body = '<img src="' + esc(r.png) + '" alt="spec render" style="max-width:100%;border:1px solid var(--border);border-radius:8px">';
+  } else if (r.html || r.svg) {
+    /* sandboxed on purpose: a stored bundle is attacker-influenced input the
+       moment anyone can bind one (D8's argument, applied to the history view) */
+    body = '<iframe sandbox="" srcdoc="' + esc(r.html || r.svg) +
+      '" style="width:100%;height:420px;border:1px solid var(--border);border-radius:8px;background:#fff"></iframe>';
+  } else {
+    body = '<div class="hint">' + icon('file') +
+      'This bind stored no drawable bundle — the spec JSON and the NAS file are the record.</div>';
+  }
+  openModal((CHAIN_LABEL[node] || node) + ' · v' + rev,
+    '<div class="cs" style="margin-bottom:10px;font-size:11.5px">bound by ' +
+    esc(firstName(r.createdBy) || r.createdBy || '—') + ' · ' + esc(fmtDate(String(r.createdAt || '').slice(0, 10))) +
+    (r.retired ? ' · <b style="color:var(--warn)">unbound from the show</b> — kept as history' : '') +
+    (r.demo ? ' · demo placeholder, generated locally' : '') + '</div>' + body);
+}
+async function specOutdateAct(showId, node) {
+  /* one dialog: Cancel aborts, an empty answer flags with no note. The flag is
+     a statement, not a deletion — say exactly that before taking it. */
+  var note = null;
+  try {
+    if (typeof prompt === 'function') {
+      note = prompt('Flag the current ' + (CHAIN_LABEL[node] || node) + ' spec as OUTDATED?\n\n' +
+        'The spec stays bound and viewable — this marks it as known-stale (the design changed and ' +
+        'nothing new is bound yet), and every surface will say so until a replacement binds.\n\n' +
+        'Optionally say why (Enter to skip):');
+      if (note === null) return;                       /* Cancel is no */
+    } else { note = ''; }
+  } catch (_) { note = ''; }
+  try { await api.outdateSpec(showId, node, { note: String(note || '').trim() }); }
+  catch (e) { toast('Not flagged', String((e && e.message) || e)); return; }
+  toast('Spec flagged outdated', (CHAIN_LABEL[node] || node) +
+    ' — the record stands, marked as stale until a new spec binds.');
+  var fresh = await refreshShowTab(showId, 'specs');
+  refreshSpecTabBadge(fresh);
+}
+async function specOutdateClearAct(showId, node) {
+  if (!askConfirm('Withdraw the outdated flag on the ' + (CHAIN_LABEL[node] || node) + ' spec?\n\n' +
+      'The spec goes back to reading as current.')) return;
+  try { await api.outdateSpec(showId, node, { undo: true }); }
+  catch (e) { toast('Not withdrawn', String((e && e.message) || e)); return; }
+  toast('Outdated flag withdrawn', (CHAIN_LABEL[node] || node) + ' reads as current again.');
+  var fresh = await refreshShowTab(showId, 'specs');
+  refreshSpecTabBadge(fresh);
+}
+async function specUnbindAct(showId, node) {
+  /* the typed-light confirm: type the node name back. Lighter than the delete
+     confirms (nothing is destroyed) but heavier than a click, because "this
+     show has no content spec now" is a statement the crew will act on. */
+  if (!askTyped('Unbind the ' + (CHAIN_LABEL[node] || node) + ' spec from this show?\n\n' +
+      'What this means: the file STAYS in Files as a plain document and every past version stays ' +
+      'viewable in Spec history — but the show no longer has a ' + node + ' spec, the scope checker ' +
+      'stops reading it, and everything downstream is blocked until something new binds.\n\n' +
+      'Type the node name (' + node + ') to confirm:', node)) {
+    toast('Nothing unbound', 'The name did not match — the spec is untouched.');
+    return;
+  }
+  try { await api.unbindSpec(showId, node); }
+  catch (e) { toast('Not unbound', String((e && e.message) || e)); return; }
+  toast('Spec unbound', (CHAIN_LABEL[node] || node) +
+    ' — the file stays in Files; the node is bindable again.');
+  var fresh = await refreshShowTab(showId, 'specs');
+  refreshSpecTabBadge(fresh);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   GEAR HISTORY (Tom, 2026-08-28: "look back and see what gear was used")
+   ────────────────────────────────────────────────────────────────────────────
+   GEAR_HIST[showId] is view state, exactly like FLEX_SHEETS above it — but
+   where a live sheet is deliberately never stored, a SNAPSHOT is deliberately
+   nothing but storage: the parsed document a human chose to keep. States:
+     undefined          not asked yet (the gear tab arms a load on first paint)
+     {loading:true}     the list read is in flight
+     {list, error?}     the history rows (cheap — no sheet bodies)
+     {list, open}       + one snapshot opened read-only (its full sheet)
+   ══════════════════════════════════════════════════════════════════════════ */
+var GEAR_HIST = {};
+async function gearHistLoad(showId, force) {
+  if (GEAR_HIST[showId] && GEAR_HIST[showId].list && !force) return;
+  var open = (GEAR_HIST[showId] && GEAR_HIST[showId].open) || null;
+  GEAR_HIST[showId] = { loading: true };
+  try {
+    var list = await api.listGearSnapshots(showId);
+    GEAR_HIST[showId] = { list: list || [], open: open };
+  } catch (e) {
+    GEAR_HIST[showId] = { list: [], error: String((e && e.message) || e) };
+  }
+  /* This load arms itself on tab PAINT, not on a click — so the tail refresh
+     must never yank a person who has since navigated elsewhere. Only redraw
+     if this show's gear tab is still the thing on screen. */
+  if (CUR.view === 'show' && CUR.showId === Number(showId) && activeShowTab() === 'gear') {
+    await refreshShowTab(showId, 'gear');
+  }
+}
+async function gearSnapSaveAct(showId) {
+  var show = await api.getShow(showId);
+  var sheet;
+  if (apiMode()) {
+    var st = FLEX_SHEETS[showId];
+    if (!st || !st.sheet) {
+      toast('Nothing to snapshot', 'Load the gear list from Flex first — a snapshot banks the sheet on screen.');
+      return;
+    }
+    sheet = st.sheet;
+  } else {
+    /* DEMO: bank the modeled kit, reshaped into the real sheet grammar, and
+       say the word — the record's SHAPE is real, its source is the simulation */
+    if (!show.gear.pulled) { toast('Nothing to snapshot', 'Pull the gear list first (demo).'); return; }
+    sheet = demoSnapshotFromKit(show);
+  }
+  var snap;
+  try {
+    snap = await api.saveGearSnapshot(showId, {
+      sheet: sheet, label: flexDocKindLabel(sheet)
+    });
+  } catch (e) { toast('Snapshot NOT saved', String((e && e.message) || e)); return; }
+  toast('Snapshot saved to the folder',
+    (snap.doc_label || 'Sheet') + (snap.doc_number ? ' ' + snap.doc_number : '') + ' — ' +
+    snap.lines_count + ' lines · ' + snap.units_count + ' units, banked as of today. ' +
+    (apiMode() ? 'This copy survives whatever happens to the list in Flex.'
+               : 'DEMO — the record shape is real; its contents are the local simulation.'));
+  await gearHistLoad(showId, true);
+}
+async function gearSnapOpenAct(id) {
+  var snap = await api.getGearSnapshot(id);
+  if (!snap) { toast('Snapshot not found', 'It may have been deleted.'); return; }
+  if (!GEAR_HIST[snap.show_id]) GEAR_HIST[snap.show_id] = { list: [] };
+  GEAR_HIST[snap.show_id].open = snap;
+  await refreshShowTab(snap.show_id, 'gear');
+}
+async function gearSnapBackAct(showId) {
+  if (GEAR_HIST[showId]) GEAR_HIST[showId].open = null;
+  await refreshShowTab(showId, 'gear');
+}
+async function gearSnapDeleteAct(id) {
+  var snap = await api.getGearSnapshot(id);
+  if (!snap) return;
+  if (!askConfirm('Delete this snapshot?\n\n' + (snap.doc_label || 'Sheet') +
+      (snap.doc_number ? ' ' + snap.doc_number : '') + ', saved ' +
+      String(snap.created_at || '').slice(0, 10) + ' — the banked record goes; ' +
+      'nothing in Flex is touched.')) return;
+  try { await api.deleteGearSnapshot(id); }
+  catch (e) { toast('Not deleted', String((e && e.message) || e)); return; }
+  if (GEAR_HIST[snap.show_id] && GEAR_HIST[snap.show_id].open &&
+      GEAR_HIST[snap.show_id].open.id === Number(id)) {
+    GEAR_HIST[snap.show_id].open = null;
+  }
+  toast('Snapshot deleted', 'The banked record is gone. Live reads are unaffected.');
+  await gearHistLoad(snap.show_id, true);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
    FLEX — real in API mode, simulated in demo, never the two confused
    ══════════════════════════════════════════════════════════════════════════ */
 
@@ -740,16 +943,22 @@ async function flexPull(showId) {
    documents that happen to share a name. */
 function flexPickList(showId, r) {
   var rows = r.lists.map(function (l) {
+    /* the type label, said honestly: the tree exposes no document kind
+       (lib/flex.js returns type:null on purpose — reading one costs an
+       /identity call per row), so flexDocKindLabel guesses from the NAME and
+       wears a "?". The header read that follows the pick replaces the guess
+       with the definitionId's real answer. */
     return '<button class="btn ghost" style="width:100%;justify-content:flex-start;text-align:left;margin-bottom:8px" ' +
       act('flexPickSheet', showId, l.id) + '>' + icon('box') +
       '<span><b style="font-weight:600">' + esc(l.name || 'Untitled list') + '</b>' +
+      ' <span class="cs" style="font-size:10.5px">' + esc(flexDocKindLabel(l)) + '</span>' +
       '<span style="display:block;font-family:var(--font-mono);font-size:11px;color:var(--muted)">' +
       esc(l.docNumber || 'no doc number') + ' · ' + esc(l.id.slice(0, 8)) + '… · depth ' + l.depth + '</span></span></button>';
   }).join('');
   FLEX_PICK_CTX[showId] = r;
   openModal('Which gear list?',
     '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">Flex folder <b>' + esc(r.folderName || '') + '</b> holds ' + r.lists.length +
-    ' equipment lists. Showrunner cannot tell a pull sheet from a prep manifest out of the folder tree — that costs a call per list — so pick the one you want and it will say which it is once it is open.</p>' +
+    ' equipment lists. The folder tree does not say which is the pull sheet and which the prep manifest — the labels below are guessed from the names (that is what the ? means) — so pick one and it will say what it really is once it is open.</p>' +
     rows);
 }
 var FLEX_PICK_CTX = {};
@@ -5724,6 +5933,12 @@ var ACTIONS = {
   vMax:          function () { return vMax(); },
   specGen:       function (t, id, k) { return specGen(id, k); },
   openChainFile: function (t, id, k) { return openChainFile(id, k); },
+  /* spec lifecycle — history / outdated flag / unbind */
+  specHistory:   function (t, id) { return specHistoryAct(id); },
+  specViewRev:   function (t, id, k) { return specViewRevAct(id, k); },
+  specOutdate:   function (t, id, k) { return specOutdateAct(id, k); },
+  specOutdateClear: function (t, id, k) { return specOutdateClearAct(id, k); },
+  specUnbind:    function (t, id, k) { return specUnbindAct(id, k); },
   printChainFile: function (t, id, k) { return printChainFile(id, k); },
   flexCreate:    function (t, id) { return flexCreate(id); },
   flexLink:      function (t, id) { return flexLink(id); },
@@ -5733,6 +5948,11 @@ var ACTIONS = {
   flexPickSheet: function (t, id, k) { return flexPickSheet(id, k); },
   flexReload:    function (t, id, k) { return flexLoadSheet(id, k || null, { lists: (FLEX_SHEETS[id] || {}).lists || [] }); },
   flexPrintSheet: function (t, id) { return flexPrintSheet(id); },
+  /* gear history — the banked snapshots */
+  gearSnapSave:  function (t, id) { return gearSnapSaveAct(id); },
+  gearSnapOpen:  function (t, id) { return gearSnapOpenAct(id); },
+  gearSnapBack:  function (t, id) { return gearSnapBackAct(id); },
+  gearSnapDelete: function (t, id) { return gearSnapDeleteAct(id); },
   gearView:      function (t, id, k) { return gearView(id, k); },
   gotoTab:       function (t, id, k) { setFolderTab(k); },
   /* schedule (call-sheet pass) */

@@ -1972,6 +1972,152 @@ const DEL = (p, o) => call('DELETE', p, o);
      agentBind.status === 403 || agentBind.status === 404, agentBind.status);
 
   // ══════════════════════════════════════════════════════════════════════════
+  // 13b. SPEC LIFECYCLE — history, the outdated flag, unbind, rebind
+  // ──────────────────────────────────────────────────────────────────────────
+  // Tom, 2026-08-28: "can i update these when changes are made?" Supersede-on-
+  // rebind is §13's; this block proves the manual half, and above all the
+  // invariant that makes the whole feature safe to use: NO PATH LOSES A
+  // VERSION. Superseded rows stay fetchable, unbound files stay filed, and a
+  // rebind after an unbind continues the rev numbering instead of minting a
+  // second v1. State entering here: content v3 current (v1, v2 superseded),
+  // cabling v2 current (v1 superseded).
+  // ══════════════════════════════════════════════════════════════════════════
+  section('13b. spec lifecycle — history, outdate, unbind, rebind');
+
+  // ── the history read ──────────────────────────────────────────────────────
+  const hist1 = await GET(`/api/shows/${S}/spec-history`, { token: TECHT });
+  ok('13b: spec-history answers any signed-in reader — a tech checks against the record too',
+     hist1.status === 200 && Array.isArray(hist1.body.versions), hist1.status);
+  const contentRows = hist1.body.versions.filter((v) => v.node === 'content');
+  ok('13b: every content bind is in the history — v1, v2, v3, none dropped',
+     contentRows.map((v) => v.rev).sort().join(',') === '1,2,3',
+     contentRows.map((v) => [v.rev, v.state]));
+  ok('13b: exactly ONE version per bound node reads `current`',
+     hist1.body.versions.filter((v) => v.state === 'current' && v.node === 'content').length === 1
+     && hist1.body.versions.filter((v) => v.state === 'current' && v.node === 'cabling').length === 1,
+     hist1.body.versions.map((v) => [v.node, v.rev, v.state]));
+  ok('13b: the retired revs read `superseded`, and carry who bound them and when',
+     contentRows.filter((v) => v.state === 'superseded').length === 2
+     && contentRows.every((v) => v.boundBy && v.boundAt),
+     contentRows);
+
+  // ── supersede-not-delete, provable from the outside ───────────────────────
+  const oldFile = await GET(`/api/files/${specFileId}`, { token: TECHT });
+  ok('13b ZERO-LOSS: the v1 files row is still fetchable, marked superseded',
+     oldFile.status === 200 && oldFile.body.status === 'superseded', oldFile.body && oldFile.body.status);
+  const oldRend = await GET(`/api/shows/${S}/spec-render/content?rev=1`, { token: TECHT });
+  ok('13b ZERO-LOSS: the v1 RENDER still opens by rev — history means viewable, not just counted',
+     oldRend.status === 200 && oldRend.body.rev === 1 && !!oldRend.body.html, oldRend.status);
+  const ghostRend = await GET(`/api/shows/${S}/spec-render/content?rev=99`, { token: A });
+  ok('13b: a rev that never existed is a 404 naming it, not the latest one relabeled',
+     ghostRend.status === 404 && /v99/.test(ghostRend.body.error), ghostRend.body);
+
+  // ── the outdated flag: gates first ────────────────────────────────────────
+  const odTech = await POST(`/api/shows/${S}/spec-outdate`, { node: 'content' }, { token: TECHT });
+  ok('13b GATE: a tech cannot flag a spec outdated (rank)', odTech.status === 403, odTech.body);
+  const odPm2 = await POST(`/api/shows/${S}/spec-outdate`, { node: 'content' }, { token: PM2T });
+  ok('13b GATE: a pm who owns nothing cannot either (ownership)', odPm2.status === 403, odPm2.body);
+  const odPull = await POST(`/api/shows/${S}/spec-outdate`, { node: 'pull' }, { token: A });
+  ok('13b: the pull node is refused — its lifecycle is the Flex link, not this route',
+     odPull.status === 400, odPull.body);
+  const odEmpty = await POST(`/api/shows/${S}/spec-outdate`, { node: 'power' }, { token: A });
+  ok('13b: flagging a node with nothing bound is a 409 that says so', odEmpty.status === 409, odEmpty.body);
+
+  const odGo = await POST(`/api/shows/${S}/spec-outdate`,
+    { node: 'content', note: 'client moved to a taller wall' }, { token: A });
+  ok('13b: the owning admin flags content outdated',
+     odGo.status === 200 && odGo.body.chain.content.outdated === true
+     && odGo.body.chain.content.outdatedBy === 'admin', odGo.body.chain && odGo.body.chain.content);
+  ok('13b: the flag does NOT unbind — the spec is still gen, still at its rev',
+     odGo.body.chain.content.gen === true && odGo.body.chain.content.rev === 3,
+     odGo.body.chain.content);
+  const showOd = await GET(`/api/shows/${S}`, { token: TECHT });
+  ok('13b: the show payload carries spec_outdated — the season row scope chip reads it for free',
+     showOd.body.spec_outdated === true, showOd.body.spec_outdated);
+  const histOd = await GET(`/api/shows/${S}/spec-history`, { token: A });
+  ok('13b: the history chips the current content rev as `outdated`',
+     histOd.body.versions.some((v) => v.node === 'content' && v.rev === 3 && v.state === 'outdated'),
+     histOd.body.versions.filter((v) => v.node === 'content'));
+  const odAct = await pool.query(
+    `SELECT * FROM activity WHERE show_id=$1 AND action='spec.outdate'`, [S]);
+  ok('13b: one activity row, carrying the note',
+     odAct.rows.length === 1 && /taller wall/.test(odAct.rows[0].detail), odAct.rows[0] && odAct.rows[0].detail);
+
+  // ── binding a replacement CLEARS the flag ─────────────────────────────────
+  const rebindOd = await POST(`/api/shows/${S}/spec-bind`,
+    { specType: 'e360', json: e360Doc, suggestedName: TAG + ' VNL v4 (replacement)' }, { token: A });
+  ok('13b: the replacement binds at v4', rebindOd.status === 200 && rebindOd.body.rev === 4, rebindOd.body.rev);
+  ok('13b: ...and the bind itself clears the outdated flag — no second call needed',
+     rebindOd.body.chain.content.outdated === false, rebindOd.body.chain.content);
+  ok('13b: ...and the show payload agrees',
+     (await GET(`/api/shows/${S}`, { token: A })).body.spec_outdated === false);
+
+  // ── the undo path ─────────────────────────────────────────────────────────
+  await POST(`/api/shows/${S}/spec-outdate`, { node: 'content' }, { token: A });
+  const odUndo = await POST(`/api/shows/${S}/spec-outdate`, { node: 'content', undo: true }, { token: A });
+  ok('13b: undo withdraws the flag and clears its by/at/note',
+     odUndo.status === 200 && odUndo.body.chain.content.outdated === false
+     && odUndo.body.chain.content.outdatedBy === null, odUndo.body.chain && odUndo.body.chain.content);
+  ok('13b: the withdrawal leaves its own trail',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM activity
+        WHERE show_id=$1 AND action='spec.outdate.clear'`, [S])).rows[0].n === 1);
+
+  // ── unbind: gates, then the three writes ──────────────────────────────────
+  const ubTech = await POST(`/api/shows/${S}/spec-unbind`, { node: 'content' }, { token: TECHT });
+  ok('13b GATE: a tech cannot unbind', ubTech.status === 403, ubTech.body);
+  const ubPm2 = await POST(`/api/shows/${S}/spec-unbind`, { node: 'content' }, { token: PM2T });
+  ok('13b GATE: a pm who owns nothing cannot unbind', ubPm2.status === 403, ubPm2.body);
+  const ubPull = await POST(`/api/shows/${S}/spec-unbind`, { node: 'pull' }, { token: A });
+  ok('13b: the pull node is refused here too', ubPull.status === 400, ubPull.body);
+
+  const curContentFiles = (await pool.query(
+    `SELECT id FROM files WHERE show_id=$1 AND chain_key='content' AND status='filed'`, [S]))
+    .rows.map((r) => r.id);
+  ok('13b: (precondition) a current content file exists to detach', curContentFiles.length > 0,
+     curContentFiles);
+  const ub = await POST(`/api/shows/${S}/spec-unbind`, { node: 'content' }, { token: A });
+  ok('13b: the owning admin unbinds content',
+     ub.status === 200 && ub.body.chain.content.gen === false, ub.body);
+  ok('13b: ...naming the detached file ids',
+     JSON.stringify(ub.body.detachedFileIds.slice().sort()) === JSON.stringify(curContentFiles.slice().sort()),
+     ub.body.detachedFileIds);
+  ok('13b ZERO-LOSS: the detached file is STILL a filed document — only its chain_key cleared',
+     await (async () => {
+       const f = (await pool.query('SELECT * FROM files WHERE id=$1', [curContentFiles[0]])).rows[0];
+       return !!f && f.status === 'filed' && f.chain_key === null;
+     })(), curContentFiles[0]);
+  ok('13b: the rev is KEPT on the un-generated node — history numbering survives',
+     ub.body.chain.content.rev === 4, ub.body.chain.content);
+  const rendGone = await GET(`/api/shows/${S}/spec-render/content`, { token: A });
+  ok('13b: with no rev named, the node honestly 404s — nothing current is bound',
+     rendGone.status === 404, rendGone.status);
+  const rendKept = await GET(`/api/shows/${S}/spec-render/content?rev=4`, { token: A });
+  ok('13b ZERO-LOSS: the unbound v4 render still opens by rev, marked retired',
+     rendKept.status === 200 && rendKept.body.retired === true, rendKept.body && rendKept.body.retired);
+  const chkUb = await GET(`/api/shows/${S}/spec-check`, { token: A });
+  ok('13b: the scope checker stops reading the detached document — content is out of `nodes`',
+     !('content' in (chkUb.body.nodes || {})), Object.keys(chkUb.body.nodes || {}));
+  const histUb = await GET(`/api/shows/${S}/spec-history`, { token: A });
+  ok('13b: the history keeps ALL FOUR content versions — the last one `unbound`, the rest `superseded`',
+     histUb.body.versions.filter((v) => v.node === 'content').length === 4
+     && histUb.body.versions.some((v) => v.node === 'content' && v.rev === 4 && v.state === 'unbound')
+     && histUb.body.versions.filter((v) => v.node === 'content' && v.state === 'superseded').length === 3,
+     histUb.body.versions.filter((v) => v.node === 'content').map((v) => [v.rev, v.state]));
+  ok('13b: the unbind left an activity row naming what stays',
+     (await pool.query(`SELECT * FROM activity WHERE show_id=$1 AND action='spec.unbind'`, [S]))
+       .rows.some((r) => /stays in Files|history is kept/.test(r.detail)));
+
+  // ── rebind after unbind: the numbering continues ──────────────────────────
+  const rebind2 = await POST(`/api/shows/${S}/spec-bind`,
+    { specType: 'e360', json: e360Doc, suggestedName: TAG + ' VNL v5 (rebound)' }, { token: A });
+  ok('13b: rebinding after an unbind continues at v5 — never a second v1',
+     rebind2.status === 200 && rebind2.body.rev === 5, rebind2.body.rev);
+  ok('13b: the node is live again — the render answers with no rev named',
+     (await GET(`/api/shows/${S}/spec-render/content`, { token: A })).status === 200);
+  ok('13b: ...and the checker reads the rebound document again',
+     'content' in ((await GET(`/api/shows/${S}/spec-check`, { token: A })).body.nodes || {}));
+
+  // ══════════════════════════════════════════════════════════════════════════
   // 14. THE PRE-DEPLOY HARDENING PASS (HARDENING_TODO.md, 2026-08-27)
   // ─────────────────────────────────────────────────────────────────────────
   // One block per fixed item. Each is written to FAIL on the old behaviour, so
@@ -3590,12 +3736,115 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('16b: ...and the HEADER still comes through, so the list is identified as the MANIFEST it is',
      psB.body.sheet.type === 'manifest' && psB.body.sheet.docNumber === 'SM_02', psB.body.sheet.type);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // 16c. GEAR SNAPSHOTS — the explicit exception to live-read-never-stored
+  // ──────────────────────────────────────────────────────────────────────────
+  // Tom, 2026-08-28: "would like to look back and see what gear was used on
+  // previous events." The client posts the PARSED sheet it is rendering (PSH,
+  // read through the stub above — still zero live Flex), the server verifies
+  // provenance it can check itself (element id from flex_state, kind from the
+  // sheet's own type against a whitelist), and the record must then survive
+  // everything the live path does not: an unlink, a Flex edit, and time.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('16c. gear snapshots — save, list, view, delete (no live Flex)');
+
+  // ── gates on SAVE: tech floor + this show's tech, exactly PUT /gear's ─────
+  const snapViewer = await POST(`/api/shows/${FX}/gear-snapshots`, { sheet: PSH },
+    { token: legacyLogin.body.token });
+  ok('16c GATE: a viewer cannot save a snapshot (rank floor)', snapViewer.status === 403,
+     snapViewer.body);
+  const snapTechOff = await POST(`/api/shows/${FX}/gear-snapshots`, { sheet: PSH }, { token: TECHT });
+  ok('16c GATE: a tech NOT on this crew cannot save — same gate as the gear write',
+     snapTechOff.status === 403, snapTechOff.body);
+  const snapPm2 = await POST(`/api/shows/${FX}/gear-snapshots`, { sheet: PSH }, { token: PM2T });
+  ok('16c GATE: a pm who owns nothing cannot save either', snapPm2.status === 403, snapPm2.body);
+
+  // ── validation before any row ─────────────────────────────────────────────
+  const snapNoSheet = await POST(`/api/shows/${FX}/gear-snapshots`, {}, { token: A });
+  ok('16c: a save with no sheet is a 400', snapNoSheet.status === 400, snapNoSheet.body);
+  const snapNotASheet = await POST(`/api/shows/${FX}/gear-snapshots`,
+    { sheet: { hello: 'world' } }, { token: A });
+  ok('16c: a sheet with no groups array is refused — it is not a parsed gear list',
+     snapNotASheet.status === 400, snapNotASheet.body);
+
+  // ── the save ──────────────────────────────────────────────────────────────
+  const snap1 = await POST(`/api/shows/${FX}/gear-snapshots`, { sheet: PSH }, { token: A });
+  ok('16c: the owning admin banks the sheet', snap1.status === 200 && snap1.body.id > 0, snap1.body);
+  ok('16c: kind + label come from the sheet\'s own definitionId-derived type',
+     snap1.body.kind === 'pull-sheet' && snap1.body.doc_label === 'Pull Sheet',
+     { kind: snap1.body.kind, label: snap1.body.doc_label });
+  ok('16c: provenance the server can check itself is stamped server-side',
+     snap1.body.element_id === 'stub-element-0001' && snap1.body.list_id === STUB_LIST_A
+     && snap1.body.saved_by === 'admin', snap1.body);
+  ok('16c: the list counts ride their own columns — 3 groups, 4 lines, 52 units',
+     snap1.body.groups_count === 3 && snap1.body.lines_count === 4 && snap1.body.units_count === 52,
+     snap1.body);
+  ok('16c: fetchedAt (when Flex was read) is kept apart from created_at (when a human banked it)',
+     !!snap1.body.fetched_at && !!snap1.body.created_at, snap1.body);
+  const SNAP1 = snap1.body.id;
+  ok('16c: one activity row says what was banked',
+     (await pool.query(`SELECT * FROM activity WHERE show_id=$1 AND action='gear.snapshot'`, [FX]))
+       .rows.some((r) => /Pull Sheet/.test(r.detail) && /52 units/.test(r.detail)));
+
+  // a tech ON the crew may save — the warehouse person who read the sheet
+  await POST(`/api/shows/${FX}/crew`, { username: techUser, role_on_site: 'LED tech' }, { token: A });
+  const snapTechOn = await POST(`/api/shows/${FX}/gear-snapshots`,
+    { sheet: { ...PSH, type: 'evil-kind' }, label: 'Prep list (from its name)' }, { token: TECHT });
+  ok('16c GATE: the same tech, now ON the crew, saves fine', snapTechOn.status === 200, snapTechOn.body);
+  ok('16c: an unknown sheet type is stored as \'\' — unknown said, not guessed — and the label falls back',
+     snapTechOn.body.kind === '' && snapTechOn.body.doc_label === 'Prep list (from its name)',
+     { kind: snapTechOn.body.kind, label: snapTechOn.body.doc_label });
+
+  // ── list + detail ─────────────────────────────────────────────────────────
+  const snapList = await GET(`/api/shows/${FX}/gear-snapshots`, { token: legacyLogin.body.token });
+  ok('16c: anyone signed in reads the history — like the live read it descends from',
+     snapList.status === 200 && snapList.body.length === 2, snapList.body.length);
+  ok('16c: the list is BODILESS — no sheet key rides a listing row',
+     snapList.body.every((x) => !('sheet' in x)), Object.keys(snapList.body[0] || {}));
+  ok('16c: newest first', snapList.body[0].id === snapTechOn.body.id, snapList.body.map((x) => x.id));
+  const snapDetail = await GET(`/api/gear-snapshots/${SNAP1}`, { token: TECHT });
+  ok('16c: the detail carries the STORED document — groups, barcodes, quantities intact',
+     snapDetail.status === 200 && snapDetail.body.sheet.groups.length === 3
+     && snapDetail.body.sheet.groups.some((g) => g.items.some((i) => i.barcode === '00009' && i.qty === 48)),
+     snapDetail.body.sheet && snapDetail.body.sheet.totals);
+  ok('16c: an unknown snapshot id is a 404',
+     (await GET('/api/gear-snapshots/99999999', { token: A })).status === 404);
+
+  // ── delete: pm-with-ownership, narrower than save on purpose ─────────────
+  const delTech = await DEL(`/api/gear-snapshots/${snapTechOn.body.id}`, { token: TECHT });
+  ok('16c GATE: the tech who SAVED it cannot delete it — removing history is the narrower act',
+     delTech.status === 403, delTech.body);
+  const delPm2 = await DEL(`/api/gear-snapshots/${snapTechOn.body.id}`, { token: PM2T });
+  ok('16c GATE: a pm who owns nothing cannot delete', delPm2.status === 403, delPm2.body);
+  const delGo = await DEL(`/api/gear-snapshots/${snapTechOn.body.id}`, { token: A });
+  ok('16c: the owning admin deletes the junk one', delGo.status === 200, delGo.body);
+  ok('16c: a second delete of the same id is a 404, not a quiet ok',
+     (await DEL(`/api/gear-snapshots/${snapTechOn.body.id}`, { token: A })).status === 404);
+  ok('16c: the delete left a trail',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM activity
+        WHERE show_id=$1 AND action='gear.snapshot.delete'`, [FX])).rows[0].n === 1);
+
+  // ── the SHOW cascade: zero orphans, proven at the table ───────────────────
+  await POST(`/api/shows/${FX5}/gear-snapshots`,
+    { sheet: PSH, label: 'doomed' }, { token: A });
+  ok('16c: (precondition) the doomed show holds a snapshot',
+     (await pool.query('SELECT COUNT(*)::int AS n FROM gear_snapshots WHERE show_id=$1', [FX5]))
+       .rows[0].n === 1);
+  await DEL(`/api/shows/${FX5}`, { token: A });
+  ok('16c CASCADE: deleting the show takes its snapshots — zero orphan rows',
+     (await pool.query('SELECT COUNT(*)::int AS n FROM gear_snapshots WHERE show_id=$1', [FX5]))
+       .rows[0].n === 0);
+
   const fxUnlink = await DEL(`/api/shows/${FX}/flex/element`, { token: A });
   ok('16: unlink forgets the pointer and clears the deep link',
      fxUnlink.status === 200 && fxUnlink.body.linked === false
      && !fxUnlink.body.elementId && fxUnlink.body.deepLink === '', fxUnlink.body);
   const fxUnlinkTech = await DEL(`/api/shows/${FX}/flex/element`, { token: TECHT });
   ok('16 GATE: a tech cannot unlink either', fxUnlinkTech.status === 403, fxUnlinkTech.body);
+  const snapAfterUnlink = await GET(`/api/shows/${FX}/gear-snapshots`, { token: A });
+  ok('16c: the banked snapshot SURVIVES the unlink — the look-back outlives the link',
+     snapAfterUnlink.status === 200 && snapAfterUnlink.body.length === 1
+     && snapAfterUnlink.body[0].id === SNAP1, snapAfterUnlink.body);
 
   // ── nothing leaves this suite pointing at a live tenant ───────────────────
   ok('16: every Flex call in this section went to the STUB host, never to Flex',
@@ -4200,7 +4449,8 @@ const DEL = (p, o) => call('DELETE', p, o);
      && before.purchase_orders > 0 && before.po_lines > 0 && before.purchase_needs > 0
      && before.activity > 0
      && before.tech_reports > 0 && before.notification_outbox > 0
-     && before.show_contacts > 0,
+     && before.show_contacts > 0
+     && before.gear_snapshots > 0,
      before);
   // add the remaining child types so the cascade is exercised in full
   await POST('/api/bookings', { show_id: S, category: 'Truck / freight', vendor: 'Landstar',
@@ -4357,6 +4607,9 @@ async function childCounts(projectId) {
     spec_chain:       await q(`SELECT COUNT(*) n FROM spec_chain WHERE show_id ${inShows}`),
     spec_renders:     await q(`SELECT COUNT(*) n FROM spec_renders WHERE show_id ${inShows}`),
     flex_state:       await q(`SELECT COUNT(*) n FROM flex_state WHERE show_id ${inShows}`),
+    // 16c — the rule this list exists to enforce: a table not counted here
+    // leaks rows on every folder delete.
+    gear_snapshots:   await q(`SELECT COUNT(*) n FROM gear_snapshots WHERE show_id ${inShows}`),
     proposals:        await q(`SELECT COUNT(*) n FROM proposals WHERE project_id=$1 OR show_id ${inShows}`),
     // F2/F3 — two new tables, and the rule this list exists to enforce: a table
     // that is not counted here is a table that leaks rows on every folder delete.

@@ -137,6 +137,15 @@ async function hydrateShow(row, q = pool, { withSteps = false, extra: more = nul
   } else {
     extra.scheduler_stale = false;
   }
+  // ── the spec-outdated signal, one cheap EXISTS ────────────────────────────
+  // The season row's scope chip must be able to say "the spec behind this line
+  // is known-stale" without fetching the chain per row — the flag rides the
+  // show payload the listings already carry. One indexed EXISTS against
+  // spec_chain (unique (show_id, node), four rows a show at most) is the whole
+  // cost; scope itself is untouched.
+  const od = await q.query(
+    `SELECT EXISTS(SELECT 1 FROM spec_chain WHERE show_id=$1 AND gen AND outdated) AS o`, [row.id]);
+  extra.spec_outdated = !!(od.rows[0] && od.rows[0].o);
   // "View in Scheduler" — the same URL shape the push response has always
   // returned. Auth-gated (every show read is), so the base URL is not leaked
   // through the public /api/config; null while the integration is unconfigured

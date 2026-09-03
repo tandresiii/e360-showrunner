@@ -28,7 +28,7 @@ const { storage, buildNasPath, MAX_BYTES, contentTypeFor, fileName, storageProbe
 const fileCache = require('../lib/filecache');
 const {
   pick, has, dbToFile, dbToBooking, dbToProof, dbToProofRound, dbToChainNode,
-  dbToFlexState, dbToExpense
+  dbToFlexState, dbToGearSnapshot, dbToExpense
 } = require('../lib/mappers');
 const {
   FILE_KINDS, FIN_KINDS, FILE_ARTIFACTS, FILE_STATUSES_WRITABLE,
@@ -635,9 +635,13 @@ router.put('/shows/:id/chain/:node', requireRole('pm'), asyncH(async (req, res) 
 // The latest render bundle per node for a show — the checker's input, and the
 // reason spec_renders keeps `json`: a consistency check never touches the NAS.
 async function boundSpecDocs(showId, q = pool) {
+  // `retired` is unbind's mark: a detached render must stop answering for the
+  // show — the scope checker reading a document nobody stands behind is worse
+  // than reading nothing — while the row itself stays for the history view.
   const r = await q.query(
     `SELECT DISTINCT ON (node) node, spec_type, json, rev, file_id, created_at
-       FROM spec_renders WHERE show_id=$1 ORDER BY node, rev DESC, id DESC`, [showId]);
+       FROM spec_renders WHERE show_id=$1 AND NOT retired
+       ORDER BY node, rev DESC, id DESC`, [showId]);
   const docs = {};
   const meta = {};
   for (const row of r.rows) {
@@ -730,12 +734,17 @@ router.post('/shows/:id/spec-bind', requireRole('pm'), asyncH(async (req, res) =
     const up = CHAIN_UP[node];
     const rev = (chainBefore[node].rev || 0) + 1;
     const derived = up ? chainBefore[up].rev : 0;
+    // A fresh bind ANSWERS the outdated flag: "the design changed, nothing new
+    // is bound yet" stops being true the moment something new binds. Cleared
+    // here rather than by a second route call, so the flag can never linger
+    // over the very spec that replaced the one it was raised about.
     await c.query(
       `INSERT INTO spec_chain (show_id, node, gen, rev, derived_from_rev, by, when_at, file_id, updated_at)
        VALUES ($1,$2,TRUE,$3,$4,$5,$6,$7,NOW())
        ON CONFLICT (show_id, node) DO UPDATE SET gen=TRUE, rev=EXCLUDED.rev,
          derived_from_rev=EXCLUDED.derived_from_rev, by=EXCLUDED.by, when_at=EXCLUDED.when_at,
-         file_id=EXCLUDED.file_id, updated_at=NOW()`,
+         file_id=EXCLUDED.file_id, outdated=FALSE, outdated_by=NULL, outdated_at=NULL,
+         outdated_note='', updated_at=NOW()`,
       [showId, node, rev, derived, req.actor, todayISO(), file.id]);
 
     // D2. the render bundle. One row per bind, so history comes free.
@@ -782,25 +791,203 @@ router.post('/shows/:id/spec-bind', requireRole('pm'), asyncH(async (req, res) =
   });
 }));
 
-// D2. The render bundle for a node, at its CURRENT rev. `html` is meant for an
-// <iframe srcdoc> — the tools inline their own stylesheets, so browser Print →
-// PDF works with no further work. Prefer `png` for anything email-bound.
+// D2. The render bundle for a node, at its CURRENT rev — or, with ?rev=N, at
+// ANY rev it ever held (the history view's "open v1", additive since the
+// lifecycle pass). `html` is meant for an <iframe srcdoc> — the tools inline
+// their own stylesheets, so browser Print → PDF works with no further work.
+// Prefer `png` for anything email-bound.
+//
+// With no ?rev the answer stays what it always was: the latest LIVE bundle,
+// retired rows excluded — after an unbind this node honestly 404s. A named rev
+// is served retired-or-not, because the whole point of history is that a
+// version a human once bound can always be looked at again.
 router.get('/shows/:id/spec-render/:node', asyncH(async (req, res) => {
   const showId = idParam(req);
   const node = String(req.params.node);
   if (!CHAIN_NODES.includes(node)) throw badRequest(`Unknown chain node '${node}'`);
   if (!(await loadShow(showId))) throw notFound('Show not found');
-  const r = await pool.query(
-    `SELECT * FROM spec_renders WHERE show_id=$1 AND node=$2 ORDER BY rev DESC, id DESC LIMIT 1`,
-    [showId, node]);
-  if (!r.rows.length) throw notFound(`Nothing is bound to the '${node}' node of this show`);
+  const rev = intOrNull(pick(req.query, 'rev'));
+  const r = rev != null
+    ? await pool.query(
+        `SELECT * FROM spec_renders WHERE show_id=$1 AND node=$2 AND rev=$3
+         ORDER BY id DESC LIMIT 1`, [showId, node, rev])
+    : await pool.query(
+        `SELECT * FROM spec_renders WHERE show_id=$1 AND node=$2 AND NOT retired
+         ORDER BY rev DESC, id DESC LIMIT 1`, [showId, node]);
+  if (!r.rows.length) {
+    throw notFound(rev != null
+      ? `No v${rev} render exists on the '${node}' node of this show`
+      : `Nothing is bound to the '${node}' node of this show`);
+  }
   const row = r.rows[0];
   res.json({
     node, specType: row.spec_type, rev: row.rev, fileId: row.file_id,
     json: row.json, svg: row.svg || '', html: row.html || '', png: row.png || '',
     toolVersion: row.tool_version || '', sourceUrl: row.source_url || '',
-    createdBy: row.created_by || '', createdAt: row.created_at
+    createdBy: row.created_by || '', createdAt: row.created_at,
+    retired: !!row.retired
   });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// SPEC LIFECYCLE (Tom, 2026-08-28: "can i update these when changes are made?")
+// ────────────────────────────────────────────────────────────────────────────
+// Supersede-on-rebind always existed (D1); these three are the manual half —
+// see the record, flag it stale without a replacement, or detach it. The pull
+// node is deliberately OUT of all three: its lifecycle is the Flex link on the
+// gear tab, and offering "unbind the pull sheet" here would be a second door
+// to the same room with a different lock.
+const SPEC_LIFECYCLE_NODES = ['content', 'cabling', 'power'];
+
+// GET /shows/:id/spec-history — every version ever bound, newest first.
+// Readable by anyone signed in, like the renders it lists: the history of what
+// was sent is exactly what a tech standing at the rack needs to check against.
+// `state` is derived here, once, so four surfaces cannot each derive it:
+//   current    the live bind (chain says gen, rev matches, not retired)
+//   outdated   current, but a pm flagged the design as changed
+//   superseded a LATER rev exists on the node — true forever, retired or not,
+//              because "v2 replaced v1" stays a fact after v2 itself unbinds
+//   unbound    the last rev of a node a human detached (kept, viewable)
+router.get('/shows/:id/spec-history', asyncH(async (req, res) => {
+  const showId = idParam(req);
+  if (!(await loadShow(showId))) throw notFound('Show not found');
+  const chain = await chainFor(showId);
+  const r = await pool.query(
+    `SELECT r.id, r.node, r.spec_type, r.rev, r.file_id, r.retired,
+            r.created_by, r.created_at, f.name AS file_name, f.status AS file_status
+       FROM spec_renders r LEFT JOIN files f ON f.id = r.file_id
+      WHERE r.show_id=$1 ORDER BY r.created_at DESC, r.id DESC`, [showId]);
+  const latestRev = {};
+  for (const row of r.rows) {
+    if (!(row.node in latestRev) || row.rev > latestRev[row.node]) latestRev[row.node] = row.rev;
+  }
+  const versions = r.rows.map((row) => {
+    const n = chain[row.node] || {};
+    const isCurrent = !row.retired && !!n.gen && n.rev === row.rev;
+    return {
+      id: row.id, node: row.node, specType: row.spec_type, rev: row.rev,
+      fileId: row.file_id, fileName: row.file_name || '',
+      fileStatus: row.file_status || null,
+      boundBy: row.created_by || '', boundAt: row.created_at,
+      state: row.rev < latestRev[row.node] ? 'superseded'
+           : row.retired ? 'unbound'
+           : isCurrent ? (n.outdated ? 'outdated' : 'current')
+           : 'superseded'
+    };
+  });
+  res.json({ showId, versions, chain });
+}));
+
+// POST /shows/:id/spec-outdate  { node, note?, undo? }
+// pm+ on a folder they may edit — flagging the record stale is a commercial
+// statement, same gate as the scope line. The flag says "the client changed
+// the design and nothing new is bound yet"; it blocks nothing and deletes
+// nothing, it just stops every surface from presenting a known-stale spec as
+// the quiet truth. `undo:true` withdraws the flag (the design change fell
+// through, or it was raised on the wrong node).
+router.post('/shows/:id/spec-outdate', requireRole('pm'), asyncH(async (req, res) => {
+  const showId = idParam(req);
+  const show = await loadShow(showId);
+  if (!show) throw notFound('Show not found');
+  if (!canEditProject(req.session, await loadProject(show.project_id))) {
+    throw forbidden('Not allowed to modify this show’s specs');
+  }
+  const b = req.body || {};
+  const node = String(pick(b, 'node') || '');
+  if (!SPEC_LIFECYCLE_NODES.includes(node)) {
+    throw badRequest(`node must be one of: ${SPEC_LIFECYCLE_NODES.join(', ')}`);
+  }
+  const undo = pick(b, 'undo') === true;
+  const note = String(pick(b, 'note') || '').slice(0, 500);
+  const out = await withTx(async (c) => {
+    const chain = await chainFor(showId, c);
+    if (!chain[node].gen) {
+      throw conflict(`Nothing is bound to the '${node}' node — there is no current spec to flag.`);
+    }
+    if (undo) {
+      await c.query(
+        `UPDATE spec_chain SET outdated=FALSE, outdated_by=NULL, outdated_at=NULL,
+                outdated_note='', updated_at=NOW()
+          WHERE show_id=$1 AND node=$2`, [showId, node]);
+    } else {
+      await c.query(
+        `UPDATE spec_chain SET outdated=TRUE, outdated_by=$3, outdated_at=NOW(),
+                outdated_note=$4, updated_at=NOW()
+          WHERE show_id=$1 AND node=$2`, [showId, node, req.actor, note]);
+    }
+    await logActivity(c, {
+      projectId: show.project_id, showId, actor: req.actor,
+      action: undo ? 'spec.outdate.clear' : 'spec.outdate', accent: !undo,
+      detail: undo
+        ? `${node} v${chain[node].rev} — outdated flag withdrawn`
+        : `${node} v${chain[node].rev} flagged outdated${note ? ' — ' + note : ''}`
+    });
+    // The design changing IS the north-star kind of change: the crew building
+    // against the old drawing is exactly who must hear about it.
+    await notifyTargets(c, {
+      body: b, anchorType: 'show', anchorId: showId,
+      projectId: show.project_id, showId, actor: req.actor,
+      summary: undo
+        ? `withdrew the outdated flag on the ${node} spec —`
+        : `flagged the ${node} spec (v${chain[node].rev}) as outdated —`
+    });
+    return chainFor(showId, c);
+  });
+  res.json({ ok: true, node, chain: out });
+}));
+
+// POST /shows/:id/spec-unbind  { node }
+// Detach the current spec from the show. THREE writes, all reversible in
+// spirit and none destructive:
+//   · the files row keeps existing AND keeps listing (status stays 'filed',
+//     only chain_key clears) — "kept in files, no longer the spec";
+//   · the node's renders retire, so boundSpecDocs / spec-check stop reading a
+//     document nobody stands behind, while ?rev= keeps every one viewable;
+//   · the chain node goes back to gen=FALSE with its REV KEPT, so a later
+//     rebind continues the numbering instead of minting a second v1.
+// Same gate as outdate. Downstream staleness needs no code: a child of an
+// un-generated parent already renders as blocked-upstream.
+router.post('/shows/:id/spec-unbind', requireRole('pm'), asyncH(async (req, res) => {
+  const showId = idParam(req);
+  const show = await loadShow(showId);
+  if (!show) throw notFound('Show not found');
+  if (!canEditProject(req.session, await loadProject(show.project_id))) {
+    throw forbidden('Not allowed to modify this show’s specs');
+  }
+  const node = String(pick(req.body || {}, 'node') || '');
+  if (!SPEC_LIFECYCLE_NODES.includes(node)) {
+    throw badRequest(`node must be one of: ${SPEC_LIFECYCLE_NODES.join(', ')}`);
+  }
+  const out = await withTx(async (c) => {
+    const chain = await chainFor(showId, c);
+    if (!chain[node].gen) {
+      throw conflict(`Nothing is bound to the '${node}' node — there is nothing to unbind.`);
+    }
+    const det = await c.query(
+      `UPDATE files SET chain_key=NULL WHERE show_id=$1 AND chain_key=$2 AND status='filed'
+       RETURNING id, name`, [showId, node]);
+    await c.query(
+      `UPDATE spec_renders SET retired=TRUE WHERE show_id=$1 AND node=$2`, [showId, node]);
+    await c.query(
+      `UPDATE spec_chain SET gen=FALSE, file_id=NULL, outdated=FALSE, outdated_by=NULL,
+              outdated_at=NULL, outdated_note='', updated_at=NOW()
+        WHERE show_id=$1 AND node=$2`, [showId, node]);
+    await logActivity(c, {
+      projectId: show.project_id, showId, actor: req.actor, action: 'spec.unbind',
+      accent: true,
+      detail: `${node} v${chain[node].rev} unbound — ` +
+              (det.rows.length
+                ? `${det.rows.map((f) => f.name).join(', ')} stays in Files as a plain document`
+                : 'the render history is kept'),
+    });
+    await notifyTargets(c, {
+      body: req.body || {}, anchorType: 'show', anchorId: showId,
+      projectId: show.project_id, showId, actor: req.actor,
+      summary: `unbound the ${node} spec (v${chain[node].rev}) — the show has no ${node} spec now —`
+    });
+    return { chain: await chainFor(showId, c), detachedFileIds: det.rows.map((f) => f.id) };
+  });
+  res.json({ ok: true, node, ...out });
 }));
 
 // D7. The checker as its own endpoint, so the UI can ask at any time rather
@@ -1143,6 +1330,118 @@ router.delete('/shows/:id/flex/element', requireRole('pm'), asyncH(async (req, r
   await logActivity(pool, { projectId: show.project_id, showId, actor: req.actor,
     action: 'flex.unlink', detail: 'Flex Event Folder unlinked (the folder itself is untouched)' });
   res.json(gearPayload(r.rows[0], show));
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// GEAR SNAPSHOTS (Tom, 2026-08-28: "would like to look back and see what gear
+// was used on previous events")
+// ────────────────────────────────────────────────────────────────────────────
+// The read path above stays live-and-never-stored; a snapshot is the explicit,
+// human-pressed exception. The client posts the PARSED sheet it is looking at
+// — the exact flexReadPullSheet document the screen just rendered — rather
+// than the server re-fetching, for two reasons that both matter: the saved
+// record is byte-for-byte what the human approved by pressing the button (a
+// re-fetch could bank a sheet the warehouse changed mid-click), and the save
+// costs Flex nothing. What the server will NOT take from the client is
+// provenance it can check itself: element_id comes from flex_state, kind from
+// the sheet's own definitionId-derived type, and both pass a whitelist.
+const SNAPSHOT_KINDS = ['pull-sheet', 'manifest'];
+const SNAPSHOT_KIND_LABEL = { 'pull-sheet': 'Pull Sheet', manifest: 'Manifest' };
+
+// The write gate is PUT /gear's, verbatim: tech floor, and THIS show's tech —
+// canEditProject OR a crew line. The warehouse tech who read the sheet is the
+// person banking it; a viewer/client still cannot, and neither can a tech from
+// somebody else's show.
+async function assertGearWriter(req, show) {
+  if (canEditProject(req.session, await loadProject(show.project_id))) return;
+  const onCrew = await pool.query(
+    `SELECT 1 FROM crew_assignments WHERE show_id=$1 AND LOWER(username)=LOWER($2) LIMIT 1`,
+    [show.id, req.session.username]);
+  if (!onCrew.rows.length) throw forbidden('Not allowed to edit this show’s gear record');
+}
+
+// POST /api/shows/:id/gear-snapshots   body: { sheet, label? }
+router.post('/shows/:id/gear-snapshots', requireRole('tech'), asyncH(async (req, res) => {
+  const showId = idParam(req);
+  const show = await loadShow(showId);
+  if (!show) throw notFound('Show not found');
+  await assertGearWriter(req, show);
+
+  const b = req.body || {};
+  const sheet = pick(b, 'sheet');
+  if (!sheet || typeof sheet !== 'object' || Array.isArray(sheet)) {
+    throw badRequest('sheet must be the parsed pull-sheet document object');
+  }
+  if (!Array.isArray(sheet.groups)) {
+    throw badRequest('sheet.groups must be an array — this does not look like a parsed gear list');
+  }
+  const totals = sheet.totals && typeof sheet.totals === 'object' ? sheet.totals : {};
+  // kind is WHITELISTED, never trusted prose: the read path derives 'pull-sheet'
+  // / 'manifest' from the header's definitionId, and anything else is stored as
+  // '' — unknown said, not guessed. The label falls back to the client's `label`
+  // (the picker's honest name-derived guess) and then the list's own name.
+  const kind = oneOf(String(sheet.type || ''), SNAPSHOT_KINDS, '');
+  const docLabel = SNAPSHOT_KIND_LABEL[kind] ||
+    String(pick(b, 'label') || sheet.name || 'Equipment list').slice(0, 80);
+  const fetchedAt = typeof sheet.fetchedAt === 'string' &&
+      /^\d{4}-\d{2}-\d{2}T/.test(sheet.fetchedAt) ? sheet.fetchedAt : null;
+
+  const cur = (await pool.query('SELECT * FROM flex_state WHERE show_id=$1', [showId])).rows[0] || {};
+  const out = await withTx(async (c) => {
+    const ins = await c.query(
+      `INSERT INTO gear_snapshots (show_id, element_id, list_id, kind, doc_label, doc_number,
+         name, groups_count, lines_count, units_count, sheet, fetched_at, saved_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13) RETURNING *`,
+      [showId, cur.element_id || null, String(sheet.listId || '').slice(0, 64) || null,
+       kind, docLabel, String(sheet.docNumber || '').slice(0, 64),
+       String(sheet.name || '').slice(0, 200),
+       intOrNull(totals.groups) || 0, intOrNull(totals.lines) || 0, intOrNull(totals.units) || 0,
+       JSON.stringify(sheet), fetchedAt, req.session.username]);
+    await logActivity(c, {
+      projectId: show.project_id, showId, actor: req.actor, action: 'gear.snapshot',
+      accent: true,
+      detail: `${docLabel} ${sheet.docNumber || sheet.name || ''} snapshotted — ` +
+              `${intOrNull(totals.lines) || 0} lines · ${intOrNull(totals.units) || 0} units`
+    });
+    return ins.rows[0];
+  });
+  res.json(dbToGearSnapshot(out, { withSheet: true }));
+}));
+
+// The list: cheap on purpose — counts ride their own columns so a season of
+// history never loads a season of sheet bodies. Readable by anyone signed in,
+// like the live read it descends from.
+router.get('/shows/:id/gear-snapshots', asyncH(async (req, res) => {
+  const showId = idParam(req);
+  if (!(await loadShow(showId))) throw notFound('Show not found');
+  const r = await pool.query(
+    `SELECT * FROM gear_snapshots WHERE show_id=$1 ORDER BY created_at DESC, id DESC`, [showId]);
+  res.json(r.rows.map((row) => dbToGearSnapshot(row)));
+}));
+
+router.get('/gear-snapshots/:id', asyncH(async (req, res) => {
+  const r = await pool.query('SELECT * FROM gear_snapshots WHERE id=$1', [idParam(req)]);
+  if (!r.rows.length) throw notFound();
+  res.json(dbToGearSnapshot(r.rows[0], { withSheet: true }));
+}));
+
+// Delete is pm-with-ownership, NOT the tech floor that saves: a snapshot is
+// the show's historical record, and removing history is a narrower act than
+// adding to it. Plain confirm in front (app.js); this gate is the real one.
+router.delete('/gear-snapshots/:id', requireRole('pm'), asyncH(async (req, res) => {
+  const cur = (await pool.query('SELECT * FROM gear_snapshots WHERE id=$1', [idParam(req)])).rows[0];
+  if (!cur) throw notFound(`gear snapshot ${idParam(req)} not found`);
+  const show = await loadShow(cur.show_id);
+  const project = show ? await loadProject(show.project_id) : null;
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to delete this snapshot');
+  await pool.query('DELETE FROM gear_snapshots WHERE id=$1', [cur.id]);
+  await logActivity(pool, {
+    projectId: show ? show.project_id : null, showId: cur.show_id, actor: req.actor,
+    action: 'gear.snapshot.delete', accent: true,
+    detail: `${cur.doc_label || 'snapshot'} ${cur.doc_number || ''} ` +
+            `(saved ${new Date(cur.created_at).toISOString().slice(0, 10)}) deleted`
+  });
+  res.json({ ok: true });
 }));
 
 router.put('/shows/:id/gear', requireRole('tech'), asyncH(async (req, res) => {

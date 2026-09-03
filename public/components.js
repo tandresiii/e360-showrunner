@@ -228,11 +228,37 @@ function scopeChip(show, opts) {
   }
   var src = show.scope_source === 'spec' ? ' · from the bound spec' : '';
   var q = (typeof scopeQuestionsFor === 'function') ? scopeQuestionsFor(show).length : 0;
-  return '<span class="scope-chip' + (q ? ' q' : '') + '" title="' +
-    esc('What we are delivering' + src + (q ? ' · ' + q + ' open question about it' + (q === 1 ? '' : 's') : '')) +
+  /* the lifecycle pass: `spec_outdated` rides the show payload (one EXISTS in
+     hydrateShow; the demo store derives the same flag), so every surface that
+     prints this chip can say "the spec behind this line is known-stale"
+     without fetching the chain. A warn, not a question — a pm STATED it. */
+  var od = !!show.spec_outdated;
+  return '<span class="scope-chip' + (q ? ' q' : '') + (od ? ' od' : '') + '" title="' +
+    esc('What we are delivering' + src + (q ? ' · ' + q + ' open question about it' + (q === 1 ? '' : 's') : '') +
+        (od ? ' · a bound spec is flagged OUTDATED — the design changed, nothing new bound yet' : '')) +
     '">' + inlineIcon('ruler') + esc(line) +
+    (od ? '<b class="sc-od" title="A bound spec is flagged outdated — see the Specs tab">' +
+      inlineIcon('alert') + '</b>' : '') +
     (q ? '<b class="sc-q" title="The bound spec disagrees — a question, not an error">?</b>' : '') +
     '</span>';
+}
+/* ── the Flex document-kind label, said honestly ────────────────────────────
+   The pull-sheet READ knows its kind for real (the header's definitionId →
+   'pull-sheet' | 'manifest'); the folder-tree PICKER does not — the tree
+   carries no definitionId and reading one per row costs an /identity call
+   each (lib/flex.js flexListEquipmentListsUnder returns type:null on
+   purpose). So: a real type is labeled flatly; with type null the label is
+   GUESSED FROM THE NAME and wears a "?" so nobody mistakes a guess for a
+   fact. One helper for the picker modal, the switcher row and the snapshot
+   list, so the three cannot drift. */
+function flexDocKindLabel(doc) {
+  var t = doc && (doc.type || doc.kind);
+  if (t === 'pull-sheet') return 'Pull Sheet';
+  if (t === 'manifest') return 'Manifest';
+  var nm = String((doc && (doc.name || doc.docNumber)) || '').toLowerCase();
+  if (/manifest/.test(nm)) return 'Manifest?';
+  if (/pull/.test(nm)) return 'Pull Sheet?';
+  return 'Equipment list';
 }
 /* the archived marker — quiet, and it never hides the thing it labels */
 function archivedChip(row) {

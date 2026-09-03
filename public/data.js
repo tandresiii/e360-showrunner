@@ -338,6 +338,36 @@ function mkFile(o) {
     provenance: o.provenance || null        /* null = human upload */
   };
 }
+/* mkSpecVer(node, specType, rev, off, by, state[, fileName]) — one row of a
+   show's spec version history. Mirrors GET /shows/:id/spec-history exactly:
+   `state` is one of current | outdated | superseded | unbound, derived
+   server-side and seeded literally here so the chips render from file://. */
+var _specVerSeq = 9000;
+function mkSpecVer(node, specType, rev, off, by, state, fileName) {
+  return { id: ++_specVerSeq, node: node, specType: specType, rev: rev,
+           fileId: null, fileName: fileName || '',
+           boundBy: by || 'tandres', boundAt: dayISO(off) + 'T14:00',
+           state: state || 'superseded' };
+}
+/* mkGearSnapshot({label, kind, docNumber, name, off, fetched_off, by, sheet})
+   — a banked pull-sheet/manifest record, the gear_snapshots row's shape. The
+   count columns are derived from the sheet so list and body cannot disagree. */
+var _snapSeq = 9500;
+function mkGearSnapshot(o) {
+  var sheet = o.sheet || { groups: [], totals: { groups: 0, lines: 0, units: 0 } };
+  var t = sheet.totals || { groups: 0, lines: 0, units: 0 };
+  return {
+    id: ++_snapSeq, show_id: 0,
+    element_id: o.element_id || null, list_id: o.list_id || null,
+    kind: o.kind || '', doc_label: o.label || 'Equipment list',
+    doc_number: o.docNumber || '', name: o.name || '',
+    groups_count: t.groups || 0, lines_count: t.lines || 0, units_count: t.units || 0,
+    sheet: sheet,
+    fetched_at: dayISO(o.fetched_off == null ? (o.off || 0) : o.fetched_off) + 'T13:05:00',
+    saved_by: o.by || 'dvargas',
+    created_at: dayISO(o.off == null ? 0 : o.off) + 'T13:06'
+  };
+}
 /* mkBooking(category, vendor, status, jobId, {amount, booked_off, file})
    amount + booked_date power the finance feed; file_id = attached paperwork
    (a financial doc). Booked/ordered WITHOUT paperwork -> "waiting on me". */
@@ -772,7 +802,67 @@ var P_NW = {
       mkAct('tvigon', 'confirmed power + feeder path with the venue', null, 207, '10:30')
     ],
     chain: { content: [1, 2, 0, 199, 'tandres'], cabling: [1, 1, 2, 210, 'tandres'], power: [1, 1, 1, 210, 'tandres'], pull: [1, 1, 1, 214, 'dvargas'] },
-    gear: { linked: true, pulled: true, elementId: '6fe1b084-b1cc-4e90-83ce-bbd69eb3e4fa' }
+    gear: { linked: true, pulled: true, elementId: '6fe1b084-b1cc-4e90-83ce-bbd69eb3e4fa' },
+    /* the lifecycle demo twin: content was re-bound once (v1 → v2), so the
+       history modal has a superseded row and a current one to chip */
+    spec_history: [
+      mkSpecVer('content', 'e360', 2, 199, 'tandres', 'current', 'NW Stadium — LED Spec'),
+      mkSpecVer('cabling', 'nsf', 1, 210, 'tandres', 'current', 'NW Stadium — Data Cabling'),
+      mkSpecVer('power', 'pcfg', 1, 210, 'tandres', 'current', 'NW Stadium — Power Config'),
+      mkSpecVer('content', 'e360', 1, 180, 'tandres', 'superseded', 'NW Stadium — LED Spec')
+    ],
+    /* the gear look-back twin: a pull sheet banked at prep and the case
+       manifest banked at ship-out, so Gear history renders from file:// */
+    gear_snapshots: [
+      mkGearSnapshot({
+        label: 'Pull Sheet', kind: 'pull-sheet', docNumber: 'PS-1733',
+        name: 'NW Stadium — France v Colombia', off: 214, by: 'dvargas',
+        sheet: {
+          listId: 'demo-nw-pull', name: 'NW Stadium — France v Colombia',
+          docNumber: 'PS-1733', type: 'pull-sheet', deepLink: '',
+          fetchedAt: dayISO(214) + 'T13:05:00',
+          status: { stages: [
+            { key: 'prep', label: 'Prepped', done: true, at: dayISO(214) + 'T11:40:00', by: 'D. Vargas' },
+            { key: 'ship', label: 'Shipped', done: false, at: null, by: '' }
+          ] },
+          groups: [
+            { id: 'g1', name: 'LED Cabinets', path: 'LED Cabinets', type: 'category', containerSerial: '',
+              items: [
+                { name: 'BP2 V2 500x1000 cabinet', qty: 96, barcode: '00114', serial: '', note: '', resourceId: 'res-bp2', contains: 0, qtyAssumed: false },
+                { name: 'Spare BP2 module kit', qty: 4, barcode: '00961', serial: '', note: 'ride in case 9', resourceId: 'res-mod', contains: 0, qtyAssumed: false }
+              ] },
+            { id: 'g2', name: 'Processing', path: 'Processing', type: 'category', containerSerial: '',
+              items: [
+                { name: 'NovaStar MX40 Pro', qty: 2, barcode: '00410', serial: 'MX4-2211', note: '', resourceId: 'res-mx40', contains: 0, qtyAssumed: false },
+                { name: 'Fiber spool 300m', qty: 2, barcode: '00068', serial: '', note: '', resourceId: 'res-fib', contains: 0, qtyAssumed: false }
+              ] }
+          ],
+          totals: { groups: 2, lines: 4, units: 104 },
+          empty: false, rowCount: 4
+        }
+      }),
+      mkGearSnapshot({
+        label: 'Manifest', kind: 'manifest', docNumber: 'MN-1733',
+        name: 'NW Stadium — cases', off: 216, by: 'dvargas',
+        sheet: {
+          listId: 'demo-nw-manifest', name: 'NW Stadium — cases',
+          docNumber: 'MN-1733', type: 'manifest', deepLink: '',
+          fetchedAt: dayISO(216) + 'T08:20:00',
+          status: { stages: [
+            { key: 'ship', label: 'Shipped', done: true, at: dayISO(216) + 'T08:00:00', by: 'D. Vargas' }
+          ] },
+          groups: [
+            { id: 'm1', name: 'Flight cases', path: 'Flight cases', type: 'category', containerSerial: '',
+              items: [
+                { name: 'Cabinet case (8-pack)', qty: 12, barcode: '', serial: '', note: '', resourceId: 'res-case', contains: 0, qtyAssumed: false },
+                { name: 'Processor rack case', qty: 1, barcode: '', serial: 'RK-071', note: '', resourceId: 'res-rack', contains: 0, qtyAssumed: false }
+              ] }
+          ],
+          totals: { groups: 1, lines: 2, units: 13 },
+          empty: false, rowCount: 2
+        }
+      })
+    ]
   }]
 };
 
@@ -815,11 +905,17 @@ var P_STL = {
     ],
     proofs: [],
     activity: [
+      mkAct('tvigon', 'spec.outdate', 'content v1 flagged outdated — UFL moved to 336 panels, new spec pending', 207, '09:40', true),
       mkAct('tandres', 'banked the STL LED spec', null, 198, '16:00', true),
       mkAct('tvigon', 'flagged the venue power tie-in as at-risk', null, 206, '11:00')
     ],
-    chain: { content: [1, 1, 0, 198, 'tandres'], cabling: [0], power: [0], pull: [0] },
-    gear: { linked: false, pulled: false, elementId: null }
+    /* the OUTDATED twin: the spec is still the bound spec — the client changed
+       the board count and nothing new is bound yet — sixth seed slot = flag */
+    chain: { content: [1, 1, 0, 198, 'tandres', 1], cabling: [0], power: [0], pull: [0] },
+    gear: { linked: false, pulled: false, elementId: null },
+    spec_history: [
+      mkSpecVer('content', 'e360', 1, 198, 'tandres', 'outdated', 'STL Field Boards — LED Spec')
+    ]
   }]
 };
 
@@ -1202,12 +1298,18 @@ var FINANCE_EVENTS = [
    ========================================================================== */
 var PROJECTS_BY_ID = {}, SHOWS_BY_ID = {}, STEPS_BY_ID = {}, FILES_BY_ID = {},
     BOOKINGS_BY_ID = {}, JOBS_BY_ID = {}, ALL_SHOWS = [], ALL_JOBS = [],
-    EXPENSES_BY_ID = {}, ALL_EXPENSES = [], BUDGET_BY_JOB = {};
+    EXPENSES_BY_ID = {}, ALL_EXPENSES = [], BUDGET_BY_JOB = {},
+    GEAR_SNAPSHOTS_BY_ID = {};
 
 function _chainNode(seed) {
   seed = seed || [0];
+  /* seed slot 6 (index 5) is the lifecycle flag — truthy means a pm marked
+     the CURRENT bind outdated. Same shape dbToChainNode serves. */
   return { gen: !!seed[0], rev: seed[1] || 0, derivedRev: seed[2] || 0,
-           when: seed[3] == null ? '' : dayISO(seed[3]), by: seed[4] || 'tandres' };
+           when: seed[3] == null ? '' : dayISO(seed[3]), by: seed[4] || 'tandres',
+           outdated: !!seed[5], outdatedBy: seed[5] ? (seed[4] || 'tandres') : null,
+           outdatedAt: seed[5] ? dayISO((seed[3] || 0) + 2) + 'T09:40' : null,
+           outdatedNote: seed[5] ? 'design changed — replacement spec pending' : '' };
 }
 
 (function hydrate() {
@@ -1250,6 +1352,16 @@ function _chainNode(seed) {
       var c = {};
       ['content', 'cabling', 'power', 'pull'].forEach(function (k) { c[k] = _chainNode(s.chain && s.chain[k]); });
       s.chain = c;
+      /* the lifecycle twins: version history rows + the show-level outdated
+         flag the season row's scope chip reads (hydrateShow derives the same
+         flag server-side, so both worlds carry it on the show record) */
+      s.spec_history = s.spec_history || [];
+      s.spec_history.forEach(function (v) { v.show_id = s.id; });
+      s.spec_outdated = ['content', 'cabling', 'power'].some(function (k) {
+        return c[k].gen && c[k].outdated; });
+      /* gear snapshot twins -> indexed like every other child collection */
+      s.gear_snapshots = s.gear_snapshots || [];
+      s.gear_snapshots.forEach(function (g) { g.show_id = s.id; GEAR_SNAPSHOTS_BY_ID[g.id] = g; });
       /* gear state — the kit is built eagerly so renderers never need a lazy
          ensureGear() call (that ordering trap is gone). */
       s.gear = s.gear || { linked: false, pulled: false, elementId: null };
@@ -1476,6 +1588,56 @@ function buildKit(n) {
 /* derivation-chain topology: child -> upstream */
 var CHAIN_UP = { content: null, cabling: 'content', power: 'cabling', pull: 'power' };
 var CHAIN_LABEL = { content: '.e360 content', cabling: '.nsf cabling', power: '.pcfg power', pull: 'Flex pull sheet' };
+
+/* DEMO ONLY — the render bundle a spec-history "View" opens from file://.
+   Against a real server the same modal renders the STORED bundle out of
+   spec_renders (GET /shows/:id/spec-render/:node?rev=N); the demo store keeps
+   no svg, so this draws a plainly-labeled placeholder card instead of
+   pretending a drawing exists. Same honesty rule as buildKit: generated
+   locally so the screens have something to show, and it says the word. */
+function demoSpecRenderFor(show, node, rev) {
+  var v = (show.spec_history || []).filter(function (x) {
+    return x.node === node && x.rev === Number(rev); })[0] || null;
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360">' +
+    '<rect width="640" height="360" fill="#101614"/>' +
+    '<rect x="24" y="24" width="592" height="312" fill="none" stroke="#2E4038" stroke-width="2"/>' +
+    '<text x="320" y="150" fill="#9AB8AC" font-family="monospace" font-size="20" text-anchor="middle">' +
+    (show.name || 'Show') + '</text>' +
+    '<text x="320" y="185" fill="#9AB8AC" font-family="monospace" font-size="15" text-anchor="middle">' +
+    CHAIN_LABEL[node] + ' · v' + rev + '</text>' +
+    '<text x="320" y="220" fill="#5E7A6E" font-family="monospace" font-size="12" text-anchor="middle">' +
+    'DEMO — generated locally, no bound render bundle exists</text></svg>';
+  return { node: node, specType: (v && v.specType) || (node === 'content' ? 'e360' : node === 'cabling' ? 'nsf' : 'pcfg'),
+           rev: Number(rev), fileId: v ? v.fileId : null, svg: svg, html: '', png: '', json: null,
+           createdBy: v ? v.boundBy : 'tandres', createdAt: v ? v.boundAt : dayISO(0) + 'T14:00',
+           retired: !!(v && v.state === 'unbound'), demo: true };
+}
+
+/* DEMO ONLY — the demo gear tab has no live Flex sheet to snapshot, so Save
+   snapshot banks the modeled kit reshaped into the real flexReadPullSheet
+   grammar (groups/items/totals). The record it makes is exactly the shape a
+   live save makes; only its SOURCE is the simulation, and the label says so. */
+function demoSnapshotFromKit(s) {
+  var g = s.gear || {};
+  var kit = g.kit || buildKit(s.cabinets || 72);
+  var groups = kit.pull.map(function (c, i) {
+    return { id: 'demo-g' + i, name: c.cat, path: c.cat, type: 'category', containerSerial: '',
+             items: c.items.map(function (it) {
+               return { name: it.name, qty: it.qty, barcode: '', serial: '', note: '',
+                        resourceId: it.resourceId || '', contains: 0, qtyAssumed: false }; }) };
+  });
+  var lines = 0, units = 0;
+  groups.forEach(function (x) { lines += x.items.length; x.items.forEach(function (it) { units += it.qty; }); });
+  return {
+    listId: g.gearListId || null, name: s.name || 'Pull sheet',
+    docNumber: g.docNumber || '', type: 'pull-sheet', deepLink: '',
+    fetchedAt: new Date().toISOString(),
+    status: { stages: [] },
+    groups: groups,
+    totals: { groups: groups.length, lines: lines, units: units },
+    empty: groups.length === 0, rowCount: lines
+  };
+}
 
 /* DEMO ONLY — a Flex-shaped uuid hashed out of the show id.
    ────────────────────────────────────────────────────────────────────────────
