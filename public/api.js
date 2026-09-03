@@ -287,10 +287,12 @@ var SR = (function () {
      /* F2/F3 — a new store that is not cleared here is a store that leaks the
         DEMO fixture into a real session on login. */
      REPORTS_BY_ID, NOTIF_BY_ID, NEEDS_BY_ID,
+     CONTACTS_BY_ID, SHOW_CONTACTS_BY_ID,
      NOTE_READS].forEach(clearMap);
     [PROJECTS, ALL_SHOWS, ALL_JOBS, ALL_EXPENSES, ALL_POS, PO_LINES, ALL_NOTES,
      ALL_DELIVERABLES, USERS, BUDGET_LINES,
-     TECH_REPORTS, NOTIF_OUTBOX, ALL_NEEDS].forEach(function (a) { a.length = 0; });
+     TECH_REPORTS, NOTIF_OUTBOX, ALL_NEEDS,
+     ALL_CONTACTS, ALL_SHOW_CONTACTS].forEach(function (a) { a.length = 0; });
     NOTIF_PREFS = {};
     /* mentionLookup() memoizes name->username off USERS on first use. USERS is
        emptied above, but the cache is not derived state the maps own — so
@@ -464,6 +466,22 @@ var SR = (function () {
       if (!nd) return nd;
       var rec = keep(NEEDS_BY_ID, nd);
       push1(ALL_NEEDS, rec);
+      return rec;
+    },
+    /* rolodex rows — the Contacts view, the global-search group, the show's
+       "People on this show" panel and the call-sheet picker all read the flat
+       stores synchronously (activeContacts / contactsForShow), the demo way. */
+    contact: function (c) {
+      if (!c) return c;
+      var rec = keep(CONTACTS_BY_ID, c);
+      push1(ALL_CONTACTS, rec);
+      return rec;
+    },
+    showContact: function (sc) {
+      if (!sc) return sc;
+      if (sc.contact) sc.contact = A.contact(sc.contact);
+      var rec = keep(SHOW_CONTACTS_BY_ID, sc);
+      push1(ALL_SHOW_CONTACTS, rec);
       return rec;
     },
     list: function (fn) { return function (rows) { return (rows || []).map(fn); }; }
@@ -778,7 +796,8 @@ var api = (function () {
       SR.get('/api/shows/' + sid + '/gear'),
       SR.get('/api/expenses' + SR.qs({ show_id: sid })),
       SR.get('/api/shows/' + sid + '/schedule'),
-      SR.get('/api/shows/' + sid + '/crew')
+      SR.get('/api/shows/' + sid + '/crew'),
+      SR.get('/api/shows/' + sid + '/contacts')
     ]).then(function (r) {
       var show = r[0];
       if (show.project) A.project(show.project);
@@ -791,6 +810,9 @@ var api = (function () {
       show.expenses = (r[7] || []).map(A.expense);
       show.schedule_items = (r[8] || []).map(A.sched);
       show.crew_assignments = (r[9] || []).map(function (c) { if (c.user) A.user(c.user); return A.crew(c); });
+      /* rolodex links — the "People on this show" panel reads the flat store
+         synchronously (contactsForShow), the demo way */
+      (r[10] || []).forEach(A.showContact);
       if (show.job) A.job(show.job);
       var rec = A.show(show);
       /* the folder header renders from the project's own shape */
@@ -2359,6 +2381,205 @@ var api = (function () {
         .then(function (r) {
           var po2 = A.po(r && r.po);
           return { po: po2, needs: (r && r.needs || []).map(A.need) };
+        });
+    },
+
+    /* ================= CONTACT ROLODEX ==================================
+       The cross-project directory (Tom, 2026-08-27). Deliberately sends NO
+       notifications in v1 — fixing a phone number is a routine edit.
+       GET  /api/contacts                       -> listContacts(filters)
+       GET  /api/contacts/:id                   -> getContact(id)  [+ shows]
+       POST /api/contacts                       -> createContact(body)
+       PUT  /api/contacts/:id                   -> updateContact(id, body)
+       POST /api/contacts/:id/{un}archive       -> archiveContact/unarchiveContact
+       DELETE /api/contacts/:id                 -> deleteContact(id)  [admin;
+                                                   REFUSES while on a show]
+       GET  /api/shows/:id/contacts             -> listShowContacts(showId)
+       POST /api/shows/:id/contacts             -> linkShowContact(showId, cId, role)
+       DELETE /api/shows/:id/contacts/:cId      -> unlinkShowContact(showId, cId)
+       ==================================================================== */
+    listContacts: function (filters) {
+      filters = filters || {};
+      if (!API()) {
+        var q0 = String(filters.q || '').toLowerCase();
+        var out = ALL_CONTACTS.filter(function (c) {
+          if (filters.archived) { if (!c.archived_at) return false; }
+          else if (!filters.include_archived && c.archived_at) return false;
+          if (filters.kind && c.kind !== filters.kind) return false;
+          if (q0 && (c.name + ' ' + c.org).toLowerCase().indexOf(q0) < 0) return false;
+          return true;
+        }).slice();
+        out.sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+        out.forEach(function (c) { c.linked_shows = contactLinkCount(c.id); });
+        return ok(out);
+      }
+      return SR.get('/api/contacts' + SR.qs({ q: filters.q || undefined,
+          kind: filters.kind || undefined,
+          archived: filters.archived ? 1 : undefined,
+          include_archived: filters.include_archived ? 1 : undefined }))
+        .then(function (rows) { return (rows || []).map(A.contact); });
+    },
+    getContact: function (id) {
+      if (!API()) {
+        var c = CONTACTS_BY_ID[Number(id)];
+        if (!c) return fail('contact ' + id + ' not found');
+        c.linked_shows = contactLinkCount(c.id);
+        c.shows = showsForContact(c.id).map(function (x) {
+          return { link_id: x.link.id, show_id: x.show.id, role: x.link.role || '',
+                   name: x.show.name || '', venue: x.show.venue || '',
+                   event_date: x.show.event_date || null, project_id: x.show.project_id,
+                   archived: !!x.show.archived_at };
+        });
+        return ok(c);
+      }
+      return SR.get('/api/contacts/' + Number(id)).then(A.contact);
+    },
+    createContact: function (body) {
+      if (!body || !String(body.name || '').trim()) {
+        return fail('a contact is a named thing — name is required');
+      }
+      if (body.kind && CONTACT_KINDS.indexOf(body.kind) < 0) {
+        return fail('kind must be one of ' + CONTACT_KINDS.join(', '));
+      }
+      if (!API()) {
+        if (!canEditContacts()) return fail('adding a contact is a pm act');
+        var c = mkContact({ name: String(body.name).trim(), org: body.org, title: body.title,
+          kind: body.kind || 'other', email: body.email, phone: body.phone,
+          notes: body.notes, by: ME });
+        c.linked_shows = 0;
+        return ok(c);
+      }
+      return SR.post('/api/contacts', body, { noNotify: true }).then(A.contact);
+    },
+    updateContact: function (id, body) {
+      if (body && body.kind !== undefined && CONTACT_KINDS.indexOf(body.kind) < 0) {
+        return fail('kind must be one of ' + CONTACT_KINDS.join(', '));
+      }
+      if (!API()) {
+        if (!canEditContacts()) return fail('editing a contact is a pm act');
+        var c = CONTACTS_BY_ID[Number(id)];
+        if (!c) return fail('contact ' + id + ' not found');
+        if (body.name !== undefined) {
+          var nm = String(body.name || '').trim();
+          if (!nm) return fail('a contact keeps its name — blank is not a rename');
+          c.name = nm;
+        }
+        ['org', 'title', 'kind', 'email', 'phone', 'notes'].forEach(function (k) {
+          if (body[k] !== undefined) c[k] = body[k];
+        });
+        c.updated_at = TODAY_ISO;
+        return ok(c);
+      }
+      return SR.put('/api/contacts/' + Number(id), body, { noNotify: true }).then(A.contact);
+    },
+    archiveContact: function (id) {
+      if (!API()) {
+        if (!canEditContacts()) return fail('archiving a contact is a pm act');
+        var c = CONTACTS_BY_ID[Number(id)];
+        if (!c) return fail('contact ' + id + ' not found');
+        if (!c.archived_at) { c.archived_at = TODAY_ISO + 'T' + _nowHM(); c.archived_by = ME; }
+        return ok({ ok: true, contact: c });
+      }
+      return SR.post('/api/contacts/' + Number(id) + '/archive', {}, { noNotify: true })
+        .then(function (r) { A.contact(r && r.contact); return r; });
+    },
+    unarchiveContact: function (id) {
+      if (!API()) {
+        if (!canEditContacts()) return fail('restoring a contact is a pm act');
+        var c = CONTACTS_BY_ID[Number(id)];
+        if (!c) return fail('contact ' + id + ' not found');
+        c.archived_at = null; c.archived_by = null;
+        return ok({ ok: true, contact: c });
+      }
+      return SR.post('/api/contacts/' + Number(id) + '/unarchive', {}, { noNotify: true })
+        .then(function (r) { A.contact(r && r.contact); return r; });
+    },
+    /* the demo mirrors the server's refusal-while-referenced, message and all —
+       a delete that "works" on file:// and 400s in production is a lie twice */
+    deleteContact: function (id) {
+      if (!API()) {
+        if (!CURRENT_USER || CURRENT_USER.role !== 'admin') {
+          return fail('deleting a contact is an admin act — archive it instead');
+        }
+        var c = CONTACTS_BY_ID[Number(id)];
+        if (!c) return fail('contact ' + id + ' not found');
+        var used = showsForContact(c.id);
+        if (used.length) {
+          return fail(c.name + ' is on ' + (used.length === 1 ? 'a show' : used.length + ' shows') +
+            ' — ' + used.map(function (x) { return x.show.name || x.show.venue; }).join(', ') +
+            '. Unlink them first, or archive the contact instead.');
+        }
+        delete CONTACTS_BY_ID[c.id];
+        var i = ALL_CONTACTS.indexOf(c);
+        if (i >= 0) ALL_CONTACTS.splice(i, 1);
+        return ok({ ok: true });
+      }
+      return SR.del('/api/contacts/' + Number(id), null, { noNotify: true }).then(function (r) {
+        var cached = CONTACTS_BY_ID[Number(id)];
+        if (cached) {
+          delete CONTACTS_BY_ID[cached.id];
+          var i2 = ALL_CONTACTS.indexOf(cached);
+          if (i2 >= 0) ALL_CONTACTS.splice(i2, 1);
+        }
+        return r;
+      });
+    },
+    listShowContacts: function (showId) {
+      if (!API()) {
+        return ok(contactsForShow(showId).map(function (x) {
+          return { id: x.link.id, show_id: x.link.show_id, contact_id: x.link.contact_id,
+                   role: x.link.role || '', contact: x.contact };
+        }));
+      }
+      return SR.get('/api/shows/' + Number(showId) + '/contacts')
+        .then(function (rows) { return (rows || []).map(A.showContact); });
+    },
+    /* one row per (show, contact): re-linking with a new role is a role
+       correction, not a duplicate — same rule as the server */
+    linkShowContact: function (showId, contactId, role) {
+      if (!API()) {
+        var show = SHOWS_BY_ID[Number(showId)];
+        if (!show) return fail('show ' + showId + ' not found');
+        if (!canEditFolderOf(show)) return fail('linking people is the show-runner’s call');
+        var c = CONTACTS_BY_ID[Number(contactId)];
+        if (!c) return fail('contact ' + contactId + ' not found');
+        var cur = ALL_SHOW_CONTACTS.filter(function (sc) {
+          return sc.show_id === Number(showId) && sc.contact_id === Number(contactId);
+        })[0];
+        if (cur) { cur.role = String(role || '').trim(); return ok(cur); }
+        return ok(mkShowContact({ show: Number(showId), contact: Number(contactId),
+          role: String(role || '').trim(), by: ME }));
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/contacts',
+        { contact_id: Number(contactId), role: role || '' }, { noNotify: true })
+        .then(A.showContact);
+    },
+    unlinkShowContact: function (showId, contactId) {
+      if (!API()) {
+        var show = SHOWS_BY_ID[Number(showId)];
+        if (!show) return fail('show ' + showId + ' not found');
+        if (!canEditFolderOf(show)) return fail('unlinking people is the show-runner’s call');
+        var cur = ALL_SHOW_CONTACTS.filter(function (sc) {
+          return sc.show_id === Number(showId) && sc.contact_id === Number(contactId);
+        })[0];
+        if (!cur) return fail('that contact is not on this show');
+        delete SHOW_CONTACTS_BY_ID[cur.id];
+        var i = ALL_SHOW_CONTACTS.indexOf(cur);
+        if (i >= 0) ALL_SHOW_CONTACTS.splice(i, 1);
+        return ok({ ok: true });
+      }
+      return SR.del('/api/shows/' + Number(showId) + '/contacts/' + Number(contactId), null,
+        { noNotify: true })
+        .then(function (r) {
+          var cur2 = ALL_SHOW_CONTACTS.filter(function (sc) {
+            return sc.show_id === Number(showId) && sc.contact_id === Number(contactId);
+          })[0];
+          if (cur2) {
+            delete SHOW_CONTACTS_BY_ID[cur2.id];
+            var i2 = ALL_SHOW_CONTACTS.indexOf(cur2);
+            if (i2 >= 0) ALL_SHOW_CONTACTS.splice(i2, 1);
+          }
+          return r;
         });
     },
 

@@ -2131,6 +2131,92 @@ function openNeedsByJob() {
 })();
 
 /* ============================================================================
+   CONTACT ROLODEX — the cross-project directory (Tom, 2026-08-27)
+   ----------------------------------------------------------------------------
+   "there should be a contact rolodex in our app if we dont already have one."
+   contacts       : {id, name, org, title, kind, email, phone, notes,
+                     flex_contact_id, archived_at/by, created_at/by, updated_at}
+   show_contacts  : {id, show_id, contact_id, role} — "People on this show".
+   The show's venue_poc/client_poc JSONB stay FREE TEXT (the call sheet must
+   carry a name typed once at 11pm); the rolodex FILLS them, never replaces
+   them. `kind` is a coarse filter, never a permission. `flex_contact_id` is
+   the Rosetta-stone ref the Flex event-folder create path back-fills.
+   Archive-not-delete is the retirement path, same as people and folders.
+   ========================================================================== */
+var CONTACT_KINDS = ['client', 'venue', 'vendor', 'crew', 'other'];
+/* the write floor is RANK (pm+), not ownership — a rolodex row is global */
+var CONTACT_EDIT_ROLES = { admin: 1, manager: 1, pm: 1 };
+function canEditContacts(user) {
+  var u = user || CURRENT_USER;
+  return !!u && !!CONTACT_EDIT_ROLES[u.role];
+}
+
+var _contactSeq = 0, _showContactSeq = 0;
+var ALL_CONTACTS = [], CONTACTS_BY_ID = {};
+var ALL_SHOW_CONTACTS = [], SHOW_CONTACTS_BY_ID = {};
+
+function mkContact(o) {
+  var c = { id: ++_contactSeq, name: o.name,
+    org: o.org || '', title: o.title || '',
+    kind: CONTACT_KINDS.indexOf(o.kind) >= 0 ? o.kind : 'other',
+    email: o.email || '', phone: o.phone || '', notes: o.notes || '',
+    flex_contact_id: o.flex || null,
+    archived_at: o.archivedOff != null ? dayISO(o.archivedOff) + 'T09:00' : null,
+    archived_by: o.archivedOff != null ? (o.archivedBy || 'tandres') : null,
+    created_at: dayISO(o.off || 0), created_by: o.by || 'tandres',
+    updated_at: dayISO(o.off || 0) };
+  ALL_CONTACTS.push(c); CONTACTS_BY_ID[c.id] = c;
+  return c;
+}
+function mkShowContact(o) {
+  var sc = { id: ++_showContactSeq, show_id: o.show, contact_id: o.contact,
+    role: o.role || '', created_at: dayISO(o.off || 0), created_by: o.by || 'tandres' };
+  ALL_SHOW_CONTACTS.push(sc); SHOW_CONTACTS_BY_ID[sc.id] = sc;
+  return sc;
+}
+
+/* ---------------- pure rollups (mirror the needs helpers' style) ----------- */
+function contactsForShow(showId) {
+  return ALL_SHOW_CONTACTS.filter(function (sc) { return sc.show_id === Number(showId); })
+    .map(function (sc) { return { link: sc, contact: CONTACTS_BY_ID[sc.contact_id] || null }; })
+    .filter(function (x) { return !!x.contact; });
+}
+function showsForContact(contactId) {
+  return ALL_SHOW_CONTACTS.filter(function (sc) { return sc.contact_id === Number(contactId); })
+    .map(function (sc) { return { link: sc, show: SHOWS_BY_ID[sc.show_id] || null }; })
+    .filter(function (x) { return !!x.show; });
+}
+function contactLinkCount(contactId) {
+  return ALL_SHOW_CONTACTS.filter(function (sc) { return sc.contact_id === Number(contactId); }).length;
+}
+function activeContacts() { return ALL_CONTACTS.filter(function (c) { return !c.archived_at; }); }
+function archivedContacts() { return ALL_CONTACTS.filter(function (c) { return !!c.archived_at; }); }
+
+/* ---- demo seed: the POC literals above, promoted to rolodex rows ----
+   Marcus + Dana are LINKED to the AVCA show so the "People on this show"
+   panel and the linked-shows count both render on file:// open; Priya carries
+   a (modeled) flex ref so the Flex marker has a face; Rita is the archived
+   card, so the Archived filter is never an empty claim. */
+(function seedContacts() {
+  var marcus = mkContact({ name: 'Marcus Hale', org: 'Fiserv Forum', title: 'Event ops',
+    kind: 'venue', phone: '(414) 555-0221', email: 'mhale@fiservforum.com', off: -40 });
+  var dana = mkContact({ name: 'Dana Fox', org: 'Fox & Co', title: 'Producer',
+    kind: 'client', phone: '(312) 555-0245', email: 'dana@foxandco.tv', off: -40 });
+  mkContact({ name: 'Priya Shah', org: 'LOVB', title: 'Event production',
+    kind: 'client', phone: '(646) 555-0132', email: 'priya.shah@lovb.com',
+    flex: 'demo-flex-contact-lovb', off: -60,
+    notes: 'Runs the LOVB side for every 2026–27 match build.' });
+  mkContact({ name: 'Wei Lin', org: 'Shenzhen Fabulux', title: 'Account manager',
+    kind: 'vendor', email: 'wei.lin@fabulux.cn', off: -90,
+    notes: 'Cabinet + spares orders; quotes in USD, 3-week sea freight.' });
+  mkContact({ name: 'Rita Calloway', org: 'Wrigley Field', title: 'Dock chief',
+    kind: 'venue', phone: '(773) 555-0166', off: -120, archivedOff: -30,
+    notes: 'Left the venue — the new dock contact is TBD.' });
+  mkShowContact({ show: 1, contact: marcus.id, role: 'Venue ops', off: -35 });
+  mkShowContact({ show: 1, contact: dana.id, role: 'Client day-of', off: -35 });
+})();
+
+/* ============================================================================
    NOTES + @MENTIONS — anchored comments (notes pass)
    ----------------------------------------------------------------------------
    The decided model (TEAM_FEEDBACK): threads live ON things, never free-

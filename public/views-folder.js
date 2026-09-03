@@ -439,8 +439,9 @@ function tabSchedule(show) {
       '</div>' +
       /* B1. A show with no schedule can still have crew — and usually gets crew
          FIRST. The empty state used to be a dead end for the one thing that
-         matters most on this tab. */
-      crewPanelFor(show, editable) + '</div>';
+         matters most on this tab. The rolodex links render here too, for the
+         same reason. */
+      crewPanelFor(show, editable) + showContactsPanel(show, editable) + '</div>';
   }
 
   var day = schedSelectedDay(show, days);
@@ -525,7 +526,11 @@ function tabSchedule(show) {
     (poc ? schedPocCard('On-site lead', poc.name, poc.title, poc.phone) : '') +
     (show.venue_poc ? schedPocCard('Venue', show.venue_poc.name, show.venue_poc.title, show.venue_poc.phone) : '') +
     (show.client_poc ? schedPocCard('Client', show.client_poc.name, show.client_poc.title, show.client_poc.phone) : '') +
-    '</div><div class="perm-note">' + inlineIcon('phone') + ' Tap a number to call — this panel is the 6am problem-solver.</div></div>';
+    '</div><div class="perm-note">' + inlineIcon('phone') + ' Tap a number to call — this panel is the 6am problem-solver.</div></div>' +
+    /* the rolodex's structured half — the POC cards above stay free text and
+       print on the sheet; these links are what let a contact's own card answer
+       "which shows was I on" */
+    showContactsPanel(show, editable);
   var weather = '<div class="hint" style="margin-top:0">' + icon('sun') + '<span><b>Weather</b> — forecast lands with the live backend; check radar before an outdoor load-in.</span></div>';
 
   /* ---- crew grid ----------------------------------------------------------

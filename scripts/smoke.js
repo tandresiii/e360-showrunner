@@ -2958,6 +2958,155 @@ const DEL = (p, o) => call('DELETE', p, o);
   // Flex call is answered locally. A live write from a test suite is how you
   // end up with rubbish Event Folders in the warehouse's browse list.
   // ══════════════════════════════════════════════════════════════════════════
+  // ══════════════════════════════════════════════════════════════════════════
+  // 15c. THE CONTACT ROLODEX — the cross-project directory (Tom, 2026-08-27)
+  // ──────────────────────────────────────────────────────────────────────────
+  // Floors are asserted on BOTH halves of every gate (a gate never exercised
+  // green is one refactor from being a gate on nothing), the archive filter
+  // follows the ONE query-param convention, and the hard delete REFUSES while
+  // show_contacts reference the row — naming the shows, because "still
+  // referenced" without the list is a scavenger hunt.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('15c. the contact rolodex — CRUD, floors, links, the honest delete');
+
+  const ctTech = await POST('/api/contacts', { name: TAG + ' sneak', kind: 'venue' }, { token: TECHT });
+  ok('15c FLOOR: a tech may not create a contact', ctTech.status === 403, ctTech.body);
+  ok('15c: ...and the refusal wrote nothing',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM contacts WHERE name LIKE $1`, [TAG + '%']))
+       .rows[0].n === 0);
+  const ctMarcus = await POST('/api/contacts', {
+    name: TAG + ' Marcus Hale', org: 'Fiserv Forum', title: 'Event ops', kind: 'venue',
+    email: 'mhale@fiservforum.com', phone: '414-555-0221'
+  }, { token: PMT });
+  ok('15c FLOOR: a pm creates one — the floor is a floor, not a wall',
+     ctMarcus.status === 200 && ctMarcus.body.id > 0 && ctMarcus.body.created_by === pmUser,
+     ctMarcus.body);
+  const CT = ctMarcus.body.id;
+  ok('15c: a fresh card is linked to zero shows', ctMarcus.body.linked_shows === 0, ctMarcus.body);
+  const ctBadKind = await POST('/api/contacts', { name: TAG + ' x', kind: 'sponsor' }, { token: PMT });
+  ok('15c: an unknown kind is a 400 NAMING the whitelist, never silently re-filed',
+     ctBadKind.status === 400 && /kind must be one of/.test(ctBadKind.body.error)
+     && /vendor/.test(ctBadKind.body.error), ctBadKind.body);
+  ok('15c: a nameless contact is a 400',
+     (await POST('/api/contacts', { org: 'Nameless Co' }, { token: PMT })).status === 400);
+  const ctWei = await POST('/api/contacts', {
+    name: TAG + ' Wei Lin', org: 'Shenzhen Fabulux', kind: 'vendor', email: 'wei.lin@fabulux.cn'
+  }, { token: MGRT });
+  ok('15c: a manager creates the vendor card', ctWei.status === 200, ctWei.body);
+  // the un-TAGged client card the FLEX section back-fills — created WITHOUT a
+  // flex id, deliberately, so §16 can prove the id lands on the existing row
+  const ctLovb = await POST('/api/contacts', { name: 'League One Volleyball', kind: 'client' },
+    { token: PMT });
+  ok('15c: the client card exists with NO flex ref yet',
+     ctLovb.status === 200 && ctLovb.body.flex_contact_id === null, ctLovb.body);
+
+  const ctQ = await GET('/api/contacts?q=' + encodeURIComponent('Fiserv'), { token: TECHT });
+  ok('15c: ?q= searches org as well as name (and reading is for everyone signed in)',
+     ctQ.status === 200 && ctQ.body.length === 1 && ctQ.body[0].id === CT, ctQ.body);
+  const ctKindList = await GET('/api/contacts?kind=vendor', { token: PMT });
+  ok('15c: ?kind= filters, and the venue card is not in the vendor drawer',
+     ctKindList.body.some((c) => c.id === ctWei.body.id) && !ctKindList.body.some((c) => c.id === CT),
+     ctKindList.body.map((c) => c.name));
+  ok('15c: an unknown ?kind= is a 400, not an empty list that teaches the filter lies',
+     (await GET('/api/contacts?kind=sponsor', { token: PMT })).status === 400);
+
+  const ctFix = await PUT('/api/contacts/' + CT, { phone: '414-555-0299' }, { token: PMT });
+  ok('15c: the pm corrects a phone number', ctFix.status === 200 && ctFix.body.phone === '414-555-0299',
+     ctFix.body);
+  const ctFixAct = await pool.query(
+    `SELECT changes FROM activity WHERE action='contact.update' ORDER BY id DESC LIMIT 1`);
+  ok('15c: ...and the correction is a structured before→after, not a shrug',
+     (ctFixAct.rows[0]?.changes || []).some((c) => c.field === 'phone' && c.to === '414-555-0299'),
+     ctFixAct.rows[0]);
+  ok('15c: a blank rename is a 400',
+     (await PUT('/api/contacts/' + CT, { name: '' }, { token: PMT })).status === 400);
+
+  // ── the show links — "People on this show" ────────────────────────────────
+  const scPm2 = await POST(`/api/shows/${S}/contacts`, { contact_id: CT, role: 'Venue ops' },
+    { token: PM2T });
+  ok('15c GATE: a pm who does not own the folder may not link people to its show',
+     scPm2.status === 403, scPm2.body);
+  ok('15c GATE: a tech is refused on rank before ownership is even asked',
+     (await POST(`/api/shows/${S}/contacts`, { contact_id: CT }, { token: TECHT })).status === 403);
+  const scLink = await POST(`/api/shows/${S}/contacts`, { contact_id: CT, role: 'Venue ops' },
+    { token: PMT });
+  ok('15c: the owning pm links the contact', scLink.status === 200 && scLink.body.role === 'Venue ops',
+     scLink.body);
+  const scRelink = await POST(`/api/shows/${S}/contacts`, { contact_id: CT, role: 'Dock chief' },
+    { token: PMT });
+  ok('15c: linking twice is a ROLE CORRECTION, not a duplicate row',
+     scRelink.status === 200 && scRelink.body.already === true && scRelink.body.role === 'Dock chief'
+     && (await pool.query(`SELECT COUNT(*)::int AS n FROM show_contacts WHERE show_id=$1 AND contact_id=$2`,
+          [S, CT])).rows[0].n === 1, scRelink.body);
+  const scList = await GET(`/api/shows/${S}/contacts`, { token: TECHT });
+  ok('15c: the show lists its people, card embedded',
+     scList.status === 200 && scList.body.length === 1 && scList.body[0].contact.name === TAG + ' Marcus Hale',
+     scList.body);
+  const ctCard = await GET('/api/contacts/' + CT, { token: TECHT });
+  ok('15c: the contact card answers "where am I used" — count and the show itself',
+     ctCard.body.linked_shows === 1 && ctCard.body.shows[0].show_id === S
+     && /Madison/.test(ctCard.body.shows[0].name), ctCard.body.shows);
+  ok('15c: linking a ghost contact is a 404',
+     (await POST(`/api/shows/${S}/contacts`, { contact_id: 999999 }, { token: PMT })).status === 404);
+
+  // ── archive — the retirement path, on the ONE filter convention ───────────
+  ok('15c FLOOR: a viewer may not archive',
+     (await POST('/api/contacts/' + CT + '/archive', {}, { token: legacyLogin.body.token })).status === 403);
+  ok('15c FLOOR: a tech may not archive',
+     (await POST('/api/contacts/' + CT + '/archive', {}, { token: TECHT })).status === 403);
+  const ctArch = await POST('/api/contacts/' + CT + '/archive', {}, { token: PMT });
+  ok('15c: the pm archives — same floor as create; retiring a stale card is upkeep',
+     ctArch.status === 200 && ctArch.body.contact.archived === true, ctArch.body);
+  const ctListDefault = await GET('/api/contacts', { token: PMT });
+  ok('15c CONVENTION: the default list EXCLUDES the archived card',
+     !ctListDefault.body.some((c) => c.id === CT), ctListDefault.body.map((c) => c.id));
+  const ctListArch = await GET('/api/contacts?archived=1', { token: PMT });
+  ok('15c CONVENTION: ?archived=1 is ONLY the archived',
+     ctListArch.body.some((c) => c.id === CT) && !ctListArch.body.some((c) => c.id === ctWei.body.id),
+     ctListArch.body.map((c) => c.id));
+  const ctListBoth = await GET('/api/contacts?include_archived=1', { token: PMT });
+  ok('15c CONVENTION: ?include_archived=1 is both',
+     ctListBoth.body.some((c) => c.id === CT) && ctListBoth.body.some((c) => c.id === ctWei.body.id));
+  ok('15c CONVENTION: the archived card still resolves by id — out of the working set, never out of the app',
+     (await GET('/api/contacts/' + CT, { token: PMT })).status === 200);
+  ok('15c: archiving twice is already:true, not an error',
+     (await POST('/api/contacts/' + CT + '/archive', {}, { token: PMT })).body.already === true);
+  const ctUnarch = await POST('/api/contacts/' + CT + '/unarchive', {}, { token: PMT });
+  ok('15c: unarchive puts it back — nothing was lost',
+     ctUnarch.status === 200 &&
+     (await GET('/api/contacts', { token: PMT })).body.some((c) => c.id === CT));
+
+  // ── hard delete — admin only, and it REFUSES while referenced ─────────────
+  ok('15c FLOOR: a pm may not hard-delete',
+     (await DEL('/api/contacts/' + CT, { token: PMT })).status === 403);
+  ok('15c FLOOR: a manager may not either — admin only',
+     (await DEL('/api/contacts/' + CT, { token: MGRT })).status === 403);
+  const ctDelLinked = await DEL('/api/contacts/' + CT, { token: A });
+  ok('15c: deleting while ON A SHOW is a 400 that NAMES the show and offers the archive path',
+     ctDelLinked.status === 400 && /Madison/.test(ctDelLinked.body.error)
+     && /archive/i.test(ctDelLinked.body.error)
+     && (ctDelLinked.body.shows || [])[0]?.id === S, ctDelLinked.body);
+  ok('15c: ...and the refusal wrote nothing',
+     (await GET('/api/contacts/' + CT, { token: A })).status === 200);
+  ok('15c: unlinking a contact that is not on the show is a 404, not {ok:true}',
+     (await DEL(`/api/shows/${S}/contacts/999999`, { token: PMT })).status === 404);
+  const scUnlink = await DEL(`/api/shows/${S}/contacts/${CT}`, { token: PMT });
+  ok('15c: the owning pm unlinks', scUnlink.status === 200, scUnlink.body);
+  const ctDelFree = await DEL('/api/contacts/' + CT, { token: A });
+  ok('15c: unreferenced, the admin delete goes through',
+     ctDelFree.status === 200 && (await GET('/api/contacts/' + CT, { token: A })).status === 404);
+  ok('15c: the delete is on the audit trail',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM activity
+                        WHERE action='contact.delete' AND detail=$1`, [TAG + ' Marcus Hale']))
+       .rows[0].n === 1);
+
+  // leave the VENDOR card linked to the show: §6's cascade proves the folder
+  // delete takes the LINK and leaves the directory row — a rolodex is not a
+  // folder child
+  const scWei = await POST(`/api/shows/${S}/contacts`, { contact_id: ctWei.body.id, role: 'Vendor rep' },
+    { token: PMT });
+  ok('15c: the vendor card rides into the cascade section linked', scWei.status === 200, scWei.body);
+
   section('16. Flex — the create-element route (stubbed; NO live Flex)');
 
   const flexLib = require('../lib/flex');
@@ -3184,6 +3333,26 @@ const DEL = (p, o) => call('DELETE', p, o);
      fxGear.body.deepLink === FLEX_STUB_BASE + '/f5/ui/#element/stub-element-0001'
      && fxGear.body.fabricated === false, fxGear.body);
 
+  // ── the rolodex tie-in: the Rosetta stone gets its ids ────────────────────
+  // §15c created 'League One Volleyball' with NO flex id; the MATCHED client
+  // must BACK-FILL that row, and the CREATED venue must land as a new
+  // system-authored card. Cheap, one-way, and reported per slot.
+  ok('16 ROLODEX: the matched client BACK-FILLS the existing card',
+     fxMade.body.rolodex && fxMade.body.rolodex.client.outcome === 'backfilled',
+     fxMade.body.rolodex);
+  const ctLovbRow = await pool.query(
+    `SELECT flex_contact_id, kind FROM contacts WHERE name='League One Volleyball'`);
+  ok('16 ROLODEX: ...with the id Flex holds, on the row that already existed',
+     ctLovbRow.rows.length === 1 && ctLovbRow.rows[0].flex_contact_id === 'ct-lovb',
+     ctLovbRow.rows);
+  ok('16 ROLODEX: the created venue lands as a NEW system-authored card',
+     fxMade.body.rolodex.venue.outcome === 'created', fxMade.body.rolodex);
+  const ctWrigley = await pool.query(`SELECT * FROM contacts WHERE name='Wrigley Field'`);
+  ok('16 ROLODEX: ...kind guessed from the slot it filled, created_by system, flex ref held',
+     ctWrigley.rows.length === 1 && ctWrigley.rows[0].kind === 'venue'
+     && ctWrigley.rows[0].created_by === 'system'
+     && ctWrigley.rows[0].flex_contact_id === 'ct-CREATED', ctWrigley.rows[0]);
+
   flexCalls.length = 0;
   const fxAgain = await POST(`/api/shows/${FX}/flex/create-element`, {}, { token: A });
   ok('16: a second create on a linked show is a 409 — one show, one folder',
@@ -3214,6 +3383,14 @@ const DEL = (p, o) => call('DELETE', p, o);
   const fxPost2 = flexCalls.find((c) => /\/api\/element$/.test(c.url) && c.method === 'POST');
   ok('16: ...so venueId is ABSENT from the payload, never null',
      !('venueId' in fxPost2.body) && fxPost2.body.clientId === 'ct-lovb', Object.keys(fxPost2.body));
+  ok('16 ROLODEX: an OMITTED contact absorbs nothing — no card is invented for a failed create',
+     fxReplace.body.rolodex.venue.outcome === 'skipped'
+     && (await pool.query(`SELECT COUNT(*)::int AS n FROM contacts WHERE name='Nowhere Arena'`))
+          .rows[0].n === 0, fxReplace.body.rolodex);
+  ok('16 ROLODEX: a card already holding its ref is HELD, never rewritten',
+     fxReplace.body.rolodex.client.outcome === 'held'
+     && (await pool.query(`SELECT COUNT(*)::int AS n FROM contacts WHERE name='League One Volleyball'`))
+          .rows[0].n === 1, fxReplace.body.rolodex);
   ok('16: ...and the venue NAME still reaches Flex, on its own notes line',
      /^Venue: Nowhere Arena \(not linked in Flex\)$/m.test(fxPost2.body.notes), fxPost2.body.notes);
   contactCreateFails = false;
@@ -4022,7 +4199,8 @@ const DEL = (p, o) => call('DELETE', p, o);
      && before.deliverables > 0 && before.milestones > 0 && before.proposals > 0
      && before.purchase_orders > 0 && before.po_lines > 0 && before.purchase_needs > 0
      && before.activity > 0
-     && before.tech_reports > 0 && before.notification_outbox > 0,
+     && before.tech_reports > 0 && before.notification_outbox > 0
+     && before.show_contacts > 0,
      before);
   // add the remaining child types so the cascade is exercised in full
   await POST('/api/bookings', { show_id: S, category: 'Truck / freight', vendor: 'Landstar',
@@ -4041,6 +4219,12 @@ const DEL = (p, o) => call('DELETE', p, o);
   const after = await childCounts(P);
   const orphans = Object.entries(after).filter(([, n]) => n > 0);
   ok('ZERO orphans across every wired table', orphans.length === 0, Object.fromEntries(orphans));
+  // the rolodex invariant: the cascade took the LINK (counted above) and left
+  // the DIRECTORY ROW — a contact has a life across projects and is not a
+  // folder child
+  ok('a contact SURVIVES the folder delete — the rolodex is a directory, not a child table',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM contacts WHERE name=$1`, [TAG + ' Wei Lin']))
+       .rows[0].n === 1);
 
   // ── cleanup ───────────────────────────────────────────────────────────────
   section('cleanup');
@@ -4050,9 +4234,17 @@ const DEL = (p, o) => call('DELETE', p, o);
   await pool.query(`DELETE FROM sessions WHERE username LIKE $1`, [TAG + '%']);
   await pool.query(`DELETE FROM users WHERE username LIKE $1`, [TAG + '%']);
   await pool.query(`DELETE FROM activity WHERE detail LIKE $1 OR actor LIKE $1`, ['%' + TAG + '%']);
+  // rolodex rows are global on purpose, so the run tidies its own: the TAGged
+  // cards, plus the two un-TAGged ones the flex absorb legitimately minted
+  await pool.query(`DELETE FROM show_contacts WHERE contact_id IN
+    (SELECT id FROM contacts WHERE name LIKE $1 OR flex_contact_id IN ('ct-lovb', 'ct-CREATED'))`,
+    [TAG + '%']);
+  await pool.query(`DELETE FROM contacts
+    WHERE name LIKE $1 OR flex_contact_id IN ('ct-lovb', 'ct-CREATED')`, [TAG + '%']);
   const leftovers = await pool.query(
     `SELECT (SELECT COUNT(*) FROM projects WHERE name LIKE $1)
           + (SELECT COUNT(*) FROM users WHERE username LIKE $1)
+          + (SELECT COUNT(*) FROM contacts WHERE name LIKE $1)
           + (SELECT COUNT(*) FROM proposals WHERE payload::text LIKE $1) AS n`, ['%' + TAG + '%']);
   ok('the smoke run cleaned up after itself', parseInt(leftovers.rows[0].n, 10) === 0,
      leftovers.rows[0]);
@@ -4170,6 +4362,9 @@ async function childCounts(projectId) {
     // that is not counted here is a table that leaks rows on every folder delete.
     tech_reports:     await q(`SELECT COUNT(*) n FROM tech_reports WHERE project_id=$1 OR show_id ${inShows}`),
     notification_outbox: await q(`SELECT COUNT(*) n FROM notification_outbox WHERE project_id=$1 OR show_id ${inShows}`),
+    // the rolodex LINK is a show child; the contact row itself deliberately is
+    // not counted here — it survives the cascade, and its own assertion says so
+    show_contacts:    await q(`SELECT COUNT(*) n FROM show_contacts WHERE show_id ${inShows}`),
     activity:         await q(`SELECT COUNT(*) n FROM activity WHERE project_id=$1 OR show_id ${inShows}`)
   };
 }

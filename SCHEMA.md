@@ -83,6 +83,7 @@ with **Jobs** (the commercial dimension) alongside the shows in the folder.
 | PO committed statuses | `ordered` · `shipped` |
 | `po_lines.ownership` | `inventory` · `cogs` |
 | need `status` (`purchase_needs`) | `open` · `covered` · `na` — `covered` = raised onto a PO (`covered_by_po_id`) or checked off by hand; `na` = deliberately not needed, kept struck-through |
+| contact `kind` | `client` · `venue` · `vendor` · `crew` · `other` — a coarse rolodex filter, never a permission |
 | note `anchor_type` | `project` · `show` · `step` · `file` · `job` · `expense` · `po` |
 | schedule `kind` | `travel` · `work` · `show` · `meal` · `strike` |
 | deliverable `kind` / `status` | `recap` · `call_sheet` · `photo_set` / `draft` · `approved` · `sent` |
@@ -118,7 +119,7 @@ Adding "Motion Graphics" with three new lanes is two rows, not a deploy.
 
 ---
 
-## Tables (37)
+## Tables (39)
 
 ### Core hierarchy
 
@@ -304,6 +305,40 @@ which is what the finance feed reads for budget events.
 > Status changes stamp `checked_by`/`checked_at`; reopening clears both and the
 > covering PO. Write gates mirror the PO family (pm-floor + `canEditProject`).
 > **No notifications in v1**, deliberately.
+
+### The rolodex (2026-09-03 — closes the TEAM_FEEDBACK "Contact rolodex" ask)
+
+**`contacts`** *(idx: `name`, `kind`, `archived_at`)*
+`id · name (NOT NULL) · org · title · kind · email · phone · notes · flex_contact_id · archived_at · archived_by · created_at · created_by · updated_at`
+
+> The cross-project directory. Until this table a contact lived in four places
+> at once — a POC JSONB on a show, a vendor string on a PO, a local hire inline
+> on the crew, a Flex-side contact record — and none of them knew about the
+> others. `kind` is the coarse filter (`client · venue · vendor · crew ·
+> other`), whitelisted server-side, **never a permission**. `flex_contact_id`
+> is the Rosetta-stone ref (TEAM_FEEDBACK "Flex dependency chain"): the id the
+> Flex side minted for the same entity, **back-filled by the event-folder
+> create flow** (`absorbFlexContact`, routes/contacts.js — matched or created
+> contacts only, existing refs never overwritten, a new card lands
+> `created_by='system'` with kind guessed from the slot it filled) and never
+> written from the UI. Archive-not-delete is the retirement path (pm floor —
+> retiring a stale card is upkeep, unlike archiving a season); hard DELETE is
+> **admin-only and refuses with a 400 naming the shows** while `show_contacts`
+> reference the row. The rolodex is GLOBAL: writes are gated on RANK (pm+),
+> not ownership, and a folder delete never touches a contact row.
+
+**`show_contacts`** *(unique `(show_id, contact_id)`; idx: `contact_id`)*
+`id · show_id · contact_id · role · created_at · created_by`
+
+> "People on this show." The show's `venue_poc`/`client_poc` JSONB stay FREE
+> TEXT on purpose — a call sheet must carry a name typed once at 11pm — and
+> the rolodex FILLS those fields (the call-sheet picker) rather than replacing
+> them; this table is the STRUCTURED link, so a contact's card can answer
+> "where is this person used" from the other end. One row per (show, contact):
+> linking twice is a role correction, not a duplicate. Write gate mirrors the
+> crew family — pm floor on the route, `canEditProject` in the body. The link
+> dies with the show (both cascades); the contact survives. **No notifications
+> in v1, deliberately** — the needs-list precedent.
 
 ### Conversation
 
@@ -614,7 +649,7 @@ or the per-user agents of `ARCHITECTURE.md`; this app does not fake one.
 | Entry point | Reaches |
 |---|---|
 | `deletePoCascade(poId)` | po-anchored `notes` (+ their reads/mentions), `po_lines`, `activity`, nulls `expenses.po_id`, **reopens `purchase_needs` this PO was covering** (`covered_by_po_id` nulled, `covered` → `open`), the PO |
-| `deleteShowCascade(showId)` | notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, `proposals`, **`tech_reports`**, **`notification_outbox`**, `activity`, nulls `po_lines.show_id` and `purchase_needs.show_id`, the show |
+| `deleteShowCascade(showId)` | notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, `proposals`, **`tech_reports`**, **`notification_outbox`**, **`show_contacts`** (the LINK — the contact row survives, deliberately), `activity`, nulls `po_lines.show_id` and `purchase_needs.show_id`, the show |
 | `deleteProjectCascade(projectId)` | every show (via the show cascade), every PO (via the PO cascade), job- and project-anchored notes, `budget_lines`, **`purchase_needs`**, `jobs`, project-level `steps`/`files`/`expenses`/`milestones`/`deliverables`/`proposals`/**`tech_reports`**/**`notification_outbox`**, `activity`, the project |
 | `DELETE /api/jobs/:id` (`routes/finance.js`) | refuses while shows/expenses/po_lines still attach; then `budget_lines`, **`purchase_needs`**, job-anchored `notes`, the job |
 | `DELETE /api/files/:id` (single file, `routes/files.js`) | file-anchored `notes` (+ reads/mentions), **`spec_renders` by `file_id`**, nulls `expenses.file_id` / `bookings.file_id` / `purchase_orders.quote_file_id` / `.invoice_file_id`, the file. The NAS bytes are left on disk deliberately. `spec_renders` was added in the 2026-08-27 hardening pass: `spec_renders.file_id` is `NOT NULL`, so a render cannot be orphaned the way a nullable FK can — it goes with the file or it is a dangling row |
@@ -741,6 +776,24 @@ Reports     GET  /api/shows/:id/tech-reports             (F2 · pm+ sees all +
             may read, nag and review, but never WRITE somebody else's)
             POST /api/tech-reports/:id/{review,reopen}   (pm+ · OPTIONAL)
             POST /api/shows/:id/tech-reports/nag         (pm+ on the folder)
+── the contact rolodex (2026-09-03) ─────────────────────────────────────────
+Contacts    GET  /api/contacts                (any signed-in · ?q= name/org ·
+            ?kind= whitelisted · the archive filter convention: default
+            excludes archived, ?archived=1 only, ?include_archived=1 both ·
+            every row carries linked_shows)
+            GET  /api/contacts/:id            (always resolves, archived too;
+            + shows[] — "where is this person used")
+            POST /api/contacts · PUT /api/contacts/:id            (pm+ RANK —
+            the rolodex is global, so the floor is rank, not ownership)
+            POST /api/contacts/:id/{archive,unarchive}            (pm+ · the
+            retirement path, idempotent both ways)
+            DELETE /api/contacts/:id          (ADMIN · 400 naming the shows
+            while show_contacts reference it — archive is never refused)
+            GET  /api/shows/:id/contacts      ("People on this show", cards
+            embedded)
+            POST /api/shows/:id/contacts      (pm+ AND canEditProject ·
+            {contact_id, role} · re-linking is a role correction, not a dup)
+            DELETE /api/shows/:id/contacts/:contactId  (same gate · unlink)
 Notify      GET  /api/notification-kinds
             GET/PUT /api/me/notification-prefs           (F3 · your own only)
             GET  /api/me/notifications                   (your own queue)
@@ -831,6 +884,10 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | **F6** `archiveShow` / `unarchiveShow` / `archiveProject` / `unarchiveProject` | `POST /api/{shows,projects}/:id/{archive,unarchive}` |
 | **F6** `listArchivedProjects()` | `GET /api/projects?archived=1` |
 | **F6** `sweep()` | `POST /api/admin/sweep` |
+| `listContacts({q, kind, archived, include_archived})` / `getContact(id)` | `GET /api/contacts` / `GET /api/contacts/:id` |
+| `createContact` / `updateContact` | `POST /api/contacts` · `PUT /api/contacts/:id` |
+| `archiveContact` / `unarchiveContact` / `deleteContact` | `POST /api/contacts/:id/{archive,unarchive}` · `DELETE /api/contacts/:id` |
+| `listShowContacts(sid)` / `linkShowContact(sid, cid, role)` / `unlinkShowContact(sid, cid)` | `GET`/`POST /api/shows/:id/contacts` · `DELETE /api/shows/:id/contacts/:contactId` |
 
 **Two signature deviations worth knowing:**
 1. `confirmDoc(fileId)` / `rejectDoc(fileId)` take a **file id** in the mock; the

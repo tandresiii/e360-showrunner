@@ -194,6 +194,18 @@ async function renderView(view, arg) {
     s.innerHTML = viewTeam(await api.listShows());
     crumb([{ t: 'Team' }]);
 
+  } else if (view === 'contacts') {
+    /* the rolodex. Active/Archived and the kind filter are SERVER questions
+       (the archive convention's query params); the text box narrows what came
+       back, client-side, same honest posture as the topbar search. */
+    var contacts = await api.listContacts({
+      archived: CONTACTS_UI.mode === 'archived',
+      kind: CONTACTS_UI.kind || undefined
+    });
+    s.innerHTML = viewContacts(contacts);
+    crumb([{ t: 'Contacts' }]);
+    initContactsSearch();
+
   } else if (view === 'files') {
     s.innerHTML = viewFiles(await api.listShows());
     crumb([{ t: 'Files' }]);
@@ -3625,7 +3637,8 @@ async function commitChangePassword() {
 var PENDING_CREW = null, PENDING_SHOWEDIT = null, PENDING_FOLDEDIT = null,
     PENDING_SHEET = null, PENDING_TASK = null, PENDING_BUDGET = null,
     PENDING_BOOK = null, PENDING_POETA = null, PENDING_PROOF = null,
-    PENDING_CONTRACT = null, PENDING_PUSH = null;
+    PENDING_CONTRACT = null, PENDING_PUSH = null,
+    PENDING_CONTACT = null, PENDING_SC = null;
 
 /* the three shared readers every commit below uses, and nothing else */
 function _v(id) { var el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; }
@@ -3776,6 +3789,15 @@ async function openCallSheet(showId) {
     finLabelWrap('Dress', '<input id="csDress" class="cell-in" placeholder="black, closed toe" value="' + esc(show.dress_code || '') + '">') +
     '</div>' +
     '<div class="ne-scope"><div class="ne-sh">' + inlineIcon('phone') + 'Points of contact <i>the 6am problem-solvers</i></div>' +
+    /* the rolodex fills these fields; it never replaces them. Picking writes
+       the contact's name/title/phone into the text boxes below, still
+       editable — the sheet prints whatever is typed, directory or not. */
+    '<div style="display:flex;gap:8px;margin:0 0 8px">' +
+    '<button class="btn sm ghost" ' + act('csPickContact', Number(showId), 'venue') + '>' +
+      icon('users') + 'Venue from rolodex</button>' +
+    '<button class="btn sm ghost" ' + act('csPickContact', Number(showId), 'client') + '>' +
+      icon('users') + 'Client from rolodex</button>' +
+    '</div>' +
     '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr">' +
     finLabelWrap('Venue POC', '<input id="csVpName" class="cell-in" placeholder="name" value="' + esc(pf(show.venue_poc, 'name')) + '">') +
     finLabelWrap('Title', '<input id="csVpTitle" class="cell-in" placeholder="ops manager" value="' + esc(pf(show.venue_poc, 'title')) + '">') +
@@ -3809,6 +3831,284 @@ async function csCommit() {
   closeM();
   toast('Call sheet saved', 'Everyone on this show has been told the times changed');
   return refreshShowTab(showId, 'schedule');
+}
+
+/* ── THE ROLODEX — contact modals, the show links, the call-sheet picker ─────
+   Tom (2026-08-27): "there should be a contact rolodex in our app if we dont
+   already have one." The view lives in views-contacts.js; everything a click
+   does lands here. No notifications in v1 — fixing a phone number is the
+   definition of a routine edit. */
+
+/* the live filter on the Contacts view: narrows what is ALREADY LOADED and
+   re-renders only the table body, so focus never leaves the box */
+function initContactsSearch() {
+  var inp = document.getElementById('ctSearch');
+  if (!inp) return;
+  inp.oninput = function () {
+    CONTACTS_UI.q = String(inp.value || '').trim();
+    var tb = document.getElementById('ctRows');
+    if (tb) tb.innerHTML = contactRowsHTML();
+  };
+}
+
+/* shared field grid — one builder for add and edit, the personFields pattern */
+function contactFields(c) {
+  c = c || {};
+  var kindOpts = CONTACT_KINDS.map(function (k) {
+    return '<option value="' + esc(k) + '"' + ((c.kind || 'other') === k ? ' selected' : '') + '>' +
+      esc(k.charAt(0).toUpperCase() + k.slice(1)) + '</option>';
+  }).join('');
+  return '<div class="fin-inputs" style="grid-template-columns:1.3fr 1fr">' +
+    finLabelWrap('Name', '<input id="ctName" class="cell-in" placeholder="who is this" value="' + esc(c.name || '') + '">') +
+    finLabelWrap('Org', '<input id="ctOrg" class="cell-in" placeholder="Fiserv Forum · LOVB · Shenzhen Fabulux" value="' + esc(c.org || '') + '">') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.3fr 1fr">' +
+    finLabelWrap('Title', '<input id="ctTitle" class="cell-in" placeholder="event ops · producer · account manager" value="' + esc(c.title || '') + '">') +
+    finLabelWrap('Kind', '<select id="ctKindSel" class="cell-in">' + kindOpts + '</select>') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.3fr 1fr">' +
+    finLabelWrap('Email', '<input id="ctEmail" class="cell-in" placeholder="name@org.com" value="' + esc(c.email || '') + '">') +
+    finLabelWrap('Phone', '<input id="ctPhone" class="cell-in" placeholder="414-555-0221" value="' + esc(c.phone || '') + '">') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Notes', '<textarea id="ctNotes" class="cell-in" rows="3" placeholder="how we know them, what they handle">' + esc(c.notes || '') + '</textarea>') +
+    '</div>';
+}
+function contactFromForm() {
+  return { name: _v('ctName'), org: _v('ctOrg'), title: _v('ctTitle'),
+           kind: _v('ctKindSel') || 'other', email: _v('ctEmail'), phone: _v('ctPhone'),
+           notes: _v('ctNotes') };
+}
+
+function openAddContact() {
+  if (!canEditContacts()) { toast('PMs manage the rolodex', 'Ask a pm, a manager or an admin'); return; }
+  PENDING_CONTACT = null;
+  openModal('New contact',
+    '<div class="hint" style="margin:0 0 12px">' + icon('users') + '<span>One card per person or org — the ' +
+    'call sheet’s POC picker, the show links and the Flex tie-in all read from here.</span></div>' +
+    contactFields(null) + _foot(act('ctAddCommit'), 'Add contact', 'plus'));
+}
+async function commitAddContact() {
+  var body = contactFromForm();
+  if (!body.name) { toast('Who is it?', 'A contact needs a name'); return; }
+  var made;
+  try { made = await api.createContact(body); }
+  catch (e) { toast('Not added', String(e && e.message || e)); return; }
+  closeM();
+  toast('Added to the rolodex', made.name + (made.org ? ' · ' + made.org : ''));
+  if (CUR.view === 'contacts') return render('contacts');
+}
+async function openEditContact(contactId) {
+  if (!canEditContacts()) { toast('PMs manage the rolodex', 'Ask a pm, a manager or an admin'); return; }
+  var c;
+  try { c = await api.getContact(contactId); }
+  catch (e) { toast('Not found', String(e && e.message || e)); return; }
+  PENDING_CONTACT = c.id;
+  openModal('Edit · ' + c.name, contactFields(c) + _foot(act('ctEditCommit'), 'Save contact'));
+}
+async function commitEditContact() {
+  if (!PENDING_CONTACT) return;
+  var body = contactFromForm();
+  if (!body.name) { toast('Who is it?', 'A contact keeps its name — blank is not a rename'); return; }
+  var saved;
+  try { saved = await api.updateContact(PENDING_CONTACT, body); }
+  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  PENDING_CONTACT = null;
+  closeM();
+  toast('Saved', saved.name);
+  if (CUR.view === 'contacts') return render('contacts');
+  if (CUR.view === 'show' && CUR.showId) return refreshShowTab(CUR.showId, 'schedule');
+}
+
+/* the card — details plus "appears on", which is the whole point of the join */
+async function openContactCard(contactId) {
+  var c;
+  try { c = await api.getContact(contactId); }
+  catch (e) { toast('Not found', String(e && e.message || e)); return; }
+  var shows = (c.shows || []).map(function (x) {
+    return '<div class="poc-card"><div class="poc-t"><span>' + esc(x.role || '—') + '</span>' +
+      '<button style="padding:0;background:none;border:0;cursor:pointer;text-align:left;color:var(--text);font-family:inherit" ' +
+      act('ctOpenShow', x.show_id) + '><b>' + esc(x.name || x.venue || ('Show ' + x.show_id)) + '</b></button>' +
+      '<i>' + esc([x.venue, fmtDate(x.event_date)].filter(Boolean).join(' · ')) +
+      (x.archived ? ' · archived' : '') + '</i></div></div>';
+  }).join('');
+  var lines =
+    '<div class="glance">' +
+    '<div class="g"><span class="k">Kind</span><span>' + contactKindTag(c) + '</span></div>' +
+    (c.org ? '<div class="g"><span class="k">Org</span><span style="font-weight:600">' + esc(c.org) + '</span></div>' : '') +
+    (c.title ? '<div class="g"><span class="k">Title</span><span>' + esc(c.title) + '</span></div>' : '') +
+    (c.email ? '<div class="g"><span class="k">Email</span><a href="mailto:' + esc(c.email) + '" class="mono" style="font-size:11.5px;color:var(--text-2)">' + esc(c.email) + '</a></div>' : '') +
+    (c.phone ? '<div class="g"><span class="k">Phone</span><a href="' + esc(telHref(c.phone)) + '" class="mono" style="color:var(--text-2)">' + esc(c.phone) + '</a></div>' : '') +
+    (c.flex_contact_id ? '<div class="g"><span class="k">Flex</span><span class="mono" style="font-size:11px" title="The Flex-side contact id — held so the event-folder create path links instead of re-matching by name.">' + esc(c.flex_contact_id) + '</span></div>' : '') +
+    '</div>' +
+    (c.notes ? '<div class="hint" style="margin-top:10px">' + icon('file') + '<span>' + esc(c.notes) + '</span></div>' : '');
+  var canEdit = canEditContacts();
+  openModal(c.name + (c.archived_at ? ' · archived' : ''),
+    lines +
+    '<h3 style="margin:14px 0 8px">Appears on ' + (c.shows || []).length + ' show' +
+    ((c.shows || []).length === 1 ? '' : 's') + '</h3>' +
+    '<div class="poc-list">' + (shows ||
+      '<div class="empty" style="padding:14px;font-size:12.5px">Not linked to a show yet.</div>') + '</div>' +
+    '<div style="display:flex;justify-content:space-between;gap:9px;margin-top:12px;align-items:center">' +
+    '<span style="display:flex;gap:9px">' +
+    (canEdit && CURRENT_USER.role === 'admin'
+      ? '<button class="btn ghost" ' + act('ctDelete', c.id) + '>' + icon('trash') + 'Delete</button>' : '') +
+    '</span><span style="display:flex;gap:9px">' +
+    (canEdit
+      ? (c.archived_at
+          ? '<button class="btn ghost" ' + act('ctUnarchive', c.id) + '>' + icon('refresh') + 'Restore</button>'
+          : '<button class="btn ghost" ' + act('ctArchive', c.id) + '>' + icon('box') + 'Archive</button>') +
+        '<button class="btn primary" ' + act('ctEdit', c.id) + '>' + icon('pencil') + 'Edit</button>'
+      : '') +
+    '<button class="btn ghost" ' + act('closeModal') + '>Close</button>' +
+    '</span></div>');
+}
+function ctOpenShowAct(showId) { closeM(); return render('show', showId); }
+
+async function ctArchiveAct(contactId) {
+  try { await api.archiveContact(contactId); }
+  catch (e) { toast('Not archived', String(e && e.message || e)); return; }
+  closeM();
+  toast('Archived', 'Out of the working set — still searchable, every show link kept');
+  if (CUR.view === 'contacts') return render('contacts');
+}
+async function ctUnarchiveAct(contactId) {
+  try { await api.unarchiveContact(contactId); }
+  catch (e) { toast('Not restored', String(e && e.message || e)); return; }
+  closeM();
+  toast('Back in the rolodex', 'Nothing was lost');
+  if (CUR.view === 'contacts') return render('contacts');
+}
+/* delete asks first, in words that name the rule the server enforces */
+function openDeleteContact(contactId) {
+  if (!CURRENT_USER || CURRENT_USER.role !== 'admin') {
+    toast('Deleting is an admin act', 'Archive it instead — that always works');
+    return;
+  }
+  var c = CONTACTS_BY_ID[Number(contactId)];
+  openModal('Delete forever · ' + (c ? c.name : 'contact ' + contactId),
+    '<div class="hint" style="margin:0 0 12px">' + icon('alert') + '<span>Hard delete is for a card that ' +
+    'never should have existed. It <b>refuses while the contact is on any show</b> — unlink those first, or ' +
+    'archive instead, which keeps the record and always works.</span></div>' +
+    _foot(act('ctDeleteGo', contactId), 'Delete forever', 'trash'));
+}
+async function ctDeleteGoAct(contactId) {
+  try { await api.deleteContact(contactId); }
+  catch (e) { closeM(); toast('Not deleted', String(e && e.message || e)); return; }
+  closeM();
+  toast('Deleted', 'The card is gone for good');
+  if (CUR.view === 'contacts') return render('contacts');
+}
+
+/* ── the show links — "People on this show" ─────────────────────────────── */
+async function openLinkContact(showId) {
+  var rows;
+  try { rows = await api.listContacts({}); }
+  catch (e) { toast('Rolodex unavailable', String(e && e.message || e)); return; }
+  var linked = {};
+  contactsForShow(showId).forEach(function (x) { linked[x.contact.id] = 1; });
+  var free = rows.filter(function (c) { return !linked[c.id]; });
+  if (!free.length) {
+    toast(rows.length ? 'Everyone is already on this show' : 'The rolodex is empty',
+      rows.length ? 'Add a new card on the Contacts page first' : 'Contacts → Add contact');
+    return;
+  }
+  PENDING_SC = { showId: Number(showId) };
+  var opts = '<option value="">— pick a contact —</option>' + free.map(function (c) {
+    return '<option value="' + Number(c.id) + '">' +
+      esc(c.name + (c.org ? ' · ' + c.org : '') + ' (' + c.kind + ')') + '</option>';
+  }).join('');
+  openModal('Link a contact to this show',
+    '<div class="hint" style="margin:0 0 12px">' + icon('users') + '<span>The link is what lets the ' +
+    'contact’s own card answer “which shows was I on”. New people are added on the Contacts page first.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.4fr 1fr">' +
+    finLabelWrap('Contact', '<select id="scContact" class="cell-in">' + opts + '</select>') +
+    finLabelWrap('Role on this show', '<input id="scRole" class="cell-in" placeholder="venue ops · client day-of">') +
+    '</div>' +
+    _foot(act('scAddCommit'), 'Link to show', 'plus'));
+}
+async function scAddCommitAct() {
+  if (!PENDING_SC) return;
+  var contactId = _n('scContact');
+  if (!contactId) { toast('Pick a contact', 'Or add one on the Contacts page first'); return; }
+  var showId = PENDING_SC.showId;
+  try { await api.linkShowContact(showId, contactId, _v('scRole')); }
+  catch (e) { toast('Not linked', String(e && e.message || e)); return; }
+  PENDING_SC = null;
+  closeM();
+  var c = CONTACTS_BY_ID[Number(contactId)];
+  toast('Linked', (c ? c.name : 'Contact') + ' is on this show');
+  return refreshShowTab(showId, 'schedule');
+}
+async function scUnlinkAct(contactId, showIdKey) {
+  var showId = Number(showIdKey);
+  try { await api.unlinkShowContact(showId, contactId); }
+  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  toast('Taken off the show', 'The contact keeps its card and its history');
+  return refreshShowTab(showId, 'schedule');
+}
+
+/* ── the call-sheet picker — the rolodex FILLS the free-text POCs ───────────
+   The modal is single-slot, so swapping to the picker would lose typed edits;
+   every cs* field is stashed first and restored on the way back, and the
+   picked contact then overwrites just its own slot's three boxes. */
+var CS_FIELD_IDS = ['csLoadIn', 'csDoors', 'csEvent', 'csStrike', 'csAddr', 'csPark', 'csRadio',
+                    'csDress', 'csVpName', 'csVpTitle', 'csVpPhone', 'csCpName', 'csCpTitle', 'csCpPhone'];
+function csStashFields() {
+  var o = {};
+  CS_FIELD_IDS.forEach(function (f) {
+    var el = document.getElementById(f);
+    if (el) o[f] = el.value;
+  });
+  return o;
+}
+function csRestoreFields(o) {
+  Object.keys(o || {}).forEach(function (f) {
+    var el = document.getElementById(f);
+    if (el) el.value = o[f];
+  });
+}
+async function csPickContactAct(showId, slot) {
+  if (!PENDING_SHEET) return;
+  var stash = csStashFields();
+  var sid = PENDING_SHEET.showId;
+  var rows;
+  try { rows = await api.listContacts({}); }
+  catch (e) { toast('Rolodex unavailable', String(e && e.message || e)); return; }
+  PENDING_SHEET = { showId: sid, stash: stash, slot: slot };
+  var list = rows.map(function (c) {
+    return '<button class="sp-hit" style="display:flex;align-items:center;gap:9px;width:100%;text-align:left;background:none;border:0;border-radius:6px;padding:7px 9px;cursor:pointer;color:var(--text);font-family:inherit" ' +
+      act('csPickApply', c.id, slot) + '>' + icon('users') +
+      '<span style="display:flex;flex-direction:column"><b style="font-size:12.5px">' + esc(c.name) + '</b>' +
+      '<span style="font-size:11px;color:var(--muted)">' +
+      esc([c.org, c.title, c.phone].filter(Boolean).join(' · ')) + '</span></span></button>';
+  }).join('');
+  openModal('Fill the ' + (slot === 'venue' ? 'Venue' : 'Client') + ' POC from the rolodex',
+    '<div class="hint" style="margin:0 0 12px">' + icon('phone') + '<span>Picking writes the name, title and ' +
+    'phone into the call sheet’s text boxes — still editable, and the POC stays free text on the sheet.</span></div>' +
+    (list || '<div class="empty" style="padding:16px">The rolodex is empty — add contacts on the Contacts page.</div>') +
+    '<div style="display:flex;justify-content:flex-end;margin-top:12px">' +
+    '<button class="btn ghost" ' + act('csPickBack') + '>Back to the call sheet</button></div>');
+}
+async function csPickApplyAct(contactId, slot) {
+  var p = PENDING_SHEET;
+  if (!p) return;
+  var c = CONTACTS_BY_ID[Number(contactId)];
+  await openCallSheet(p.showId);
+  csRestoreFields(p.stash);
+  if (c) {
+    var pre = slot === 'venue' ? 'csVp' : 'csCp';
+    var set = function (f, v) { var el = document.getElementById(pre + f); if (el) el.value = v || ''; };
+    set('Name', c.name);
+    set('Title', c.title || c.org);
+    set('Phone', c.phone);
+  }
+}
+async function csPickBackAct() {
+  var p = PENDING_SHEET;
+  if (!p) return;
+  await openCallSheet(p.showId);
+  csRestoreFields(p.stash);
 }
 
 /* ── A2 · EDIT THE SHOW ──────────────────────────────────────────────────────
@@ -5216,7 +5516,10 @@ function searchCorpus() {
     var f = FILES_BY_ID[k];
     if (f && f.id > 0 && f.status !== 'rejected' && f.status !== 'superseded') files.push(f);
   });
-  return { folders: PROJECTS.slice(), shows: ALL_SHOWS.slice(), jobs: ALL_JOBS.slice(), files: files };
+  return { folders: PROJECTS.slice(), shows: ALL_SHOWS.slice(), jobs: ALL_JOBS.slice(), files: files,
+           /* archived contacts stay findable — search is how an archived row
+              is reached, which is the F6 rule everywhere in this app */
+           contacts: ALL_CONTACTS.slice() };
 }
 function searchHits(q) {
   q = String(q || '').toLowerCase().trim();
@@ -5232,7 +5535,8 @@ function searchHits(q) {
     folders: c.folders.filter(function (p) { return m(p.name, p.client); }).slice(0, 5),
     shows: c.shows.filter(function (s) { return m(s.name, s.venue, s.city); }).slice(0, 5),
     jobs: c.jobs.filter(function (j) { return m(j.qb_job_number, j.client, j.name); }).slice(0, 5),
-    files: c.files.filter(function (f) { return m(f.name, f.vendor, f.caption); }).slice(0, 5)
+    files: c.files.filter(function (f) { return m(f.name, f.vendor, f.caption); }).slice(0, 5),
+    contacts: c.contacts.filter(function (ct) { return m(ct.name, ct.org, ct.email, ct.phone); }).slice(0, 5)
   };
 }
 function closeSearchPop() {
@@ -5266,12 +5570,19 @@ function renderSearchPop(q) {
       return '<button class="sp-hit" ' + act('openJob', j.id) + '>' + icon('dollar') +
         '<span class="sp-t"><b>' + esc(j.qb_job_number) + '</b><span>' + esc(j.client || '') + '</span></span></button>';
     })) +
+    searchGroupHTML('Contacts', hits.contacts.map(function (ct) {
+      return '<button class="sp-hit" ' + act('openContact', ct.id) + '>' + icon('phone') +
+        '<span class="sp-t"><b>' + esc(ct.name) + '</b><span>' +
+        esc([ct.org, ct.kind, ct.phone].filter(Boolean).join(' · ')) +
+        (ct.archived_at ? ' · archived' : '') + '</span></span></button>';
+    })) +
     searchGroupHTML('Files', hits.files.map(function (f) {
       return '<button class="sp-hit" ' + act('openViewer', f.id) + '>' + icon('file') +
         '<span class="sp-t"><b>' + esc(f.caption || f.name) + '</b><span>' +
         esc(fileKindLabel(f.kind)) + '</span></span></button>';
     }));
-  var any = hits.folders.length + hits.shows.length + hits.jobs.length + hits.files.length;
+  var any = hits.folders.length + hits.shows.length + hits.jobs.length + hits.files.length +
+            hits.contacts.length;
   var pop = document.createElement('div');
   pop.className = 'search-pop'; pop.id = 'searchPop';
   pop.innerHTML = groups + (any
@@ -5579,6 +5890,26 @@ var ACTIONS = {
   userDeactivateCommit: function (t, id) { return commitSetActive(id, false); },
   userActivate:         function (t, id) { return commitSetActive(id, true); },
   copyTempPw:           function () { return copyTempPwAct(); },
+  /* the contact rolodex (Tom, 2026-08-27) — view, card, links, picker */
+  goContacts:    function () { return render('contacts'); },
+  ctMode:        function (t, id, k) { CONTACTS_UI.mode = k; return render('contacts'); },
+  ctKind:        function (t, id, k) { CONTACTS_UI.kind = k === 'all' ? '' : k; return render('contacts'); },
+  ctAdd:         function () { return openAddContact(); },
+  ctAddCommit:   function () { return commitAddContact(); },
+  ctEdit:        function (t, id) { return openEditContact(id); },
+  ctEditCommit:  function () { return commitEditContact(); },
+  openContact:   function (t, id) { return openContactCard(id); },
+  ctOpenShow:    function (t, id) { return ctOpenShowAct(id); },
+  ctArchive:     function (t, id) { return ctArchiveAct(id); },
+  ctUnarchive:   function (t, id) { return ctUnarchiveAct(id); },
+  ctDelete:      function (t, id) { return openDeleteContact(id); },
+  ctDeleteGo:    function (t, id) { return ctDeleteGoAct(id); },
+  scAdd:         function (t, id) { return openLinkContact(id); },
+  scAddCommit:   function () { return scAddCommitAct(); },
+  scUnlink:      function (t, id, k) { return scUnlinkAct(id, k); },
+  csPickContact: function (t, id, k) { return csPickContactAct(id, k); },
+  csPickApply:   function (t, id, k) { return csPickApplyAct(id, k); },
+  csPickBack:    function () { return csPickBackAct(); },
   /* passwords */
   changePw:       function () { return openChangePassword(); },
   changePwCommit: function () { return commitChangePassword(); },

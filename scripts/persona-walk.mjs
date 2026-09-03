@@ -1428,6 +1428,98 @@ async function main() {
   ok('…and puts it back — nothing was lost',
      (await POST(`/api/projects/${PROJ}/unarchive`, {}, { token: T.tom })).status === 200);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('33 · the rolodex — a contact’s whole life  (Tom 2026-08-27, shipped at last)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "there should be a contact rolodex in our app if we dont already have
+  // one." Brenden walks a card through its whole life: create → find → fix →
+  // link to the show → read the card back → archive → restore → the delete
+  // that refuses while linked → unlink → the delete that goes through.
+  reach('Contacts view (nav data-view entry)', { seam: 'listContacts', action: 'goContacts',
+                                                 rendered: false });
+  reach('Filter the rolodex', { action: ['ctKind', 'ctMode'] });
+  reach('Add a contact', { seam: 'createContact', action: ['ctAdd', 'ctAddCommit'] });
+  reach('Open the card (row + global search)', { seam: 'getContact',
+                                                 action: ['openContact', 'ctOpenShow'] });
+  reach('Edit a contact', { seam: 'updateContact', action: ['ctEdit', 'ctEditCommit'] });
+  reach('Link a contact to the show', { seam: 'linkShowContact', action: ['scAdd', 'scAddCommit'] });
+  reach('Unlink from the show', { seam: 'unlinkShowContact', action: 'scUnlink' });
+  reach('Archive / restore a card', { seam: ['archiveContact', 'unarchiveContact'],
+                                      action: ['ctArchive', 'ctUnarchive'] });
+  reach('Hard delete (admin, refuses while linked)', { seam: 'deleteContact',
+                                                       action: ['ctDelete', 'ctDeleteGo'] });
+  reach('Call sheet fills its POCs from the rolodex', {
+    action: ['csPickContact', 'csPickApply', 'csPickBack'] });
+  ok('the topbar search gained a Contacts group',
+     /searchGroupHTML\('Contacts'/.test(APP_JS) && /contacts:\s*ALL_CONTACTS/.test(APP_JS));
+  ok('the picker stashes typed call-sheet edits before swapping modals — nothing typed is lost',
+     /csStashFields/.test(APP_JS) && /csRestoreFields/.test(APP_JS));
+  ok('the schedule tab renders the “People on this show” panel from the rolodex',
+     /showContactsPanel/.test(SRC['views-folder.js']) && /showContactsPanel/.test(SRC['views-contacts.js']));
+
+  ok('a tech may not add to the rolodex',
+     (await POST('/api/contacts', { name: 'sneaked card' }, { token: T.omar })).status === 403);
+  const wct = await POST('/api/contacts', {
+    name: 'Rae Simms', org: 'Fiserv Forum', title: 'Ops manager', kind: 'venue',
+    phone: '414-555-0114', email: 'rsimms@fiservforum.com'
+  }, { token: T.brenden });
+  ok('Brenden puts the venue’s ops manager in the rolodex — the same Rae Simms the call sheet types free-text',
+     wct.status === 200 && wct.body.id > 0, wct.body);
+  const WCT = wct.body.id;
+
+  const wctQ = await GET('/api/contacts?q=' + encodeURIComponent('fiserv'), { token: T.omar });
+  ok('…anyone signed in finds her by org, case-insensitively',
+     wctQ.status === 200 && wctQ.body.some((c) => c.id === WCT), wctQ.body?.length);
+  ok('…the kind filter holds her', (await GET('/api/contacts?kind=venue', { token: T.brenden }))
+     .body.some((c) => c.id === WCT));
+  ok('…and an unknown kind is a 400, not an empty lie',
+     (await GET('/api/contacts?kind=sponsor', { token: T.brenden })).status === 400);
+
+  const wctFix = await PUT('/api/contacts/' + WCT, { phone: '414-555-0115' }, { token: T.brenden });
+  ok('a wrong digit is corrected on the card', wctFix.status === 200
+     && wctFix.body.phone === '414-555-0115', wctFix.body);
+  const wctDiff = (await pool.query(
+    `SELECT changes FROM activity WHERE action='contact.update' ORDER BY id DESC LIMIT 1`)).rows[0];
+  ok('…with a structured before→after on the trail',
+     (wctDiff?.changes || []).some((c) => c.field === 'phone' && c.to === '414-555-0115'), wctDiff);
+
+  ok('a pm who owns nothing may not put her on the show',
+     (await POST(`/api/shows/${SHOW}/contacts`, { contact_id: WCT }, { token: T.pat })).status === 403);
+  const wlink = await POST(`/api/shows/${SHOW}/contacts`, { contact_id: WCT, role: 'Venue ops' },
+    { token: T.brenden });
+  ok('Brenden links her to the show', wlink.status === 200 && wlink.body.role === 'Venue ops', wlink.body);
+  const wcard = await GET('/api/contacts/' + WCT, { token: T.omar });
+  ok('…and her card now answers “where am I used” — one show, this one',
+     wcard.body.linked_shows === 1 && wcard.body.shows?.[0]?.show_id === SHOW, wcard.body.shows);
+
+  ok('a tech may not archive a card',
+     (await POST(`/api/contacts/${WCT}/archive`, {}, { token: T.omar })).status === 403);
+  const warchCt = await POST(`/api/contacts/${WCT}/archive`, {}, { token: T.brenden });
+  ok('Brenden archives her — pm floor, the retirement path', warchCt.status === 200, warchCt.body);
+  ok('…the working set excludes her',
+     !(await GET('/api/contacts', { token: T.brenden })).body.some((c) => c.id === WCT));
+  ok('…the Archived view is exactly where she is',
+     (await GET('/api/contacts?archived=1', { token: T.brenden })).body.some((c) => c.id === WCT));
+  ok('…and restore brings her back, link intact',
+     (await POST(`/api/contacts/${WCT}/unarchive`, {}, { token: T.brenden })).status === 200 &&
+     (await GET('/api/contacts/' + WCT, { token: T.brenden })).body.linked_shows === 1);
+
+  ok('deleting a card is above Brenden’s floor — admin only',
+     (await DEL('/api/contacts/' + WCT, { token: T.brenden })).status === 403);
+  const wdelRefused = await DEL('/api/contacts/' + WCT, { token: T.tom });
+  ok('THE HONEST REFUSAL — while she is on a show even Tom is told no, and the 400 NAMES the show',
+     wdelRefused.status === 400 && /AVCA First Serve/.test(wdelRefused.body?.error || ''),
+     wdelRefused.body);
+  ok('…and points at the archive path instead of a dead end',
+     /archive/i.test(wdelRefused.body?.error || ''), wdelRefused.body?.error);
+  ok('…the refusal wrote nothing',
+     (await GET('/api/contacts/' + WCT, { token: T.tom })).status === 200);
+  ok('Brenden takes her off the show',
+     (await DEL(`/api/shows/${SHOW}/contacts/${WCT}`, { token: T.brenden })).status === 200);
+  ok('…unlinked, the admin delete goes through and the card is gone',
+     (await DEL('/api/contacts/' + WCT, { token: T.tom })).status === 200 &&
+     (await GET('/api/contacts/' + WCT, { token: T.tom })).status === 404);
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

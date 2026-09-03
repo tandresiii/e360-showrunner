@@ -237,6 +237,7 @@ app.use('/api', require('./routes/core'));
 app.use('/api', require('./routes/files'));
 app.use('/api', require('./routes/finance'));
 app.use('/api', require('./routes/purchasing'));
+app.use('/api', require('./routes/contacts'));
 app.use('/api', require('./routes/notes'));
 app.use('/api', require('./routes/schedule'));
 app.use('/api', require('./routes/deliverables'));

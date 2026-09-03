@@ -39,6 +39,12 @@ const {
 // D7/D8 + the type sniff. The checker reports QUESTIONS, never errors — see
 // lib/speccheck.js for why two correct specs can legitimately disagree.
 const { typeMismatch, sanitizeSpecJson, checkChain } = require('../lib/speccheck');
+// The rolodex's Rosetta-stone hook: after a Flex contact is matched or
+// created, the same name gets its flex_contact_id back-filled into (or a new
+// row created in) the local `contacts` table. One-way and non-fatal — see
+// absorbFlexContact's header. routes/contacts.js requires only lib/*, so this
+// cross-route require cannot cycle.
+const { absorbFlexContact } = require('./contacts');
 // §7. The Flex client. Every call below it is a REAL call against a live BETA
 // API — see lib/flex.js for the six bugs it works around.
 const {
@@ -946,6 +952,21 @@ router.post('/shows/:id/flex/create-element', requireRole('pm'), asyncH(async (r
     action: 'flex.create',
     detail: `Flex Event Folder created — ${made.payload.name} (${made.elementId}) · ${outcomeLine}` });
 
+  // ── the rolodex tie-in (cheap, one-way, never fatal) ──────────────────────
+  // A Flex contact that just resolved is the freshest identity fact this app
+  // holds: fold it into the local rolodex so the NEXT folder create — and the
+  // future deeper Flex integration — starts from a held ref instead of a name
+  // match. Only slots that actually resolved carry an id; `omitted` absorbs
+  // nothing. This runs AFTER the folder create so a rolodex hiccup can never
+  // cost a folder, and the per-slot outcomes ride the response like the Flex
+  // ones do — same honesty rule, smaller stakes.
+  const rolodex = {
+    client: await absorbFlexContact(pool, {
+      name: contacts.client.name, flexId: contacts.client.id, kind: 'client' }),
+    venue: await absorbFlexContact(pool, {
+      name: contacts.venue.name, flexId: contacts.venue.id, kind: 'venue' })
+  };
+
   res.json({
     ok: true,
     elementId: made.elementId,
@@ -954,6 +975,7 @@ router.post('/shows/:id/flex/create-element', requireRole('pm'), asyncH(async (r
     name: made.payload.name,
     notes,
     contacts,
+    rolodex,
     createContacts,
     dates: {
       plannedStartDate: made.payload.plannedStartDate,
