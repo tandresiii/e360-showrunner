@@ -265,9 +265,13 @@ function viewTeam(shows) {
   var offRows = inactive.map(function (u) { return teamRow(u, load, true); }).join('');
 
   return '<div class="page-h"><div><h1>Team &amp; Roles</h1><div class="sub">Who’s on the roster, what they can do, and who can assign whom. Mirrors the e360 scheduler roster.</div></div>' +
+    '<div style="display:flex;gap:9px">' +
+    (admin || CURRENT_USER.role === 'manager'
+      ? '<button class="btn" ' + act('openStaffingLink') + '>' + icon('link') + 'Staffing link</button>'
+      : '') +
     (admin
       ? '<button class="btn primary" ' + act('userAdd') + '>' + icon('plus') + 'Add person</button>'
-      : '') + '</div>' +
+      : '') + '</div></div>' +
     (admin && demo
       ? '<div class="callout"><div class="ci">' + icon('layers') + '</div><div><b>Demo data — these controls are a simulation</b>' +
         '<p>No Showrunner server answered on boot, so adding a person, changing a role or resetting a password ' +
@@ -321,6 +325,198 @@ function roleDef(role) {
   var r = roleDefOf(role);
   return '<div class="role-def"><div class="ri" style="color:' + r.col + ';background:color-mix(in srgb,' + r.col + ' 12%,transparent)">' + icon(r.ic) + '</div>' +
     '<div class="rd"><b>' + esc(r.name) + ' ' + rolePill(role) + '</b><p>' + esc(r.desc) + '</p></div></div>';
+}
+
+/* ============================================================================
+   STAFFING LINK — one roster, two apps  (Tom, 2026-09-03, live: "i need some
+   sort of way to link techs. or a single source of truth or something.")
+   ----------------------------------------------------------------------------
+   SHOWRUNNER IS THE SOURCE OF TRUTH FOR PEOPLE. The staffing app keys its
+   whole world — events.staff[], travel keys, hotel occupants — on a display
+   name matched name.toLowerCase().trim(), so this panel's one job is making
+   every person resolve across that join: link a spelling difference
+   (users.staffing_name), add the missing person over there, or claim the
+   free-text crew name that names nobody (Devin's case, the night this was
+   asked for). STAFFING NAMES ARE FROZEN — they are how its history finds
+   people — so nothing here ever renames a roster row; the link field is the
+   bridge. The buckets come from api.staffingLinkBuckets(), on the seam, so
+   the walk executes the very matcher this screen renders from.
+   Floors, mirrored from the server: reading is manager+; linking, adding to
+   the staffing roster and creating users are admin acts; claiming a crew
+   name is manager+ (it is a crew edit, and goes through the crew routes).
+   ========================================================================== */
+function slCanRead() { return CURRENT_USER.role === 'admin' || CURRENT_USER.role === 'manager'; }
+
+function slPersonCell(u) {
+  return '<div class="ev-name"><span class="avatar" style="width:30px;height:30px;background:' +
+    esc(u.color || '#888') + '">' + esc(u.initials || '?') + '</span><div><b>' + esc(u.name || u.username) +
+    '</b><span>' + esc(u.title || u.username) + '</span></div></div>';
+}
+
+function slSuggestionCopy(h) {
+  var lines = [];
+  h.suggestions.forEach(function (sg) {
+    if (sg.sure) {
+      lines.push('Probably <b>“' + esc(sg.row.name) + '”</b> — that staffing entry matches only them. ' +
+        'Nothing links until you say so.');
+    } else {
+      lines.push('The staffing roster has <b>“' + esc(sg.row.name) + '”</b> — could be them or ' +
+        esc(sg.alsoMatches.join(', ')) + '. Nothing is pre-picked: a person decides.');
+    }
+  });
+  if (!lines.length) return '';
+  return '<div style="color:var(--text-2);font-size:12.5px;margin-top:4px">' + lines.join('<br>') + '</div>';
+}
+
+function viewStaffingLink(b, d) {
+  var head = '<div class="page-h"><div><h1>Staffing link</h1><div class="sub">Showrunner is the ' +
+    'source of truth for people — this screen makes the staffing app agree. Link spellings, add who’s ' +
+    'missing over there, claim crew names that match nobody.</div></div>' +
+    '<button class="btn ghost" ' + act('goTeam') + '>' + icon('users') + 'Back to Team</button></div>';
+
+  if (!slCanRead()) {
+    return head + '<div class="empty" style="padding:28px">This screen is for admins and managers — ' +
+      'it reads the whole roster on both sides. Ask Tom, Tony or Jim if a name needs linking.</div>';
+  }
+
+  var admin = CURRENT_USER.role === 'admin';
+  var demo = api.isDemo();
+  var out = head;
+
+  if (demo) {
+    out += '<div class="callout"><div class="ci">' + icon('layers') + '</div><div>' +
+      '<b>Demo data — the staffing roster here is a fixture</b>' +
+      '<p>No Showrunner server answered on boot, so linking, adding to the staffing roster and crew ' +
+      'fixes happen only in this browser tab. The matching rules are the real ones — the same ' +
+      'lowercase-and-trim join the push uses.</p></div></div>';
+  }
+
+  if (d.error) {
+    /* the honest failure: the proxy said why (a 501 naming the env vars, a
+       403, a dead host). The crew section below still renders — it is local
+       data — checked against Showrunner users only, and says so. */
+    out += '<div class="callout"><div class="ci">' + icon('alert') + '</div><div>' +
+      '<b>The staffing roster could not be read</b><p>' + esc(d.error) + '</p>' +
+      '<p>The linked / unlinked buckets need that roster, so they are not shown — nothing here ' +
+      'guesses. Crew names below are checked against Showrunner users only.</p></div></div>';
+  } else {
+    var nFix = b.here.length + b.there.length + b.crew.length;
+    out += '<div class="stats">' +
+      '<div class="stat"><div class="rail-c" style="background:var(--go)"></div><div class="k">Linked</div><div class="v" style="color:var(--go)">' + b.linked.length + '</div></div>' +
+      '<div class="stat"><div class="rail-c" style="background:var(--warn)"></div><div class="k">Here, not there</div><div class="v" style="color:var(--warn)">' + b.here.length + '</div></div>' +
+      '<div class="stat"><div class="rail-c" style="background:var(--info)"></div><div class="k">There, not here</div><div class="v" style="color:var(--info)">' + b.there.length + '</div></div>' +
+      '<div class="stat' + (b.crew.length ? '' : '') + '"><div class="rail-c" style="background:var(--crit)"></div><div class="k">Crew names, nobody</div><div class="v" style="color:' + (b.crew.length ? 'var(--crit)' : 'var(--text-2)') + '">' + b.crew.length + '</div></div>' +
+      '</div>' +
+      (nFix === 0
+        ? '<div class="hint" style="margin:0 0 14px">' + inlineIcon('checkC') +
+          '<span>Everyone resolves on both sides. A push has nothing to trip on.</span></div>'
+        : '');
+
+    /* ── LINKED ──────────────────────────────────────────────────────────── */
+    var lRows = b.linked.map(function (l) {
+      return '<tr><td>' + slPersonCell(l.user) + '</td>' +
+        '<td class="mono" style="font-size:12px">' + esc(l.row.name) + '</td>' +
+        '<td>' + (l.exact
+          ? '<span class="pill go" title="Staffing matches people case- and whitespace-insensitively, so these two names already resolve to each other. Setting a link would add nothing.">same name — nothing to set</span>'
+          : '<span class="pill info" title="Their profile’s “Name in staffing app” field carries this spelling — the push, travel and hotels all resolve through it.">linked on their profile</span>') +
+        '</td></tr>';
+    }).join('');
+    out += '<div class="card" style="margin-bottom:16px"><div class="card-h"><h3>Linked</h3>' +
+      '<span class="pill idle">' + b.linked.length + ' resolving on both sides</span></div>' +
+      (lRows
+        ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Person</th><th>On the staffing roster as</th><th>How</th></tr></thead><tbody>' + lRows + '</tbody></table></div>'
+        : '<div class="empty" style="padding:18px">Nobody matches yet — link people below.</div>') +
+      '</div>';
+
+    /* ── HERE, NOT THERE ─────────────────────────────────────────────────── */
+    var thereNames = b.there.map(function (r) { return r.name; });
+    var hRows = b.here.map(function (h) {
+      var sure = null;
+      h.suggestions.forEach(function (sg) { if (!sure && sg.sure) sure = sg; });
+      var opts = '<option value="">— link to a staffing name —</option>' +
+        thereNames.map(function (n) {
+          var sel = sure && sure.row.name === n ? ' selected' : '';
+          return '<option value="' + esc(n) + '"' + sel + '>' +
+            esc(n) + (sure && sure.row.name === n ? ' (probably)' : '') + '</option>';
+        }).join('');
+      return '<div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;padding:10px 0;border-top:1px solid var(--line)">' +
+        '<div style="flex:1;min-width:200px">' + slPersonCell(h.user) + slSuggestionCopy(h) + '</div>' +
+        (admin
+          ? '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+            '<select id="slPick' + Number(h.user.id) + '" class="cell-in" style="min-width:190px">' + opts + '</select>' +
+            '<button class="btn sm" ' + act('slLink', h.user.id) + '>' + icon('link') + 'Link</button>' +
+            '<button class="btn sm ghost" ' + act('slAddRoster', h.user.id) + '>' + icon('plus') + 'Add to staffing roster</button>' +
+            '</div>'
+          : '<span class="pill idle" title="Setting a link writes to their user profile; adding to the staffing roster writes into the other app. Both are admin acts.">admin links</span>') +
+        '</div>';
+    }).join('');
+    out += '<div class="card" style="margin-bottom:16px"><div class="card-h"><h3>In Showrunner, not on the staffing roster</h3>' +
+      '<span class="pill ' + (b.here.length ? 'warn' : 'idle') + '">' + b.here.length + ' unmatched</span></div>' +
+      (hRows || '<div class="empty" style="padding:18px">Everyone here resolves to a staffing roster row.</div>') +
+      '<div class="perm-note">' + inlineIcon('lock') + ' An exact name match needs no link at all — the push ' +
+      'already resolves it, case- and whitespace-insensitively. Set a link only when the two systems ' +
+      'genuinely spell somebody differently, or add them to the staffing roster if they are missing outright.</div>' +
+      '</div>';
+
+    /* ── THERE, NOT HERE ─────────────────────────────────────────────────── */
+    var tRows = b.there.map(function (r) {
+      return '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 0;border-top:1px solid var(--line)">' +
+        '<div style="flex:1;min-width:200px"><b>' + esc(r.name) + '</b>' +
+        (r.email ? '<span class="mono" style="color:var(--muted);font-size:11.5px;margin-left:8px">' + esc(r.email) + '</span>' : '') +
+        '</div>' +
+        (admin
+          ? '<button class="btn sm" ' + act('slCreateUser', null, r.name) + '>' + icon('plus') + 'Create Showrunner user</button>'
+          : '<span class="pill idle">admin creates</span>') +
+        '</div>';
+    }).join('');
+    out += '<div class="card" style="margin-bottom:16px"><div class="card-h"><h3>On the staffing roster, not in Showrunner</h3>' +
+      '<span class="pill ' + (b.there.length ? 'info' : 'idle') + '">' + b.there.length + ' only over there</span></div>' +
+      (tRows || '<div class="empty" style="padding:18px">Every staffing roster row matches somebody here.</div>') +
+      '<div class="perm-note">' + inlineIcon('users') + ' “Create Showrunner user” opens the normal ' +
+      'add-person dialog with the name filled in. Rename them there if you like — the staffing spelling ' +
+      'is kept as the link automatically when the names end up different.</div>' +
+      '</div>';
+  }
+
+  /* ── UNMATCHED CREW NAMES — Devin's case ───────────────────────────────── */
+  var crewGroups = b.crew;
+  var userOpts = '<option value="">— this is actually… —</option>' +
+    activeUsers().map(function (u) {
+      return '<option value="' + esc(u.username) + '">' + esc(u.name || u.username) + '</option>';
+    }).join('');
+  var cRows = crewGroups.map(function (g, i) {
+    var shows = g.crew.map(function (c) { return esc(c.show_name || ('show #' + c.show_id)); });
+    var uniq = shows.filter(function (s, j) { return shows.indexOf(s) === j; });
+    return '<div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;padding:10px 0;border-top:1px solid var(--line)">' +
+      '<div style="flex:1;min-width:200px"><b>' + esc(g.name) + '</b>' +
+      '<div style="color:var(--muted);font-size:11.5px;margin-top:2px">' + g.crew.length +
+      ' crew line' + (g.crew.length === 1 ? '' : 's') + ' · ' + uniq.join(', ') + '</div></div>' +
+      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+      '<select id="slCrewPick' + i + '" class="cell-in" style="min-width:190px">' + userOpts + '</select>' +
+      '<button class="btn sm" ' + act('slCrewFix', i) + '>' + icon('check') + 'This is who it is</button>' +
+      (admin
+        ? '<button class="btn sm ghost" ' + act('slCreateUser', null, g.name) + '>' + icon('plus') + 'Create user</button>'
+        : '') +
+      '</div></div>';
+  }).join('');
+  out += '<div class="card" style="margin-bottom:16px"><div class="card-h"><h3>Crew names that match nobody</h3>' +
+    '<span class="pill ' + (crewGroups.length ? 'crit' : 'idle') + '">' + crewGroups.length + ' to claim</span></div>' +
+    (cRows || '<div class="empty" style="padding:18px">Every crew name on a working show resolves to a person' +
+      (d.error ? ' in Showrunner (the staffing roster was not checked)' : ' or a staffing roster row') + '.</div>') +
+    '<div class="perm-note">' + inlineIcon('alert') + ' These are free-text crew lines on non-archived shows — ' +
+    'the exact thing the push pre-flight refuses. “This is who it is” rewrites those crew lines to the real ' +
+    'person (they get told they’re on the show, like any crew change).' +
+    (d.error ? ' Checked against Showrunner users only while the staffing roster is unreachable.' : '') +
+    '</div></div>';
+
+  /* the one rule worth saying out loud, where the buttons are */
+  out += '<div class="perm-note" style="margin-bottom:16px">' + inlineIcon('lock') +
+    ' <b>Staffing names are frozen.</b> The staffing app finds people — on every historical event, travel ' +
+    'key and hotel row — by the name string itself, so renaming a roster row over there would orphan its ' +
+    'own history. That is why this screen never offers a rename: the “Name in staffing app” link field on ' +
+    'a Showrunner profile is the bridge, and new roster rows are created with the name Showrunner will push.</div>';
+
+  return out;
 }
 
 /* ============================================================================

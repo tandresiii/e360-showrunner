@@ -89,8 +89,27 @@ function startFakeScheduler({ user = 'showrunner', pass = 'fake-pass' } = {}) {
     res.json(c);
   });
 
-  // ── roster (:2484) ────────────────────────────────────────────────────────
+  // ── roster (:2484/:2490) ──────────────────────────────────────────────────
   app.get('/api/roster', (req, res) => res.json(state.roster.slice()));
+  // The staffing app's own "add staff member" door: an UPSERT on the UNIQUE
+  // name (ON CONFLICT (name) DO UPDATE), token-gated like every write. A null
+  // name is the raw-500 shape the real handler produces, faithfully.
+  app.post('/api/roster', requireAuth, (req, res) => {
+    const m = req.body || {};
+    if (m.name == null || m.name === '') {
+      return res.status(500).json({ error: 'null value in column "name" of relation "roster" violates not-null constraint' });
+    }
+    const cur = state.roster.find((r) => r.name === m.name);
+    const row = {
+      id: cur ? cur.id : id(),
+      name: m.name,
+      color: m.color || '#4472C4',
+      qualBlaze: !!m.qualBlaze, qualMRocket: !!m.qualMRocket,
+      initials: m.initials || '', sortOrder: m.sortOrder || 0, email: m.email || ''
+    };
+    if (cur) Object.assign(cur, row); else state.roster.push(row);
+    res.json(row);
+  });
 
   // ── the three child collections (:2824 / :2754 / :2694) ───────────────────
   // One factory: list (optionally ?eventId=), create, delete — identical

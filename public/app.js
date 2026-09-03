@@ -194,6 +194,28 @@ async function renderView(view, arg) {
     s.innerHTML = viewTeam(await api.listShows());
     crumb([{ t: 'Team' }]);
 
+  } else if (view === 'staffing') {
+    /* the staffing-link panel — Team's sub-view (Tom, 2026-09-03: "a way to
+       link techs / single source of truth"). Data first, so the pure view
+       renders from one object: the users, the staffing roster (or the honest
+       reason there is none), and the free-text crew names a push can only
+       refuse. The failed-roster path is a REAL state, not an error page —
+       the crew section is local data and still renders. */
+    if (CURRENT_USER.role === 'admin') await api.listUsers({ all: true });
+    else await api.listUsers();
+    var slRoster = null, slRosterError = null, slCrewNames = [];
+    if (CURRENT_USER.role === 'admin' || CURRENT_USER.role === 'manager') {
+      try { slRoster = await api.listStaffingRoster(); }
+      catch (eSlR) { slRosterError = String(eSlR && eSlR.message || eSlR); }
+      try { slCrewNames = await api.listCrewNames(); }
+      catch (eSlC) { slCrewNames = []; }
+    }
+    SL.buckets = api.staffingLinkBuckets(activeUsers(), slRoster || [], slCrewNames);
+    SL.data = { roster: slRoster, error: slRosterError, crew: slCrewNames };
+    s.innerHTML = viewStaffingLink(SL.buckets, SL.data);
+    crumb([{ t: 'Team', act: act('goTeam') }, { t: 'Staffing link' }]);
+    navOn('team');
+
   } else if (view === 'contacts') {
     /* the rolodex. Active/Archived and the kind filter are SERVER questions
        (the archive convention's query params); the text box narrows what came
@@ -3626,9 +3648,17 @@ async function copyTempPwAct() {
 }
 
 /* ---- add ---------------------------------------------------------------- */
-function openAddPerson() {
+/* `prefill` is the staffing-link panel's way in: { name, back } opens the SAME
+   dialog with the staffing (or crew) spelling already in the name field — one
+   creation path, not two. The spelling is remembered so that if the admin
+   renames the person before saving, it survives as their staffing link. */
+var ADD_PERSON_CTX = null;
+function openAddPerson(prefill) {
   if (CURRENT_USER.role !== 'admin') { toast('Admins add people', 'Ask Tom, Tony or Jim'); return; }
   PENDING_USER = null;
+  ADD_PERSON_CTX = prefill && prefill.name
+    ? { name: String(prefill.name).trim(), back: prefill.back || null }
+    : null;
   openModal('Add a person',
     '<div class="hint" style="margin:0 0 12px">' + icon('users') + '<span>Creates the account and mints a ' +
     '<b>temporary password</b>, shown once on the next screen. Read it out; they are asked to replace it the ' +
@@ -3641,7 +3671,7 @@ function openAddPerson() {
     '2–32 characters: a letter, then letters, digits, _ . or - · it cannot be changed later, because every ' +
     'step, note and activity line points at it.' +
     '</span></label></div>' +
-    personFields({ role: 'tech' }) +
+    personFields({ role: 'tech', name: ADD_PERSON_CTX ? ADD_PERSON_CTX.name : '' }) +
     '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:14px">' +
     '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
     '<button class="btn primary" ' + act('userAddCommit') + '>' + icon('plus') + 'Create account</button></div>');
@@ -3652,14 +3682,24 @@ async function commitAddPerson() {
   if (!username) { toast('A username is required', 'It is what they type to sign in'); return; }
   var body = personFromForm();
   body.username = username;
+  /* Opened from the staffing-link panel: the roster/crew spelling arrived as
+     the prefilled name. If the admin renamed them here, that spelling must
+     survive as the LINK — same rule as the profile field (blank = same as
+     their name), applied only when the two genuinely differ. */
+  if (ADD_PERSON_CTX && !body.staffing_name &&
+      body.name.toLowerCase().trim() !== ADD_PERSON_CTX.name.toLowerCase().trim()) {
+    body.staffing_name = ADD_PERSON_CTX.name;
+  }
+  var back = ADD_PERSON_CTX && ADD_PERSON_CTX.back;
   var r;
   try { r = await api.createUser(body); }
   catch (e) { toast('Not created', String((e && e.message) || e), 'err'); return; }
+  ADD_PERSON_CTX = null;
   var who = (r.user && (r.user.name || r.user.username)) || username;
   revealTempPassword('Account created · ' + who, username, r.temp_password,
     '<b>' + esc(who) + '</b> can sign in now with this temporary password. It is the only time it is shown.');
   await hydrateSession();
-  return render('team');
+  return render(back === 'staffing' ? 'staffing' : 'team');
 }
 
 /* ---- edit --------------------------------------------------------------- */
@@ -3754,6 +3794,85 @@ async function commitSetActive(userId, on) {
        : ((u && u.name) || 'They') + ' can no longer sign in — nothing was deleted');
   await hydrateSession();
   return render('team');
+}
+
+/* ============================================================================
+   STAFFING LINK — the panel's write half  (Tom, 2026-09-03: "i need some sort
+   of way to link techs. or a single source of truth or something.")
+   ----------------------------------------------------------------------------
+   Showrunner is the source of truth for people. SL holds what the last render
+   computed (api.staffingLinkBuckets over live data), so a click can find the
+   crew-row ids behind a name group without re-deriving them from the DOM.
+   Every write lands on an existing, gated route: users.staffing_name via the
+   user-update route, roster creation via the admin proxy, crew claims via
+   PUT /api/crew/:id — nothing here has a private door.
+   ========================================================================== */
+var SL = { buckets: { linked: [], here: [], there: [], crew: [] }, data: { roster: null, error: null, crew: [] } };
+
+/* "link to…" — writes users.staffing_name with the picked roster spelling */
+async function slLinkAct(userId) {
+  var u = USERS_BY_ID[Number(userId)];
+  var sel = document.getElementById('slPick' + Number(userId));
+  var name = sel ? String(sel.value || '').trim() : '';
+  if (!name) { toast('Pick a staffing name first', 'The dropdown lists roster names nobody here is linked to'); return; }
+  try { await api.updateUser(userId, { staffing_name: name }); }
+  catch (e) { toast('Not linked', String(e && e.message || e), 'err'); return; }
+  toast('Linked', ((u && (u.name || u.username)) || 'They') + ' now pushes as “' + name + '”');
+  return render('staffing');
+}
+
+/* "Add to staffing roster" — a write into the OTHER app, so it confirms
+   first, naming the target and exactly what goes over. */
+function openSlAddRoster(userId) {
+  var u = USERS_BY_ID[Number(userId)];
+  if (!u) return;
+  var name = String(u.staffing_name || u.name || u.username || '').trim();
+  openModal('Add to the staffing roster · ' + (u.name || u.username),
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px;line-height:1.6">This creates a roster ' +
+    'entry in the <b>e360 staffing app</b>: name <b>' + esc(name) + '</b>, their initials' +
+    (u.email ? ' and email <b>' + esc(u.email) + '</b> — the address staffing emails assignments and itineraries to.'
+             : '. <b>They have no email address here</b>, so the roster row goes over without one and ' +
+               'staffing cannot email them assignments — worth adding to their profile first.') +
+    '</p>' +
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px;line-height:1.6">The name is the one ' +
+    'Showrunner pushes for them, so the new row matches on the next push by construction. Nothing else ' +
+    'over there is touched.</p>' +
+    '<div style="display:flex;justify-content:flex-end;gap:9px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('slAddRosterGo', u.id) + '>' + icon('plus') + 'Add to staffing roster</button></div>');
+}
+async function slAddRosterGoAct(userId) {
+  var r;
+  try { r = await api.addToStaffingRoster(userId); }
+  catch (e) { toast('Not added to the staffing roster', String(e && e.message || e), 'err'); return; }
+  closeM();
+  toast('On the staffing roster', '“' + ((r && r.created && r.created.name) || 'They') + '” now exists over there' +
+    (api.isDemo() ? ' — demo, this tab only' : ''));
+  return render('staffing');
+}
+
+/* "this is actually…" — rewrites every crew line in the group to the picked
+   user (username set, free-text name cleared), through the normal crew route
+   with its gates and its you-are-on-this-show notification. */
+async function slCrewFixAct(idx) {
+  var g = SL.buckets && SL.buckets.crew && SL.buckets.crew[Number(idx)];
+  if (!g) { toast('That list moved', 'Reopen the panel and try again', 'err'); return; }
+  var sel = document.getElementById('slCrewPick' + Number(idx));
+  var username = sel ? String(sel.value || '').trim() : '';
+  if (!username) { toast('Pick who this actually is', 'The dropdown lists everyone on the roster'); return; }
+  var u = ROSTER[username];
+  var failed = 0;
+  for (var i = 0; i < g.crew.length; i++) {
+    try { await api.updateCrew(g.crew[i].id, { username: username, name: null }); }
+    catch (e) { failed += 1; }
+  }
+  if (failed) {
+    toast('Partly fixed', failed + ' of ' + g.crew.length + ' crew lines refused — reload and retry', 'err');
+  } else {
+    toast('Crew lines claimed', '“' + g.name + '” is now ' + ((u && u.name) || username) + ' on ' +
+      g.crew.length + ' crew line' + (g.crew.length === 1 ? '' : 's'));
+  }
+  return render('staffing');
 }
 
 /* ============================================================================
@@ -5094,7 +5213,14 @@ async function openPushConfirm(show) {
         '<b>' + probs.length + ' problem' + (probs.length === 1 ? '' : 's') + ' — the push will refuse</b><p>' +
         probs.map(function (x) {
           return esc(typeof x === 'string' ? x : (x.message || x.detail || JSON.stringify(x)));
-        }).join('<br>') + '</p></div></div>') +
+        }).join('<br>') + '</p>' +
+        /* a crew-name mismatch has a whole screen for fixing it — offer the
+           door, never an auto-fix from inside a confirm dialog */
+        (probs.some(function (x) { return /crew names do not match the staffing roster/i.test(String(typeof x === 'string' ? x : (x && x.message) || '')); })
+          ? '<div style="margin-top:8px"><button class="btn sm" ' + act('openStaffingLink') + '>' +
+            icon('users') + 'Open staffing link</button></div>'
+          : '') +
+        '</div></div>') +
     '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
     '<button class="btn ghost" ' + act('closeModal') + '>Close</button>' +
     (clean ? '<button class="btn primary" ' + act('pushLive', showId) + '>' + icon('send') +
@@ -6307,6 +6433,14 @@ var ACTIONS = {
   userDeactivateCommit: function (t, id) { return commitSetActive(id, false); },
   userActivate:         function (t, id) { return commitSetActive(id, true); },
   copyTempPw:           function () { return copyTempPwAct(); },
+  /* the staffing-link panel (Tom, 2026-09-03: "a way to link techs") */
+  goTeam:               function () { return render('team'); },
+  openStaffingLink:     function () { closeM(); return render('staffing'); },
+  slLink:               function (t, id) { return slLinkAct(id); },
+  slAddRoster:          function (t, id) { return openSlAddRoster(id); },
+  slAddRosterGo:        function (t, id) { return slAddRosterGoAct(id); },
+  slCreateUser:         function (t, id, k) { return openAddPerson({ name: k, back: 'staffing' }); },
+  slCrewFix:            function (t, id) { return slCrewFixAct(id); },
   /* the contact rolodex (Tom, 2026-08-27) — view, card, links, picker */
   goContacts:    function () { return render('contacts'); },
   ctMode:        function (t, id, k) { CONTACTS_UI.mode = k; return render('contacts'); },

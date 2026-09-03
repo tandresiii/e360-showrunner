@@ -1563,6 +1563,20 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('...and does NOT ask for the retired SCHEDULER_API_TOKEN',
      !/SCHEDULER_API_TOKEN=/.test(JSON.stringify(live.body || {})), live.body);
 
+  // ── the staffing-link panel's proxy, in the UNCONFIGURED world ────────────
+  // Same honesty contract as /scheduler/events: a deliberate "not configured
+  // yet" answers 501 naming the env var, never a stack trace.
+  const roster501 = await GET('/api/scheduler/roster', { token: A });
+  ok('GET /api/scheduler/roster is the honest 501 while unconfigured, naming the env var',
+     roster501.status === 501 && /SCHEDULER_BASE_URL/.test(roster501.body.error || ''), roster501.body);
+  const rosterAdd501 = await POST('/api/scheduler/roster', { user_id: 1 }, { token: A });
+  ok('POST /api/scheduler/roster refuses honestly while unconfigured too',
+     rosterAdd501.status === 501, rosterAdd501.body);
+  // /api/crew-names is LOCAL data — it works with no scheduler at all
+  const cn0 = await GET('/api/crew-names', { token: A });
+  ok('GET /api/crew-names answers 200 with the scheduler unconfigured (local data)',
+     cn0.status === 200 && Array.isArray(cn0.body), cn0.status);
+
   // travel read-back must never break the call sheet when staffing is unreachable
   const tv = await GET(`/api/shows/${S}/travel`, { token: A });
   ok('GET /shows/:id/travel answers 200 with the scheduler unconfigured',
@@ -1794,6 +1808,94 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('the unlink activity line says nothing was deleted remotely',
      actUnlink.body.length === 1 && /nothing was deleted/.test(actUnlink.body[0].detail || ''),
      actUnlink.body);
+
+  // ── 12c. THE STAFFING LINK PANEL's server half (Tom, 2026-09-03) ──────────
+  // "i need some sort of way to link techs. or a single source of truth or
+  // something." Showrunner is the source of truth for people: the roster
+  // proxy (manager floor, trimmed), the create-over-there proxy (admin floor,
+  // duplicate-refusing, activity-logged) and the unmatched-crew list.
+  section('12c. staffing link — roster proxy, create-over-there, crew names');
+
+  const srRoster = await GET('/api/scheduler/roster', { token: A });
+  ok('GET /api/scheduler/roster proxies the staffing roster', srRoster.status === 200
+     && Array.isArray(srRoster.body) && srRoster.body.some((r) => r.name === 'Dana Fields'),
+     srRoster.body);
+  ok('...trimmed to panel fields — id/name/email/initials, no colour or quals',
+     srRoster.body.every((r) =>
+       Object.keys(r).sort().join(',') === 'email,id,initials,name'),
+     Object.keys(srRoster.body[0] || {}));
+  ok('...manager floor: a manager reads it',
+     (await GET('/api/scheduler/roster', { token: MGRT })).status === 200);
+  ok('...manager floor: a pm is 403 — people admin sits above the push',
+     (await GET('/api/scheduler/roster', { token: PMT })).status === 403);
+  ok('...manager floor: a tech is 403',
+     (await GET('/api/scheduler/roster', { token: TECHT })).status === 403);
+
+  // create over there — from a real Showrunner user, admin only
+  const dvl = await POST('/api/users', { username: TAG + 'dvl', password: 'smokepass123',
+    role: 'tech', name: TAG + ' Devin Vlassis', initials: 'DV',
+    email: TAG + 'dvl@example.com' }, { token: A });
+  ok('fixture: the unmatched Showrunner user exists', dvl.status === 200, dvl.body);
+  const rosterBefore = fake.state.roster.length;
+  const addMgr = await POST('/api/scheduler/roster', { user_id: dvl.body.id }, { token: MGRT });
+  ok('POST /api/scheduler/roster is ADMIN floor — a manager is 403 (it writes into the other app)',
+     addMgr.status === 403 && fake.state.roster.length === rosterBefore, addMgr.status);
+  const addOk = await POST('/api/scheduler/roster', { user_id: dvl.body.id }, { token: A });
+  ok('an admin puts the user on the staffing roster', addOk.status === 200
+     && addOk.body.ok === true && addOk.body.created.name === TAG + ' Devin Vlassis', addOk.body);
+  const fakeRow = fake.state.roster.find((r) => r.name === TAG + ' Devin Vlassis');
+  ok('...and the row landed in the staffing app with name + initials + EMAIL (their mailer reads it)',
+     !!fakeRow && fakeRow.initials === 'DV' && fakeRow.email === TAG + 'dvl@example.com',
+     fakeRow);
+  ok('...appended, not shoved to the top: sortOrder is the roster length it joined',
+     fakeRow && fakeRow.sortOrder === rosterBefore, fakeRow && fakeRow.sortOrder);
+  const addDup = await POST('/api/scheduler/roster', { user_id: dvl.body.id }, { token: A });
+  ok('adding the same person again is a 409, not a silent upsert of the row over there',
+     addDup.status === 409 && /already on the staffing roster/.test(addDup.body.error || ''),
+     addDup.body);
+  ok('...and the duplicate refusal wrote nothing', fake.state.roster.length === rosterBefore + 1,
+     fake.state.roster.length);
+  const addNone = await POST('/api/scheduler/roster', {}, { token: A });
+  ok('a missing user_id is a 400 that names the field',
+     addNone.status === 400 && /user_id/.test(addNone.body.error || ''), addNone.body);
+  const addGhost = await POST('/api/scheduler/roster', { user_id: 99999999 }, { token: A });
+  ok('an unknown user_id is a 404', addGhost.status === 404, addGhost.body);
+  const actRoster = await GET(`/api/activity?action=scheduler.roster_add`, { token: A });
+  ok('the roster add is on the activity trail, naming both spellings of the act',
+     actRoster.status === 200 && actRoster.body.some((a) =>
+       /added to the staffing roster/.test(a.detail || '') && a.detail.includes(TAG + 'dvl')),
+     actRoster.body && actRoster.body.slice(0, 2));
+  ok('the roster GET reflects the new row (the panel re-renders from this)',
+     (await GET('/api/scheduler/roster', { token: A })).body
+       .some((r) => r.name === TAG + ' Devin Vlassis'));
+
+  // the unmatched-crew list — Devin's exact case, grouped, non-archived only
+  const cnFloorPm = await GET('/api/crew-names', { token: PMT });
+  ok('GET /api/crew-names is manager floor too (pm is 403)', cnFloorPm.status === 403, cnFloorPm.status);
+  await POST(`/api/shows/${shB.id}/crew`, { name: 'Devin Vlassis', role_on_site: 'LED tech' },
+    { token: A });
+  await POST(`/api/shows/${shB.id}/crew`, { username: pmUser, role_on_site: 'PM' }, { token: A });
+  const cn1 = await GET('/api/crew-names', { token: MGRT });
+  const cnDevin = (cn1.body || []).find((g) => g.name === 'Devin Vlassis');
+  ok('a free-text crew name appears, grouped, with its crew-row ids and show',
+     cn1.status === 200 && !!cnDevin && cnDevin.crew.length === 1
+     && cnDevin.crew[0].show_name === TAG + ' v2 link', cn1.body);
+  ok('a username-linked crew line is NOT in the list — it already names a person',
+     !(cn1.body || []).some((g) => g.name.toLowerCase() === pmUser
+                                || g.name === (TAG + 'pm').toUpperCase()), cn1.body);
+  // Dana Fields is free text on shA, shB AND the section-12 show — one group
+  const danaBefore = (cn1.body || []).find((g) => g.name === 'Dana Fields');
+  const danaShows = (danaBefore ? danaBefore.crew : []).map((c) => c.show_id);
+  ok('the same spelling groups ACROSS shows (Dana Fields rides one group, many shows)',
+     !!danaBefore && danaShows.includes(shA.id) && danaShows.includes(shB.id), danaBefore);
+  const archA = await POST(`/api/shows/${shA.id}/archive`, {}, { token: A });
+  ok('fixture: shA archives', archA.status === 200, archA.body);
+  const cn2 = await GET('/api/crew-names', { token: A });
+  const danaAfter = (cn2.body || []).find((g) => g.name === 'Dana Fields');
+  const danaShows2 = (danaAfter ? danaAfter.crew : []).map((c) => c.show_id);
+  ok('an archived show\'s crew names drop out of the working set',
+     !!danaAfter && !danaShows2.includes(shA.id) && danaShows2.includes(shB.id), danaAfter);
+  // this section's user goes with the run's cleanup (username LIKE TAG%)
 
   // ── restore the unconfigured world and re-prove the honest refusals ───────
   delete process.env.SCHEDULER_BASE_URL;

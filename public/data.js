@@ -2905,6 +2905,58 @@ function demoSchedulerPush(s, opts) {
   };
 }
 
+/* ---- staffing-link twin (Tom, 2026-09-03: "a way to link techs") -----------
+   The staffing app's ROSTER, as GET /api/scheduler/roster trims it, seeded so
+   file:// renders every state the panel has: two exact matches (one deliberately
+   case/whitespace-mangled — staffing matches name.toLowerCase().trim(), and so
+   does the panel), two profile links (Devin/Aaron already carry staffing_name),
+   one first-name-only row with ONE candidate (Brendon → sure suggestion), one
+   with TWO (Jim → ambiguous, nothing pre-picked), and two people who exist only
+   over there. Ids start at 601 — the same nobody-confuses-these convention as
+   DEMO_SCHED_EVENTS. */
+var DEMO_STAFFING_ROSTER = [
+  { id: 601, name: 'Tom Andres',     email: 'tom@e360sport.com',   initials: 'TA' },
+  { id: 602, name: ' tony vigon ',   email: 'tony@e360sport.com',  initials: 'TV' },
+  { id: 603, name: 'Devin Vargas',   email: 'devin@e360sport.com', initials: 'DV' },
+  { id: 604, name: 'Aaron Ramos',    email: 'aaron@e360sport.com', initials: 'AR' },
+  { id: 605, name: 'Brendon',        email: '',                    initials: 'B'  },
+  { id: 606, name: 'Jim',            email: '',                    initials: 'J'  },
+  { id: 607, name: 'Dana Fields',    email: 'dana@e360sport.com',  initials: 'DF' },
+  { id: 608, name: 'Marcus Webb',    email: '',                    initials: 'MW' }
+];
+var _demoStaffingSeq = 650;        /* ids for rows a demo "add" creates */
+function demoAddToStaffingRoster(userId) {
+  if (CURRENT_USER.role !== 'admin') throw new Error('Adding to the staffing roster is an admin act');
+  var u = USERS_BY_ID[Number(userId)];
+  if (!u) throw new Error('No such person');
+  var name = String(u.staffing_name || u.name || u.username || '').trim();
+  if (!name) throw new Error('User ' + u.username + ' has no name to put on a roster');
+  var k = name.toLowerCase();
+  if (DEMO_STAFFING_ROSTER.some(function (r) { return String(r.name).toLowerCase().trim() === k; })) {
+    throw new Error('"' + name + '" is already on the staffing roster — link them instead of adding a duplicate.');
+  }
+  var row = { id: ++_demoStaffingSeq, name: name, email: u.email || '', initials: u.initials || '' };
+  DEMO_STAFFING_ROSTER.push(row);
+  return { ok: true, created: row, demo: true };
+}
+/* GET /api/crew-names, from the local store: free-text crew lines on
+   non-archived shows, grouped by spelling. Rey Fuentes (the Marlins local
+   hire) is the seeded case — he names no user and no staffing roster row. */
+function demoCrewNames() {
+  var groups = [], byKey = {};
+  activeShows().forEach(function (s) {
+    (s.crew_assignments || []).forEach(function (c) {
+      if (c.username || !c.name || !String(c.name).trim()) return;
+      var key = String(c.name).toLowerCase().trim();
+      var g = byKey[key];
+      if (!g) { g = { name: String(c.name).trim(), crew: [] }; byKey[key] = g; groups.push(g); }
+      g.crew.push({ id: c.id, show_id: s.id, show_name: s.name });
+    });
+  });
+  groups.sort(function (a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; });
+  return groups;
+}
+
 /* ---- seed: header fields + schedule + crew for the three near-term shows --
    Everything else renders the empty state ("no schedule yet") on purpose. */
 (function seedSchedule() {

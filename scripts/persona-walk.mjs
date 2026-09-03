@@ -2066,6 +2066,127 @@ async function main() {
   const wCleanup = await DEL(`/api/files/${wGhost.body.id}`, { token: T.brenden });
   ok('…the probe row cleans up', wCleanup.status === 200, wCleanup.body);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('40 · the staffing link — one roster, two apps  (Tom, 2026-09-03)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Live, the night the Big Ten show hit staffing event #118: pre-flight
+  // refused on a crew name ("Devin Vlassis") and every remedy in the dialog
+  // was manual detective work. Tom: "i need some sort of way to link techs.
+  // or a single source of truth or something." The decision: SHOWRUNNER IS
+  // THE SOURCE OF TRUTH FOR PEOPLE — the panel links spellings
+  // (users.staffing_name), adds missing people to the staffing roster, and
+  // claims free-text crew names. Every affordance below must be reachable,
+  // every server door honest while unconfigured (this box's exact state), and
+  // the MATCHER is executed — not scanned — through the browser-half vm.
+  reach('Open the staffing link panel', {
+    seam: ['listStaffingRoster', 'listCrewNames', 'staffingLinkBuckets'],
+    action: ['openStaffingLink', 'goTeam'] });
+  reach('Link a spelling (sets users.staffing_name)', { seam: 'updateUser', action: 'slLink' });
+  reach('Add a person to the staffing roster', {
+    seam: 'addToStaffingRoster', action: ['slAddRoster', 'slAddRosterGo'] });
+  reach('Create a Showrunner user from a staffing row', { action: 'slCreateUser' });
+  reach('Claim a crew name ("this is actually…")', { seam: 'updateCrew', action: 'slCrewFix' });
+  ok('the push-confirm problems list carries the door to the panel',
+     /crew names do not match the staffing roster/.test(APP_JS) &&
+     /act\('openStaffingLink'\)/.test(APP_JS));
+  ok('create-from-staffing reuses the ONE add-person dialog, prefilled — no second creation path',
+     /openAddPerson\(\{ name: k, back: 'staffing' \}\)/.test(APP_JS) &&
+     /ADD_PERSON_CTX/.test(APP_JS));
+  ok('…and a rename before saving keeps the staffing spelling as the LINK',
+     /body\.staffing_name = ADD_PERSON_CTX\.name/.test(APP_JS));
+  ok('the add-to-roster confirm names the TARGET APP before anything crosses the wire',
+     /Add to the staffing roster/.test(APP_JS) && /e360 staffing app/.test(APP_JS));
+  ok('the panel says out loud that staffing names are FROZEN — no rename affordance exists',
+     /Staffing names are frozen/.test(SRC['views-global.js']) &&
+     !/slRename|renameRoster/.test(SRC['views-global.js']));
+  ok('the exact-match state says a link is NOT needed, in words',
+     /same name — nothing to set/.test(SRC['views-global.js']));
+
+  // ── the honest doors, on this unconfigured box ────────────────────────────
+  const slRoster501 = await GET('/api/scheduler/roster', { token: T.tom });
+  ok('GET /api/scheduler/roster is the honest 501 while unconfigured, naming the env var',
+     slRoster501.status === 501 && /SCHEDULER_BASE_URL/.test(slRoster501.body?.error || ''),
+     slRoster501.body);
+  ok('POST /api/scheduler/roster refuses honestly too',
+     (await POST('/api/scheduler/roster', { user_id: 1 }, { token: T.tom })).status === 501);
+  ok('…but a TECH is refused by RANK before configuration is even consulted (403, manager floor)',
+     (await GET('/api/scheduler/roster', { token: T.omar })).status === 403);
+  ok('…and /api/crew-names holds the same floor (tech 403, pm 403 — people admin sits above the push)',
+     (await GET('/api/crew-names', { token: T.omar })).status === 403 &&
+     (await GET('/api/crew-names', { token: T.pat })).status === 403);
+
+  // ── Devin's case, end to end: free-text crew name → listed → claimed ──────
+  const slGhostCrew = await POST(`/api/shows/${SHOW}/crew`,
+    { name: 'Devin Vlassis', role_on_site: 'LED tech' }, { token: T.brenden });
+  ok('a free-text crew line goes on the show (the state the panel exists for)',
+     slGhostCrew.status === 200 && slGhostCrew.body.username == null, slGhostCrew.body);
+  const slNames = await GET('/api/crew-names', { token: T.morgan });
+  const slDevin = (slNames.body || []).find((g) => g.name === 'Devin Vlassis');
+  ok('GET /api/crew-names lists it, grouped, with the crew-row id and the show',
+     slNames.status === 200 && !!slDevin && slDevin.crew.length === 1
+     && slDevin.crew[0].id === slGhostCrew.body.id, slNames.body);
+  const slClaim = await PUT(`/api/crew/${slGhostCrew.body.id}`,
+    { username: 'omar', name: null }, { token: T.tom });
+  ok('the claim rewrites the crew line to the real person, through the normal crew route',
+     slClaim.status === 200 && slClaim.body.username === 'omar', slClaim.body);
+  const slNames2 = await GET('/api/crew-names', { token: T.tom });
+  ok('…and the name leaves the unmatched list — it names somebody now',
+     !(slNames2.body || []).some((g) => g.name === 'Devin Vlassis'), slNames2.body);
+
+  // ── THE MATCHER, EXECUTED — the REAL api.js in the browser-half vm ────────
+  // Fixtures shaped like Tom's actual roster: staffing rows that are first
+  // names ("Devin"), case/whitespace-mangled full names, and a profile link.
+  // Break staffingNorm's normalization and the linked bucket loses Marcus;
+  // drop the ambiguity guard and the two Devins stop being a QUESTION.
+  const SLB = tab.api.staffingLinkBuckets(
+    [
+      { id: 1, name: 'Devin Vlassis', username: 'dvlassis' },
+      { id: 2, name: 'Devin Ortega', username: 'dortega' },
+      { id: 3, name: 'Marcus Cole', username: 'mcole' },
+      { id: 4, name: 'Bob Sawyer', username: 'bob', staffing_name: 'Robert Sawyer' },
+      { id: 5, name: 'Priya Nair', username: 'pnair' }
+    ],
+    [
+      { id: 11, name: '  MARCUS COLE ' },
+      { id: 12, name: 'Robert Sawyer' },
+      { id: 13, name: 'Devin' },
+      { id: 14, name: 'Priya' },
+      { id: 15, name: 'Dana Fields' }
+    ],
+    [
+      { name: 'Priya Nair', crew: [{ id: 91 }] },
+      { name: 'Robert Sawyer', crew: [{ id: 92 }] },
+      { name: 'Total Stranger', crew: [{ id: 93 }] }
+    ]);
+  const slLinkedOf = (uname) => SLB.linked.find((l) => l.user.username === uname);
+  ok('EXACT TIER · "  MARCUS COLE " links to Marcus Cole — staffing\'s own lowercase+trim join',
+     !!slLinkedOf('mcole') && slLinkedOf('mcole').row.id === 11 && slLinkedOf('mcole').via === 'name',
+     SLB.linked.map((l) => l.user.username));
+  ok('EXACT TIER · …and an exact name match reports exact:true — no link needs setting',
+     !!slLinkedOf('mcole') && slLinkedOf('mcole').exact === true);
+  ok('LINK TIER · Bob Sawyer resolves through staffing_name to "Robert Sawyer", exact:false',
+     !!slLinkedOf('bob') && slLinkedOf('bob').row.id === 12
+     && slLinkedOf('bob').via === 'staffing_name' && slLinkedOf('bob').exact === false);
+  const slHereOf = (uname) => SLB.here.find((h) => h.user.username === uname);
+  ok('SUGGESTION TIER · first-name-only "Priya" suggests Priya Nair as SURE (one candidate)',
+     !!slHereOf('pnair') && slHereOf('pnair').suggestions.some((s) => s.row.id === 14 && s.sure === true),
+     slHereOf('pnair'));
+  ok('AMBIGUITY GUARD · "Devin" reaches BOTH Devins and neither is "probably" — ask, don\'t accuse',
+     ['dvlassis', 'dortega'].every((un) => {
+       const h = slHereOf(un);
+       const s = h && h.suggestions.find((x) => x.row.id === 13);
+       return !!s && s.sure === false && s.alsoMatches.length === 1;
+     }), SLB.here.map((h) => ({ u: h.user.username, s: h.suggestions })));
+  ok('AMBIGUITY GUARD · …and each ambiguous suggestion NAMES the other candidate',
+     (((slHereOf('dvlassis') || {}).suggestions || [{}])[0].alsoMatches || [])[0] === 'Devin Ortega' &&
+     (((slHereOf('dortega') || {}).suggestions || [{}])[0].alsoMatches || [])[0] === 'Devin Vlassis');
+  ok('THERE bucket · Dana Fields exists only in staffing (and suggestions claim nothing)',
+     SLB.there.some((r) => r.id === 15) && SLB.there.some((r) => r.id === 13)
+     && SLB.there.some((r) => r.id === 14), SLB.there.map((r) => r.name));
+  ok('CREW bucket · a name matching a USER or a ROSTER row is not "unmatched" — only the stranger is',
+     SLB.crew.length === 1 && SLB.crew[0].name === 'Total Stranger',
+     SLB.crew.map((g) => g.name));
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

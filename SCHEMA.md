@@ -904,6 +904,10 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | `listSchedulerEvents()` | `GET /api/scheduler/events` |
 | `linkSchedulerEvent(sid, eventId)` | `POST /api/shows/:id/scheduler-link` |
 | `unlinkSchedulerEvent(sid)` | `DELETE /api/shows/:id/scheduler-link` |
+| `listStaffingRoster()` | `GET /api/scheduler/roster` |
+| `addToStaffingRoster(userId)` | `POST /api/scheduler/roster` |
+| `listCrewNames()` | `GET /api/crew-names` |
+| `staffingLinkBuckets(users, roster, crewGroups)` | *pure, client-side* — the staffing-link matcher (no endpoint) |
 | `listBudgetLines(jid)` | `GET /api/jobs/:id/budget` |
 | `listExpenses(sid)` / `addExpense` | `GET /api/expenses?show_id=` / `POST /api/expenses` |
 | `getJobFinance` / `listFinanceFeed` / `listExceptions` / `getFinanceStats` / `getFinanceOverview` | `GET /api/jobs/:id/finance` · `/api/finance/feed` · `/exceptions` · `/stats` · `/overview` |
@@ -1232,6 +1236,41 @@ Both match on the **same name the push wrote the row under** —
 crew row's own name, else the linked user's. It is the *same expression* the
 builder used, deliberately, so a leg can never be filed under one spelling and
 looked up under another.
+
+### The staffing link (Tom, 2026-09-03 — "a way to link techs / single source of truth")
+
+Showrunner is the **source of truth for people**; the panel (Team → Staffing
+link) makes the staffing roster agree. Server half:
+
+- **`GET /api/scheduler/roster`** — the staffing roster proxied and trimmed to
+  `{id, name, email, initials}`. **Manager floor** (people admin sits above the
+  push's pm floor); the honest 501 while unconfigured.
+- **`POST /api/scheduler/roster`** `{user_id}` — puts a Showrunner user ON the
+  staffing roster through staffing's own add-member door
+  (`POST /api/roster`, an upsert on the unique name). **Admin floor.** Sends
+  the SAME name the push resolves (`staffingNameFor`: staffing_name → name →
+  username) plus initials and **email** (staffing's itinerary mailer reads
+  it), appended by `sortOrder`. A name already over there is a **409**, never a
+  silent upsert; the add is an activity row (`scheduler.roster_add`).
+  **No rename proxy exists, on purpose**: staffing joins `events.staff[]`,
+  travel keys and hotel occupants to the roster **by name string**
+  (`rosterMap[name.toLowerCase().trim()]`), so renaming a row there would
+  orphan its own history. The bridge for a spelling difference is
+  `users.staffing_name`, set from the panel via the normal user-update route.
+- **`GET /api/crew-names`** — free-text crew lines (`username IS NULL`) on
+  **non-archived** shows, grouped by lowercase+trim spelling, each group
+  carrying its crew-row ids and shows. Manager floor. The claim
+  ("this is actually…") goes through `PUT /api/crew/:id`
+  `{username, name:null}` — normal gates and crew notifications apply.
+
+The **matcher** is client-side and pure (`api.staffingLinkBuckets`), executed
+by the walk's browser-half vm: exact tier on `toLowerCase().trim()`
+(byte-for-byte staffing's own join), a **suggestion tier** for first-name-only
+roster rows (first-token or prefix match; `sure` only when exactly ONE user
+answers to the name — two Devins are a question, never a pre-select), and the
+crew bucket (names matching neither a user nor a roster row). Normalization,
+the ambiguity guard and the roster-proxy floor are **mutation-tested**
+(walk §40, smoke §12c).
 
 ---
 

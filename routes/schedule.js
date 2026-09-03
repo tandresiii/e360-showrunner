@@ -800,6 +800,34 @@ router.delete('/crew/:id', pmPlus, asyncH(async (req, res) => {
   res.json({ ok: true, show_id: existing.show_id, notified });
 }));
 
+// ── THE UNMATCHED-CREW LIST (staffing-link panel, Tom 2026-09-03) ───────────
+// Devin's exact case: a crew line typed as FREE TEXT ("Devin Vlassis") that
+// names no Showrunner user, so the push can only refuse it. This is the
+// working set of such names — every free-text crew line on a NON-ARCHIVED
+// show, grouped by spelling, carrying the row ids a reassignment needs.
+// Whether a name also misses the STAFFING roster is the panel's question (it
+// holds both lists and one matcher); this route owns only the local half.
+// Manager floor, same as the panel's read half; the reassignment itself goes
+// through PUT /api/crew/:id above, gates and notifications included.
+router.get('/crew-names', requireRole('manager'), asyncH(async (req, res) => {
+  const r = await pool.query(
+    `SELECT ca.id, ca.name, ca.show_id, s.name AS show_name
+       FROM crew_assignments ca
+       JOIN shows s ON s.id = ca.show_id
+      WHERE ca.username IS NULL AND COALESCE(TRIM(ca.name), '') <> ''
+        AND s.archived_at IS NULL
+      ORDER BY LOWER(TRIM(ca.name)), ca.id`);
+  const groups = [];
+  const byKey = new Map();
+  for (const row of r.rows) {
+    const key = String(row.name).toLowerCase().trim();
+    let g = byKey.get(key);
+    if (!g) { g = { name: String(row.name).trim(), crew: [] }; byKey.set(key, g); groups.push(g); }
+    g.crew.push({ id: row.id, show_id: row.show_id, show_name: row.show_name || '' });
+  }
+  res.json(groups);
+}));
+
 // ════════════════════════════════════════════════════════════════════════════
 // ROOMING LIST (TEAM_FEEDBACK "Rooming lists", 2026-08-27)
 // ────────────────────────────────────────────────────────────────────────────

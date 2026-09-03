@@ -1022,6 +1022,14 @@ var api = (function () {
              must_change: true, sessions_ended: false, demo: true };
   }
 
+  /* ── the staffing-link normalization ──────────────────────────────────────
+     Staffing resolves a person by name.toLowerCase().trim() — its rosterMap,
+     its events.staff[], its travel keys, its hotel occupants. This mirrors
+     that EXACTLY, and deliberately nothing fancier: a match claimed here that
+     the push cannot honour would be the panel lying about the join. Every
+     tier of api.staffingLinkBuckets() goes through this one function. */
+  function staffingNorm(s) { return String(s == null ? '' : s).toLowerCase().trim(); }
+
   /* the file → proposal hop (DEVIATION 1). The caller holds a FILE id; the
      server resolves a PROPOSAL. One extra GET, not a refactor — and free when
      the bell already told us the proposal id. */
@@ -1835,6 +1843,101 @@ var api = (function () {
         if (r && r.show) A.show(r.show);
         return r;
       });
+    },
+
+    /* ---- the staffing link panel (Tom, 2026-09-03: "i need some sort of
+       way to link techs. or a single source of truth or something.") -------
+       Showrunner is the source of truth for people; these four are the
+       panel's seam. The two reads proxy the staffing app (manager floor,
+       honest 501 unconfigured); the write is the staffing side's own
+       add-member POST driven through our admin-floor proxy; the matcher is
+       PURE and lives here so the walk executes the very code the panel
+       renders from. */
+    listStaffingRoster: function () {
+      if (!API()) return ok(DEMO_STAFFING_ROSTER.slice());
+      return SR.get('/api/scheduler/roster');
+    },
+    addToStaffingRoster: function (userId) {
+      if (!API()) return demoCall(function () { return demoAddToStaffingRoster(userId); });
+      return SR.post('/api/scheduler/roster', { user_id: Number(userId) });
+    },
+    /* free-text crew names on non-archived shows, grouped by spelling, with
+       the crew-row ids a reassignment needs */
+    listCrewNames: function () {
+      if (!API()) return ok(demoCrewNames());
+      return SR.get('/api/crew-names');
+    },
+    /* THE MATCHER — pure and synchronous. Buckets:
+         linked — users with a staffing row (via their name, or via the
+                  users.staffing_name override; `exact` means the names
+                  already agree, so NO link needs setting)
+         here   — users with no staffing match, each carrying a SUGGESTION
+                  list: a roster row equal to the first token of their name,
+                  or an unambiguous prefix of it. `sure` is true only when
+                  exactly ONE user answers to the name — two Devins mean a
+                  person picks. A suggestion never links anything by itself:
+                  ask, don't accuse.
+         there  — staffing rows matching no Showrunner user
+         crew   — the crewGroups whose name matches neither a user (name,
+                  username or staffing_name) nor a staffing row
+       Every comparison runs through staffingNorm (lowercase + trim), which
+       is byte-for-byte how the staffing app resolves people. */
+    staffingLinkBuckets: function (users, roster, crewGroups) {
+      var norm = staffingNorm;
+      var first = function (s) { return norm(s).split(/\s+/)[0] || ''; };
+      var us = (users || []).filter(function (u) { return u && u.active !== false; });
+      var rows = (roster || []).filter(function (r) { return r && norm(r.name); });
+      var claimed = {};
+      var findRow = function (key) {
+        if (!key) return null;
+        for (var i = 0; i < rows.length; i++) {
+          if (!claimed[rows[i].id] && norm(rows[i].name) === key) return rows[i];
+        }
+        return null;
+      };
+      var linked = [], here = [];
+      us.forEach(function (u) {
+        /* the explicit link outranks the name — overriding is the column's
+           entire purpose (lib/scheduler staffingNameFor, same order) */
+        var viaLink = findRow(norm(u.staffing_name));
+        var viaName = viaLink ? null : findRow(norm(u.name));
+        var hit = viaLink || viaName;
+        if (hit) {
+          claimed[hit.id] = true;
+          linked.push({ user: u, row: hit, via: viaLink ? 'staffing_name' : 'name', exact: !viaLink });
+        } else {
+          here.push({ user: u, suggestions: [] });
+        }
+      });
+      var there = rows.filter(function (r) { return !claimed[r.id]; });
+      there.forEach(function (r) {
+        var key = norm(r.name);
+        if (key.length < 2) return;         /* one letter suggests nobody */
+        var cands = here.filter(function (h) {
+          var n = norm(h.user.name || h.user.username);
+          return !!n && (first(n) === key || n.indexOf(key) === 0);
+        });
+        if (!cands.length) return;
+        cands.forEach(function (h) {
+          h.suggestions.push({
+            row: r,
+            /* the ambiguity guard: two candidates ⇒ nobody is "probably" */
+            sure: cands.length === 1,
+            alsoMatches: cands.filter(function (o) { return o !== h; })
+              .map(function (o) { return o.user.name || o.user.username; })
+          });
+        });
+      });
+      var crew = (crewGroups || []).filter(function (g) {
+        var k = norm(g && g.name);
+        if (!k) return false;
+        var isUser = us.some(function (u) {
+          return norm(u.name) === k || norm(u.username) === k || norm(u.staffing_name) === k;
+        });
+        var isRoster = rows.some(function (r2) { return norm(r2.name) === k; });
+        return !isUser && !isRoster;
+      });
+      return { linked: linked, here: here, there: there, crew: crew };
     },
 
     /* ================= FINANCE ==========================================

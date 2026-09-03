@@ -46,7 +46,8 @@ const { scopeFromDocs, scopeQuestions } = require('../lib/speccheck');
 const {
   buildSchedulerPayloads, pushShowToScheduler, schedulerConfigured,
   schedulerCredentialed, fetchRoster, validateForPush, deriveBookingCategory, mapEventType,
-  fetchSchedulerEvents, notConfigured: schedulerNotConfigured, PUSH_MODES
+  fetchSchedulerEvents, notConfigured: schedulerNotConfigured, PUSH_MODES,
+  schedulerFetch, staffingNameFor
 } = require('../lib/scheduler');
 
 const router = express.Router();
@@ -1848,6 +1849,90 @@ function schedulerUnconfigured501(res) {
 router.get('/scheduler/events', requireRole('pm'), asyncH(async (req, res) => {
   if (!schedulerCredentialed()) return schedulerUnconfigured501(res);
   res.json(await fetchSchedulerEvents());
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE STAFFING LINK PANEL — the server half  (Tom, 2026-09-03, live: "i need
+// some sort of way to link techs. or a single source of truth or something.")
+// ────────────────────────────────────────────────────────────────────────────
+// Decision made that night: SHOWRUNNER IS THE SOURCE OF TRUTH FOR PEOPLE. The
+// staffing roster gets LINKED from here (users.staffing_name, the identity
+// column lib/scheduler resolves at push time) and, where a person is missing
+// over there entirely, POPULATED from here. Two routes; the matcher and the
+// three buckets live on the client seam where the panel renders them.
+// ════════════════════════════════════════════════════════════════════════════
+
+// GET /api/scheduler/roster — the staffing roster, proxied so the browser
+// never holds staffing credentials. MANAGER floor, one step above the push's
+// pm floor: this is a people-admin surface, not a per-show act. Trimmed to
+// what linking needs, same posture as /scheduler/events above — the full row
+// carries a colour and two qualification flags nobody matching names wants.
+router.get('/scheduler/roster', requireRole('manager'), asyncH(async (req, res) => {
+  if (!schedulerCredentialed()) return schedulerUnconfigured501(res);
+  const rows = await fetchRoster();
+  res.json((Array.isArray(rows) ? rows : []).map((r) => ({
+    id: r.id,
+    name: (r && r.name) || '',
+    email: (r && r.email) || '',
+    initials: (r && r.initials) || ''
+  })));
+}));
+
+// POST /api/scheduler/roster  { user_id } — put a Showrunner user ON the
+// staffing roster. ADMIN floor: this writes into the other app.
+//
+// The staffing side supports this honestly: its own "add staff member" UI
+// calls POST /api/roster (staffing/server.js:2490) — an UPSERT on the UNIQUE
+// name carrying colour/quals/initials/sort/email. What it does NOT support is
+// RENAME: staffing joins events.staff[], travel keys and hotel occupants to
+// its roster BY NAME (rosterMap[name.toLowerCase().trim()]), so a renamed row
+// would orphan every historical event that spells the person the old way. No
+// rename affordance exists here for exactly that reason — the bridge for a
+// spelling difference is users.staffing_name, never a write over there.
+router.post('/scheduler/roster', requireRole('admin'), asyncH(async (req, res) => {
+  if (!schedulerCredentialed()) return schedulerUnconfigured501(res);
+  const userId = intOrNull(pick(req.body, 'user_id'));
+  if (!userId) throw badRequest('user_id (a Showrunner user id) is required');
+  const u = (await pool.query('SELECT * FROM users WHERE id=$1', [userId])).rows[0];
+  if (!u) throw notFound('User not found');
+  // The name that crosses the wire is the SAME one the push resolves for this
+  // person (staffing_name → name → username, lib/scheduler staffingNameFor).
+  // Creating a roster row the push would then miss would be worse than none.
+  const name = staffingNameFor(u);
+  if (!name) throw badRequest(`User ${u.username} has no name to put on a roster`);
+  // POST /api/roster upserts on name, and a silent update of a row that is
+  // already there is not what "add" means — refuse the collision with the
+  // same normalization staffing itself matches people on.
+  const existing = await fetchRoster();
+  const k = name.toLowerCase().trim();
+  if ((existing || []).some((r) => String((r && r.name) || '').toLowerCase().trim() === k)) {
+    throw conflict(`"${name}" is already on the staffing roster — link them instead of adding a duplicate.`);
+  }
+  const created = await schedulerFetch('/api/roster', {
+    method: 'POST',
+    body: JSON.stringify({
+      name,
+      initials: u.initials || '',
+      // the roster address is what staffing's itinerary mailer sends to —
+      // carry it; a person with none goes over without one, said out loud
+      // by the confirm dialog rather than silently here
+      email: u.email || '',
+      sortOrder: (existing || []).length
+    })
+  });
+  await logActivity(pool, {
+    actor: req.actor, action: 'scheduler.roster_add', accent: true,
+    detail: `${name} added to the staffing roster (from @${u.username})`
+  });
+  res.json({
+    ok: true,
+    created: {
+      id: created && created.id,
+      name: (created && created.name) || name,
+      email: (created && created.email) || '',
+      initials: (created && created.initials) || ''
+    }
+  });
 }));
 
 // POST /api/shows/:id/scheduler-link  { event_id } — bind the show to an event
