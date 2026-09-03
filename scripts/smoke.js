@@ -1799,6 +1799,11 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('D4: it reports the scheduler/flex features as OFF here',
      cfg.body.features && cfg.body.features.schedulerPush === false
      && cfg.body.features.flex === false, cfg.body.features);
+  // The flags gate live clicks, so the response must never be answered by a
+  // browser cache left over from an older deploy — the header half of the
+  // 2026-09-03 push-button fix (the async half lives in the walk's §37).
+  ok('…and is served Cache-Control: no-store, so no stale copy ever answers',
+     cfg.headers.get('cache-control') === 'no-store', cfg.headers.get('cache-control'));
 
   const { e360Doc, nsfDoc, sampleSource } = loadSpecSamples();
   console.log(`  (spec samples: ${sampleSource})`);

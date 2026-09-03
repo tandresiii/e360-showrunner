@@ -44,6 +44,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import vm from 'node:vm';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP = path.resolve(HERE, '..');
@@ -1781,6 +1782,74 @@ async function main() {
   ok('a deleted show takes its rooming list with it — zero orphans',
      (await pool.query('SELECT COUNT(*)::int AS n FROM room_assignments WHERE show_id=$1',
        [wmShow.body.id])).rows[0].n === 0);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('37 · the browser half — the REAL api.js, asked the way a CLICK asks');
+  // ══════════════════════════════════════════════════════════════════════════
+  // 2026-09-03. api.features() read `.features` off the UNAWAITED promise
+  // SR.serverConfig() returns, so in API mode the flags were always {} and the
+  // push button toasted "Scheduler not configured" against a fully configured
+  // server. Every suite stayed green: smoke drives the ROUTES, the walk drives
+  // the seam's REACHABILITY and the server — nobody ever EXECUTED the one
+  // async line that joins them for a click. "The walk only protects what it
+  // reach()es" extends to the browser half: reach() proves api.features
+  // EXISTS; only running it proves it resolves to a VALUE. So this harness
+  // loads the REAL public/api.js — the byte-for-byte file the walk already
+  // read for reach(), never a copy — into a vm context and asserts through the
+  // ASYNC public surface, against this walk's own live server.
+  //
+  // The shim is deliberately tiny — the eight globals below and nothing else.
+  // If api.js ever grows a dependency this list cannot carry, the honest move
+  // is to let this loudly break and reconsider, not to grow a fake browser.
+  const tab = (() => {
+    const store = new Map();
+    const ctx = {
+      // a browser resolves relative fetches against the page origin; the shim
+      // resolves them against this walk's server, and nowhere else.
+      fetch: (p, opts) => fetch(new URL(p, BASE), opts),
+      localStorage: {
+        getItem: (k) => (store.has(k) ? store.get(k) : null),
+        setItem: (k, v) => store.set(k, String(v)),
+        removeItem: (k) => store.delete(k)
+      },
+      location: { protocol: 'http:' },  // file:// is probe()'s demo trapdoor — not here
+      setTimeout, clearTimeout, AbortController, console
+    };
+    ctx.window = ctx;
+    vm.createContext(ctx);
+    new vm.Script(API_JS, { filename: 'public/api.js' }).runInContext(ctx);
+    return ctx;
+  })();
+  ok('the REAL public/api.js loads headless on the eight-global shim',
+     !!tab.SR && typeof tab.api?.features === 'function',
+     Object.keys(tab).filter((k) => k !== 'window'));
+  ok('SR.probe() finds this walk’s server and lands in API mode',
+     (await tab.SR.probe()) === 'api');
+
+  // fail-closed first: this server booted with SCHEDULER_BASE_URL deleted.
+  // Note what this assertion CANNOT catch: the unawaited-promise bug also
+  // read as fail-closed here, which is exactly why it survived — so the next
+  // assertion pins the SHAPE of the answer, not just its falsiness.
+  const feat1 = await tab.api.features();
+  ok('await api.features() fails CLOSED while the scheduler is unconfigured',
+     !feat1.schedulerPush, feat1);
+  ok('…and resolves to a VALUE carrying a boolean gate — not a promise-shaped read',
+     typeof feat1.then !== 'function' && typeof feat1.schedulerPush === 'boolean', feat1);
+
+  // the stale tab, replayed. /api/config reads process.env per REQUEST, so
+  // setting the var here IS the deploy that picked up SCHEDULER_* while an
+  // open tab — this vm context — kept answering from boot. Presence is the
+  // flag; nothing dials the address, so a dead one is the safe fixture.
+  process.env.SCHEDULER_BASE_URL = 'http://127.0.0.1:1';
+  ok('the deploy lands — the ROUTE says schedulerPush the moment env changes',
+     (await GET('/api/config')).body.features.schedulerPush === true);
+  const feat2 = await tab.api.features();
+  ok('THE STALE TAB · the SAME loaded api.js re-reads LIVE and the push button unlocks',
+     typeof feat2.then !== 'function' && feat2.schedulerPush === true, feat2);
+  delete process.env.SCHEDULER_BASE_URL;      // the walk's shape, restored
+  const feat3 = await tab.api.features();
+  ok('…and a revoked config closes the gate on the very next read — no reload needed',
+     feat3.schedulerPush === false, feat3);
 
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
