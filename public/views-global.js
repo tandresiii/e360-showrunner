@@ -325,19 +325,44 @@ function roleDef(role) {
 
 /* ============================================================================
    TEMPLATES ADMIN — editable per-type lane + step grid, T-minus offsets.
-   Iterates typeDef(type).lanes so every event type's grid is config-driven.
+   ----------------------------------------------------------------------------
+   THE EDITOR IS REAL NOW. Every button here used to be a toast while the grid
+   rendered fully-styled inputs over rows nothing could save — the audit's
+   sharpest "fake affordance" finding after the season buttons. The grid stages
+   its edits in the DOM (rename inline, remove a row, add a row) and Save
+   commits the WHOLE grid in one PUT, so a half-saved SOP cannot exist.
+
+   Which template is "the" template: GET /templates/:type answers the type's
+   OLDEST row — the same one createEvent and Seed-pipeline seed from — so Save
+   edits the live SOP in place and the hint's promise ("every show seeded from
+   this template inherits the change") is finally true. "Bank a copy" POSTs a
+   snapshot; the versions list names every row of the type and lets a manager
+   delete one (deleting the live SOP promotes the next-oldest).
    ========================================================================== */
 var curTpl = 'led';
+/* the shaped records the seam answered — the editor reads and writes THESE,
+   never TEMPLATE_STEPS directly, so demo and API render one code path */
+var TPL_CACHE = { list: [], versions: {} };
 function tplFolderCount(projects, type) { return projects.filter(function (p) { return p.type === type; }).length; }
+function tplByType(type) {
+  var hit = null;
+  (TPL_CACHE.list || []).forEach(function (t) { if (t.event_type === type) hit = t; });
+  return hit;
+}
+/* the client mirror of the three routes' requireRole('manager') floor */
+function canEditTemplates() {
+  return CURRENT_USER.role === 'admin' || CURRENT_USER.role === 'manager';
+}
 
-function viewTemplates(projects) {
-  var cards = Object.keys(EVENT_TYPES).map(function (type) {
-    var t = typeDef(type);
-    var nSteps = t.lanes.reduce(function (a, l) { return a + ((TEMPLATE_STEPS[type] && TEMPLATE_STEPS[type][l.key]) || []).length; }, 0);
-    var meta = TEMPLATE_META[type] || { desc: 'Custom event type.' };
-    return '<button class="tpl-card ' + (type === curTpl ? 'on' : '') + '" ' + act('selectTpl', null, type) + '>' +
-      '<div class="ti">' + icon(t.icon) + '</div><b>' + esc(t.label) + ' template</b><div class="td">' + esc(meta.desc) + '</div>' +
-      '<div class="tm">' + typeTag(type) + '<span><b>' + t.lanes.length + '</b> lanes</span><span><b>' + nSteps + '</b> steps</span><span><b>' + tplFolderCount(projects, type) + '</b> folders</span></div>' +
+function viewTemplates(projects, tpls) {
+  TPL_CACHE.list = tpls || [];
+  if (!tplByType(curTpl) && TPL_CACHE.list.length) curTpl = TPL_CACHE.list[0].event_type;
+  var cards = TPL_CACHE.list.map(function (t) {
+    var d = t.def || typeDef(t.event_type);
+    var nSteps = (d.lanes || []).reduce(function (a, l) { return a + ((t.steps && t.steps[l.key]) || []).length; }, 0);
+    return '<button class="tpl-card ' + (t.event_type === curTpl ? 'on' : '') + '" ' + act('selectTpl', null, t.event_type) + '>' +
+      '<div class="ti">' + icon(d.icon) + '</div><b>' + esc(d.label) + ' template</b><div class="td">' + esc((t.meta && t.meta.desc) || 'Custom event type.') + '</div>' +
+      '<div class="tm">' + typeTag(t.event_type) + '<span><b>' + (d.lanes || []).length + '</b> lanes</span><span><b>' + nSteps + '</b> steps</span><span><b>' + tplFolderCount(projects, t.event_type) + '</b> folders</span></div>' +
       '</button>';
   }).join('');
   return '<div class="page-h"><div><h1>Templates</h1><div class="sub">The SOP for each event TYPE, encoded once. Applying a template seeds a show’s lanes, tasks and T-minus due dates.</div></div>' +
@@ -350,43 +375,105 @@ function viewTemplates(projects) {
 function selectTpl(type, projects) {
   curTpl = type;
   document.querySelectorAll('.tpl-card').forEach(function (c) { c.classList.remove('on'); });
-  var idx = Object.keys(EVENT_TYPES).indexOf(type);
+  var idx = (TPL_CACHE.list || []).map(function (t) { return t.event_type; }).indexOf(type);
   var cards = $('#scroll').querySelectorAll('.tpl-card');
   if (cards[idx]) cards[idx].classList.add('on');
   $('#tplEditor').innerHTML = tplEditor(type, projects);
 }
+/* the role column is DISPLAY: template roles are planning slugs from
+   templates.json ('lead_tech', …), not the five login roles, and offering the
+   login-role picker here would write a vocabulary the seed never speaks.
+   Editing the slug set is a deliberate cut this wave — the chevron that
+   implied a dropdown is gone rather than kept as a lie. */
 function roleSelHTML(role) {
   var r = roleDefOf(role);
-  return '<span class="role-sel" ' + toastAttrs('Assign role', 'Any role on the roster can own this step') + '><span class="rdot" style="background:' + r.col + '"></span><span class="rlbl">' + esc(r.name) + '</span>' + icon('chevD') + '</span>';
+  return '<span class="role-sel" title="' + esc('Owner-role slug: ' + (role || 'unassigned') + ' — carried through Save unchanged') + '"><span class="rdot" style="background:' + r.col + '"></span><span class="rlbl">' + esc(r.name) + '</span></span>';
 }
 function offsetHTML(off) {
   var after = off < 0;
   return '<div class="offset"><span class="tp">T' + (after ? '+' : '−') + '</span><input class="off-in" type="number" value="' + Math.abs(off) + '" aria-label="T-minus days"><span class="du">d</span></div>';
 }
+/* one editable grid row. The inputs carry what a person edits (name, offset
+   magnitude); the data- attributes carry the row's full fidelity — owner_role,
+   evidence_type, auto_source, depends_on_title, the offset SIGN — so a Save
+   can never silently strip the flex automation off an event type. */
+function tplRowHTML(s) {
+  var flag = s.flag === 'auto' ? '<span class="mini auto">auto-gen</span>' : s.flag === 'dep' ? '<span class="mini dep">depends</span>' : '';
+  var signed = s.off_signed !== undefined ? s.off_signed : -(Number(s.off) || 0);
+  var canEdit = canEditTemplates();
+  return '<div class="grid-row" data-tplrow="1"' +
+    ' data-role="' + esc(s.role || '') + '"' +
+    ' data-sign="' + (signed > 0 ? '+' : '-') + '"' +
+    ' data-ev="' + esc(s.evidence_type || (s.flag === 'auto' ? 'file' : 'none')) + '"' +
+    ' data-auto="' + esc(s.auto_source || (s.flag === 'auto' ? 'auto' : 'none')) + '"' +
+    ' data-dep="' + esc(s.depends_on_title || (s.flag === 'dep' ? '·' : '')) + '">' +
+    '<div class="grip">' + icon('grip') + '</div>' +
+    '<input class="cell-in" value="' + esc(s.name) + '" aria-label="Step name"' + (canEdit ? '' : ' disabled') + '>' +
+    roleSelHTML(s.role) + offsetHTML(Math.abs(Number(s.off) || 0) * (signed > 0 ? -1 : 1)) + '<div>' + flag + '</div>' +
+    (canEdit
+      ? '<button class="rowdel" title="Remove step — staged until Save" ' + act('tplRowDel') + '>' + icon('trash') + '</button>'
+      : '<span></span>') + '</div>';
+}
 function tplEditor(type, projects) {
-  var t = typeDef(type), anchor = t.anchor;
-  var nSteps = t.lanes.reduce(function (a, l) { return a + ((TEMPLATE_STEPS[type] && TEMPLATE_STEPS[type][l.key]) || []).length; }, 0);
+  var rec = tplByType(type);
+  var t = (rec && rec.def) || typeDef(type);
+  var anchor = t.anchor || 'Event';
+  var steps = (rec && rec.steps) || {};
+  var meta = (rec && rec.meta) || {};
+  var nSteps = (t.lanes || []).reduce(function (a, l) { return a + ((steps[l.key]) || []).length; }, 0);
   var used = tplFolderCount(projects, type);
-  var lanesHTML = t.lanes.map(function (l) {
-    var steps = (TEMPLATE_STEPS[type] && TEMPLATE_STEPS[type][l.key]) || [];
-    var rows = steps.map(function (s) {
-      var flag = s.flag === 'auto' ? '<span class="mini auto">auto-gen</span>' : s.flag === 'dep' ? '<span class="mini dep">depends</span>' : '';
-      return '<div class="grid-row"><div class="grip">' + icon('grip') + '</div>' +
-        '<input class="cell-in" value="' + esc(s.name) + '" aria-label="Step name">' +
-        roleSelHTML(s.role) + offsetHTML(s.off) + '<div>' + flag + '</div>' +
-        '<button class="rowdel" title="Remove step" ' + toastAttrs('Step removed', 'Template edit staged') + '>' + icon('trash') + '</button></div>';
-    }).join('') || '<div class="grid-row" style="grid-template-columns:1fr"><span class="lane-empty">no steps — add one below</span></div>';
-    return '<div class="lane-edit"><div class="leh"><span class="ld" style="background:' + esc(l.color) + '"></span><b>' + esc(l.label) + '</b><span class="cnt">' + steps.length + ' steps</span></div>' +
+  var canEdit = canEditTemplates();
+  var lanesHTML = (t.lanes || []).map(function (l) {
+    var laneSteps = steps[l.key] || [];
+    var rows = laneSteps.map(tplRowHTML).join('') ||
+      '<div class="grid-row" style="grid-template-columns:1fr"><span class="lane-empty">no steps' + (canEdit ? ' — add one below' : '') + '</span></div>';
+    return '<div class="lane-edit" data-lane="' + esc(l.key) + '"><div class="leh"><span class="ld" style="background:' + esc(l.color) + '"></span><b>' + esc(l.label) + '</b><span class="cnt">' + laneSteps.length + ' steps</span></div>' +
       '<div class="grid-head"><span></span><span>Step</span><span>Owner role</span><span>Offset</span><span>Flag</span><span></span></div>' + rows +
-      '<button class="addstep" ' + toastAttrs('Add step', l.label + ' lane — new step row') + '>' + icon('plus') + 'Add step to ' + esc(l.label) + '</button></div>';
+      (canEdit
+        ? '<button class="addstep" ' + act('tplAddStep', null, l.key) + '>' + icon('plus') + 'Add step to ' + esc(l.label) + '</button>'
+        : '') + '</div>';
   }).join('');
+
+  /* versions: every template row of this type, live-marked, deletable.
+     A server fact — the demo says so instead of inventing a history. */
+  var versions = TPL_CACHE.versions[type] || [];
+  /* live = oldest id, the server's own seed-pick rule; the sorted list's head */
+  var liveId = versions.length ? versions[0].id : (meta.id || null);
+  var versionsHTML = '';
+  if (api.isDemo()) {
+    versionsHTML = '<div class="perm-note" style="margin-top:14px">' + inlineIcon('layers') +
+      ' Versions live on the server — the demo has only its built-in config, and Save rewrites it in this tab only.</div>';
+  } else if (versions.length) {
+    versionsHTML = '<div class="panel" style="margin-top:16px"><h3>Versions of the ' + esc(t.label) + ' SOP · ' + versions.length + '</h3>' +
+      versions.map(function (v) {
+        var isLive = v.id === liveId;
+        return '<div class="set-row"><span class="k" style="text-transform:none;letter-spacing:0">' + esc(v.name) + '</span>' +
+          '<span class="v" style="display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">' +
+          '<span class="mini">' + v.steps + ' steps · ' + esc(fmtDate(String(v.created_at || '').slice(0, 10))) + '</span>' +
+          (isLive ? '<span class="pill go"><span class="dot"></span>live — seeds new shows</span>' : '<span class="pill idle">banked</span>') +
+          (canEdit ? '<button class="btn sm ghost" ' + act('tplDelete', v.id, type) + '>' + icon('trash') + 'Delete</button>' : '') +
+          '</span></div>';
+      }).join('') +
+      '<div class="perm-note">' + inlineIcon('bolt') + ' The OLDEST version is the live SOP — it is what New Event and Seed pipeline copy from. Deleting it promotes the next one; instantiation copies rows, so shows already seeded keep their steps either way.</div></div>';
+  }
+
   return '<div class="ed-head"><div class="et"><div class="ti" style="width:36px;height:36px;border-radius:9px;background:var(--surface-3);display:grid;place-items:center;color:var(--accent)">' + icon(t.icon) + '</div>' +
-    '<div><h2>' + esc(t.label) + ' template</h2><div class="sub" style="color:var(--muted);font-size:12.5px;margin-top:2px">' + typeTag(type) + ' &nbsp; ' + t.lanes.length + ' lanes · ' + nSteps + ' steps · anchored to <b style="color:var(--text-2)">' + esc(anchor) + '</b> · used by ' + used + ' folder' + (used === 1 ? '' : 's') + '</div></div></div>' +
-    '<div style="display:flex;gap:9px"><button class="btn ghost" ' + toastAttrs('Preview', 'Rendered T-minus schedule from ' + anchor) + '>' + icon('cal') + 'Preview schedule</button>' +
-    '<button class="btn primary" ' + toastAttrs('Template saved', t.label + ' SOP updated') + '>' + icon('check') + 'Save template</button></div></div>' +
-    '<div class="hint" style="margin:0 0 16px">' + icon('bolt') + 'Offsets are <b>T-minus days from ' + esc(anchor) + '</b>. Edit a step name or offset inline; every show seeded from this template inherits the change.</div>' +
+    '<div><h2>' + esc(t.label) + ' template</h2><div class="sub" style="color:var(--muted);font-size:12.5px;margin-top:2px">' + typeTag(type) + ' &nbsp; ' + (t.lanes || []).length + ' lanes · ' + nSteps + ' steps · anchored to <b style="color:var(--text-2)">' + esc(anchor) + '</b> · used by ' + used + ' folder' + (used === 1 ? '' : 's') +
+    (meta.name ? ' · <b style="color:var(--text-2)">' + esc(meta.name) + '</b>' : '') + '</div></div></div>' +
+    (canEdit
+      ? '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
+        '<button class="btn ghost" ' + act('tplBank', null, type) + ' title="POST a snapshot copy of this grid as a banked version — the live SOP is untouched">' + icon('layers') + 'Bank a copy</button>' +
+        '<button class="btn primary" ' + act('tplSave', null, type) + '>' + icon('check') + 'Save template</button></div>'
+      : '<div class="perm-note" style="margin:0">' + inlineIcon('lock') + ' The SOP is manager+ to change — the grid is readable by everyone.</div>') +
+    '</div>' +
+    '<div class="hint" style="margin:0 0 16px">' + icon('bolt') + 'Offsets are <b>T-minus days from ' + esc(anchor) + '</b>. Edit names and offsets inline, remove or add rows — nothing is written until <b>Save</b> commits the whole grid' + (canEdit ? '' : '') + '. Every show seeded from this template after a save inherits the change; shows already seeded keep their steps.</div>' +
     lanesHTML +
-    '<button class="addlane" ' + toastAttrs('Add lane', 'New lane on the ' + t.label + ' template — add it to LANES + this type’s lane list') + '>' + icon('plus') + 'Add lane to ' + esc(t.label) + '</button>';
+    (canEdit
+      ? '<button class="addlane" ' + toastAttrs('Lanes are the event type’s config',
+          'A lane set belongs to the TYPE (EVENT_TYPES + lanes), not to one template — adding a lane is a config change, and this wave did not build that editor. The rows above are real; this button is honest about not being.') + '>' +
+        icon('plus') + 'Add lane to ' + esc(t.label) + '</button>'
+      : '') +
+    versionsHTML;
 }
 function addEventType() {
   openModal('Add event type', '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px;line-height:1.6">Types are config-driven and extensible. To add one (e.g. <b>Motion Graphics</b>):</p>' +
@@ -460,7 +547,48 @@ function viewSettings(ctx) {
     })()) +
     card('gear', 'Workspace', '<p>e360 Sport control-room workspace.</p>' + row('Organization', 'E360 Sport') + row('Members', activeUsers().length) + row('Event types', Object.keys(EVENT_TYPES).length) +
       '<div class="set-row"><span class="k">Theme</span><span class="switch' + (isLight ? '' : ' on') + '" id="setTheme" ' + act('toggleTheme') + '><i></i></span></div>') +
-    card('server', 'E360 NAS', '<p>Source files + heavy binaries. The DB stores a path + cached render; byte-serving is a deferred infra dependency.</p>' + row('Mount', '\\\\e360-nas\\showrunner') + row('Status', '<span style="color:var(--go)">reachable</span>') + row('Convention', 'P{id}-{slug}\\S{id}-{slug}\\{kind}')) +
+    /* ══ 36 · THE NAS CARD READS THE PROBE ══════════════════════════════════
+       This card printed a hardcoded green "reachable" through the whole day
+       the NAS could not be reached at all — the exact false comfort
+       /api/health's own comments warn about. Now it renders what the probe
+       actually knows: config, and the last time this process really talked to
+       the store. The demo says "modeled", because a fictional NAS does not
+       get a live status. */
+    card('server', 'E360 NAS', (function () {
+      var h = ctx.health || null;
+      if (demo || !h) {
+        return '<p>Source files + heavy binaries. The DB stores a path + cached render; bytes stream ' +
+          'through the app.</p>' +
+          row('Mount', '\\\\e360-nas\\showrunner') +
+          row('Status', demo
+            ? '<span style="color:var(--warn)">modeled — no live probe in demo</span>'
+            : '<span style="color:var(--crit)">health probe did not answer</span>') +
+          row('Convention', 'P{id}-{slug}\\S{id}-{slug}\\{kind}');
+      }
+      var status;
+      if (!h.storageReady) {
+        status = '<span style="color:var(--warn)">not configured — uploads register metadata only</span>';
+      } else if (h.storageError) {
+        status = '<span style="color:var(--crit)">' + esc(String(h.storageError).slice(0, 80)) + '</span>';
+      } else if (h.storageLastContact && h.storageLastContact.ok) {
+        status = '<span style="color:var(--go)">answered ' + esc(fmtAgo(h.storageLastContact.at)) + ' ago</span>';
+      } else if (h.storageLastContact) {
+        status = '<span style="color:var(--crit)">did NOT answer ' + esc(fmtAgo(h.storageLastContact.at)) + ' ago</span>';
+      } else {
+        /* config says ready; no byte has moved this boot — say exactly that,
+           never upgrade config into evidence (the 2026-08-28 lesson) */
+        status = '<span style="color:var(--warn)">configured — no contact yet this boot</span>';
+      }
+      return '<p>Source files + heavy binaries. The DB stores a path; bytes stream through the app. ' +
+        '<b>Status is measured</b>: config from the env, liveness from the last real byte moved.</p>' +
+        row('Driver', esc(h.storage || '—')) +
+        row('Target', '<span class="mono" style="font-size:11px;word-break:break-all">' + esc(h.storageTarget || h.nasRoot || '—') + '</span>') +
+        row('Status', status) +
+        (h.storageLiveness
+          ? row('Liveness', '<span style="font-size:11px;color:var(--muted)">' + esc(String(h.storageLiveness).slice(0, 120)) + '</span>') : '') +
+        (h.storageEphemeralRisk
+          ? row('Risk', '<span style="color:var(--crit)">ephemeral disk — bytes die with the deploy</span>') : '');
+    })()) +
     card('send', 'Staffing scheduler', '<p>Downstream system of record (e360-staffing3). Push-to-scheduler maps a show onto /api/events + child rows.</p>' + row('Base URL', 'SCHEDULER_BASE_URL') + row('Auth', 'service token') + row('Mode', 'dry-run default')) +
     card('layers', 'Flex + spec tools', '<p>Spec Sheet Generator, NovaSpec, PowerSpec + Flex. Bound artifacts derive .e360 → .nsf → .pcfg → pull sheet.</p>' + row('Chain', 'e360 · nsf · pcfg') + row('Flex', 'event folders + pull sheets') + row('Stale-flag', 'on re-bind')) +
     card('scale', 'Jobs + accounting', (function () {
@@ -754,6 +882,12 @@ function drawViewer(show) {
        and until now it was also the screen with no way to act on that. Offered
        to the uploader or to pm+/manager on the folder (canDeleteFile — the
        mirror of the route's gate); it takes a plain confirm on the way out. */
+    /* 27. THE RENAME, beside the delete, for the same people. PUT /files/:id
+       has taken name + kind since the wiring pass ("canEditProject OR the
+       uploader" — canDeleteFile's exact predicate); no list anywhere offered
+       it, so a typo'd name or a receipt filed as "other" was permanent. */
+    (canDeleteFile(f, show) ? '<button class="btn" ' + act('editFile', f.id) + '>' +
+      icon('pencil') + 'Rename / re-kind</button>' : '') +
     (canDeleteFile(f, show) ? '<button class="btn danger" ' + act('deleteFile', f.id) + '>' +
       icon('trash') + 'Delete file</button>' : '') +
     '<button class="btn ghost" ' + toastAttrs('Bound', 'Spec re-bound to ' + title) + '>' + icon('link') + 'Re-bind to folder</button></div>' +
@@ -780,8 +914,20 @@ function drawPhotoMeta(show, f, title, hasBytes) {
       (canCap ? '<button class="iconbtn" style="width:26px;height:26px;flex:none" title="Edit caption" ' + act('phCapEdit', f.id) + '>' + icon('pencil') + '</button>' : '') +
       '</div></div>';
   }
-  var tagRow = (f.tags && f.tags.length)
-    ? '<div class="ph-tagrow">' + f.tags.map(function (t) { return '<span class="tag">' + esc(t) + '</span>'; }).join('') + '</div>'
+  /* tags were read-only chips while PUT /photos/:id accepted `tags` all along
+     (caption + tags are its WHOLE whitelist). Same predicate as the caption:
+     curation is pm+ or the person who shot it. The × removes one chip; the +
+     prompt adds one — each write sends the full corrected array, which is what
+     the route replaces. */
+  var tagChips = (f.tags || []).map(function (t) {
+    return '<span class="tag">' + esc(t) +
+      (canCap ? '<button class="n-act" style="padding:0 0 0 4px;min-width:0" title="Remove tag" ' +
+        act('phTagDel', f.id, t) + '>×</button>' : '') + '</span>';
+  }).join('');
+  var tagRow = (tagChips || canCap)
+    ? '<div class="ph-tagrow">' + tagChips +
+      (canCap ? '<button class="n-act" title="Add a tag" ' + act('phTagAdd', f.id) + '>' +
+        inlineIcon('plus') + 'tag</button>' : '') + '</div>'
     : '';
   var rows = metaRow('Type', 'Event photo') +
     metaRow('Taken', fmtTs(f.taken_at)) +

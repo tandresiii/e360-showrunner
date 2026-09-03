@@ -206,8 +206,20 @@ async function renderView(view, arg) {
     navOn('files');
 
   } else if (view === 'templates') {
-    s.innerHTML = viewTemplates(await api.listProjects());
+    /* the editor renders the SEAM's answer now — server templates in API mode,
+       the built-in config in demo — plus the version list for the open type */
+    var tprojects = await api.listProjects();
+    var tpls = await api.listTemplates();
+    var vlist = await api.listTemplateVersions(curTpl).catch(function () { return []; });
+    TPL_CACHE.versions[curTpl] = vlist;
+    s.innerHTML = viewTemplates(tprojects, tpls);
     crumb([{ t: 'Templates' }]);
+
+  } else if (view === 'proposals') {
+    /* E8 — the review backlog. One read, split client-side: pending is the
+       queue, resolved is the record. */
+    s.innerHTML = viewProposals(await api.listProposals({ limit: 200 }));
+    crumb([{ t: 'Proposals' }]);
 
   } else if (view === 'settings') {
     var fov = await api.getFinanceOverview();
@@ -224,9 +236,12 @@ async function renderView(view, arg) {
     /* the API-keys card lists YOUR keys — asked for, never assumed, and an
        empty answer renders an honest empty card rather than an error */
     var myKeys = await api.listApiKeys().catch(function () { return []; });
+    /* 36 — the NAS card renders the PROBE, not a hardcoded green */
+    var health = await api.health().catch(function () { return null; });
     s.innerHTML = viewSettings({ fin: fov.stats, pur: pov.stats, jobs: fov.jobs,
                                  notifyPrefs: np && np.prefs, mail: ms,
-                                 archivedCount: arch.length, keys: myKeys });
+                                 archivedCount: arch.length, keys: myKeys,
+                                 health: health });
     crumb([{ t: 'Settings' }]);
     applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark');
   }
@@ -1316,6 +1331,7 @@ async function refreshFinanceUI() {
   if (CUR.view === 'projects') return render('projects');
   if (CUR.view === 'folder') return render('folder', CUR.projectId);
   if (CUR.view === 'settings') return render('settings');
+  if (CUR.view === 'proposals') return render('proposals');
 }
 async function openShowFin(showId) {
   await openShow(showId);
@@ -1331,10 +1347,28 @@ async function openShowFin(showId) {
    The rule this now follows: once a mutation has returned, NOTHING in the
    success path may throw. A missing projection is a quieter toast, never an
    error, because the work is done either way. */
-async function confirmDocAct(fileId) {
+async function confirmDocAct(fileId, overrides) {
+  /* E4 — RETARGETING. The seam has forwarded `overrides` since the seam pass
+     and nothing ever collected one, so a show-less proposal died in a 400 the
+     human could not satisfy. Two ways in:
+       · proactive — the proposal names no show, so confirming it can file a
+         document nowhere useful and can land no cost: ask FIRST;
+       · reactive — the server answered the overrides-400 (a tasks batch whose
+         show was deleted, a cost with no target): catch it and ask.
+     `overrides === undefined` means "a person clicked Confirm"; the picker
+     calls back with a real object ({} for "file it folder-level anyway"). */
+  var f0 = FILES_BY_ID[Number(fileId)];
+  if (overrides === undefined && f0 && !f0.show_id && api.mode() === 'api') {
+    return openRetarget(fileId, null);
+  }
   var f;
-  try { f = await api.confirmDoc(fileId); }
-  catch (e) { toast('Not confirmed', String(e && e.message || e)); return; }
+  try { f = await api.confirmDoc(fileId, overrides); }
+  catch (e) {
+    var msg = String(e && e.message || e);
+    if (/overrides/i.test(msg)) return openRetarget(fileId, msg);
+    toast('Not confirmed', msg);
+    return;
+  }
   refreshBellPanel();                     /* the bell lists pending proposals */
   if (!f) {
     /* committed, but we have nothing to render it from */
@@ -1349,6 +1383,64 @@ async function confirmDocAct(fileId) {
     (job ? ' → job ' + job.qb_job_number : ''));
   return refreshFinanceUI();
 }
+/* ── E4 · the one-field show picker ──────────────────────────────────────────
+   "This belongs to THAT show" is the entire mechanism the server built
+   (routes/proposals.js consumes overrides.showId on every kind); this modal is
+   the whole missing client half. It re-posts the SAME confirm with
+   {overrides:{showId}} — nothing else changes hands. */
+var PENDING_RETARGET = null;
+async function openRetarget(fileId, serverMsg) {
+  closeBellPanel();
+  var f = FILES_BY_ID[Number(fileId)] || {};
+  PENDING_RETARGET = { fileId: Number(fileId) };
+  var shows = await api.listShows();
+  var opts = shows.slice().sort(function (a, b) {
+    return String(b.event_date || '').localeCompare(String(a.event_date || ''));
+  }).map(function (s) {
+    return '<option value="' + Number(s.id) + '">' +
+      esc(showLabel(s) + (s.venue ? ' · ' + s.venue : '') + (s.event_date ? ' · ' + fmtDate(s.event_date) : '')) +
+      '</option>';
+  }).join('');
+  var project = f.project_id ? PROJECTS_BY_ID[f.project_id] : null;
+  openModal('Which show does this belong to?',
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px;line-height:1.6">The agent could not ' +
+    'tell which show <b>' + esc(f.vendor || f.name || 'this proposal') + '</b> belongs to' +
+    (serverMsg ? ' — the server said: <i>' + esc(serverMsg) + '</i>' : '') +
+    '. Pick the show and the confirm is re-posted with that target; a cost lands on its budget, a ' +
+    'document files into its folder.</p>' +
+    (opts
+      ? '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+        finLabelWrap('Show', '<select id="rtShow" class="cell-in">' + opts + '</select>') + '</div>'
+      : '<div class="empty">No shows are loaded in this window — open Projects first.</div>') +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    (project
+      ? '<button class="btn ghost" ' + act('rtSkip') + ' title="' +
+        esc('File it against the folder ' + project.name + ' with no show — no cost can land that way') + '">' +
+        icon('folder') + 'Folder only</button>'
+      : '') +
+    (opts
+      ? '<button class="btn primary" ' + act('rtCommit') + '>' + icon('check') + 'Confirm to this show</button>'
+      : '') + '</div>');
+}
+async function rtCommitAct() {
+  if (!PENDING_RETARGET) return;
+  var showId = _n('rtShow');
+  if (!showId) { toast('Pick a show', 'Or cancel — nothing has been confirmed yet'); return; }
+  var fileId = PENDING_RETARGET.fileId;
+  PENDING_RETARGET = null;
+  closeM();
+  return confirmDocAct(fileId, { showId: Number(showId) });
+}
+async function rtSkipAct() {
+  if (!PENDING_RETARGET) return;
+  var fileId = PENDING_RETARGET.fileId;
+  PENDING_RETARGET = null;
+  closeM();
+  /* an explicit {} skips the proactive check: the person CHOSE folder-level */
+  return confirmDocAct(fileId, {});
+}
+
 async function rejectDocAct(fileId) {
   var f = await api.getFile(fileId);
   if (!f) return;
@@ -2949,8 +3041,12 @@ async function repCancelAct() {
 async function repSaveAct(id) {
   var ta = document.getElementById('repIn' + Number(id));
   var body = ta ? String(ta.value || '').trim() : '';
-  if (!body) { toast('Nothing to file', 'Write the report first, or attach a document'); return; }
   var rep = REPORTS_BY_ID[Number(id)];
+  /* D4 — an attached document IS a filed report; only refuse when there is
+     neither, which is the server's own rule verbatim */
+  if (!body && !(rep && rep.file_id)) {
+    toast('Nothing to file', 'Write the report first, or attach a document'); return;
+  }
   var showId = rep ? rep.show_id : CUR.showId;
   var r;
   try {
@@ -3003,6 +3099,78 @@ async function openReportAct(showId) {
   setFolderTab('reports');
   var ta = rep ? document.getElementById('repIn' + rep.id) : null;
   if (ta && ta.focus) ta.focus();
+}
+
+/* ── D4 · ATTACH THE DOCUMENT YOU ALREADY HAVE ───────────────────────────────
+   tech_reports.file_id existed, three UI strings promised it, and nothing in
+   the product ever wrote it — a tech whose report was a PDF from the venue had
+   to retype it into the textarea. The picker offers both halves of the
+   promise: a document already on this show, or a fresh upload (which lands as
+   kind 'report' through the normal two-call upload). Either way the write is
+   the same POST /shows/:id/tech-report the written form uses, so filing rules
+   (author-only, never after review) cannot fork. */
+var PENDING_REPATTACH = null;
+async function repAttachAct(id) {
+  var rep = REPORTS_BY_ID[Number(id)];
+  if (!rep) return;
+  var show = await api.getShow(rep.show_id);
+  PENDING_REPATTACH = { repId: rep.id, showId: rep.show_id };
+  var docs = (show.files || []).filter(function (f) {
+    return f.kind !== 'photo' && f.status !== 'proposed';
+  });
+  var opts = '<option value="">— pick a document on this show —</option>' + docs.map(function (f) {
+    return '<option value="' + Number(f.id) + '"' + (rep.file_id === f.id ? ' selected' : '') + '>' +
+      esc(f.name + '.' + f.ext + ' · ' + fileKindLabel(f.kind)) + '</option>';
+  }).join('');
+  openModal('Attach the document · show report',
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px;line-height:1.6">A report that already ' +
+    'exists as a document counts as filed — no retyping. It must be ON this show: pick one below, or ' +
+    'upload it and both happen at once.</p>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Existing document', '<select id="repSel" class="cell-in">' + opts + '</select>') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('…or upload it', '<input type="file" id="repFile" class="cell-in">') + '</div>' +
+    '<div class="hint" style="margin-top:8px">' + icon('lock') +
+    'Anything typed in the editor rides along as the written summary — a PDF plus a paragraph is a fine report.</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('repAttachCommit') + '>' + icon('check') + 'Attach &amp; file</button></div>');
+}
+async function repAttachCommitAct() {
+  var p = PENDING_REPATTACH;
+  if (!p) return;
+  var inp = document.getElementById('repFile');
+  var file = inp && inp.files && inp.files[0];
+  var fileId = null;
+  if (file) {
+    if (!apiMode()) { toast('Uploads need the live server', 'In the demo, pick an existing document instead'); return; }
+    var res;
+    try { res = await uploadRealFile(p.showId, file, { kind: 'report' }); }
+    catch (e) { toast('Upload failed', String(e && e.message || e)); return; }
+    fileId = res.file.id;
+    if (!res.stored && res.reason !== 'not-configured') {
+      toast('Filed, but the bytes did not land', res.reason);
+    }
+  } else {
+    fileId = _n('repSel');
+  }
+  if (!fileId) { toast('Nothing chosen', 'Pick a document or upload one — or cancel'); return; }
+  /* whatever is typed in the open editor rides along as the written half */
+  var ta = document.getElementById('repIn' + p.repId);
+  var payload = { file_id: Number(fileId) };
+  if (ta && String(ta.value || '').trim()) payload.body = String(ta.value).trim();
+  var r;
+  try { r = await api.fileTechReport(p.showId, payload); }
+  catch (e2) { toast('Not attached', String(e2 && e2.message || e2)); return; }
+  PENDING_REPATTACH = null;
+  REPORT_UI.editing = null;
+  closeM();
+  toast('Report filed with its document', r.summary && r.summary.owed
+    ? 'Still waiting on ' + r.summary.owed + ' other' + (r.summary.owed === 1 ? '' : 's') + '.'
+    : 'Every report on this show is now in.');
+  await updateBellBadge();
+  await updateMineCount();
+  return refreshShowTab(p.showId, 'reports');
 }
 
 /* ============================================================================
@@ -4836,6 +5004,350 @@ async function noteDeleteAct(noteId) {
   return refreshFinanceUI();
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   THE ROUGH + POLISH WAVE (editability audit, 2026-09-03, second pass)
+   ----------------------------------------------------------------------------
+   The blocker tier opened the doors that were painted shut; this tier fixes
+   the ones that stick and the signs that lie: a proposal that can finally be
+   pointed at the right show, a review page past the bell's cap of 8, a file
+   that can be renamed, a report that can BE the attached document, a health
+   pill that can be overridden by the person who knows better, a search box
+   that searches, a tech who lands on their own work, and a template editor
+   whose Save button saves.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 27 · RENAME / RE-KIND A FILE ─────────────────────────────────────────── */
+var PENDING_FILEEDIT = null;
+/* the re-kind vocabulary: the upload picker's list, minus 'quote' (not a
+   server kind — the PUT would silently keep the old one, a lying option) and
+   minus 'photo' (a doc re-kinded into the gallery has no frame to show);
+   plus the doc kinds a person actually mislabels into. */
+var REKIND_KINDS = ['other', 'spec', 'proof', 'contract', 'confirmation',
+                    'invoice', 'receipt', 'po', 'report'];
+async function openFileEdit(fileId) {
+  var f = await api.getFile(fileId);
+  if (!f) return;
+  PENDING_FILEEDIT = { id: f.id };
+  var kinds = REKIND_KINDS.slice();
+  if (kinds.indexOf(f.kind) < 0) kinds.unshift(f.kind);
+  var kindOpts = kinds.map(function (k) {
+    return '<option value="' + esc(k) + '"' + (f.kind === k ? ' selected' : '') + '>' +
+      esc(fileKindLabel(k)) + '</option>';
+  }).join('');
+  openModal('Rename / re-kind · ' + esc(fileNameWithExt(f)),
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px;line-height:1.6">The name is how every ' +
+    'list refers to it; the kind decides which grids and feeds it appears in — a receipt filed as ' +
+    '“Document” never reaches Accounting’s feed. The bytes on the NAS are untouched either way.</p>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.6fr 1fr">' +
+    finLabelWrap('Name', '<input id="feName" class="cell-in" value="' + esc(f.name || '') + '">') +
+    finLabelWrap('Kind', '<select id="feKind" class="cell-in">' + kindOpts + '</select>') + '</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('feCommit') + '>' + icon('check') + 'Save</button></div>');
+}
+async function feCommitAct() {
+  if (!PENDING_FILEEDIT) return;
+  var id = PENDING_FILEEDIT.id;
+  var name = _v('feName');
+  if (!name) { toast('A file needs a name', 'Type one, or cancel'); return; }
+  var f;
+  try { f = await api.updateFile(id, { name: name, kind: _v('feKind') }); }
+  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  PENDING_FILEEDIT = null;
+  closeM();
+  toast('File updated', fileNameWithExt(f) + ' · ' + fileKindLabel(f.kind));
+  if (CUR.view === 'viewer') return drawViewer(await api.getShow(VIEWER.showId));
+  if (CUR.view === 'files') return render('files');
+  if (CUR.view === 'show') return refreshShowTab(CUR.showId);
+  return refreshFinanceUI();
+}
+
+/* ── 9 · THE RAG OVERRIDE — the pill obeys a person at last ───────────────── */
+var PENDING_RAGSHOW = null;
+async function openRagOverride(showId) {
+  var show = await api.getShow(showId);
+  if (!show) return;
+  PENDING_RAGSHOW = Number(showId);
+  /* the DERIVED answer, computed without the override, so the modal can say
+     what "back to derived" would mean before anyone clicks it */
+  var derived = rollupSteps(allSteps(show), show.stage).rag;
+  var lbl = { go: 'On track', warn: 'At risk', crit: 'Critical', idle: 'Idle' };
+  var btn = function (v) {
+    var on = show.rag_override === v;
+    return '<button class="btn' + (on ? ' primary' : ' ghost') + '" ' + act('ragSet', show.id, v) + '>' +
+      '<span class="dot" style="width:8px;height:8px;border-radius:50%;background:var(--' +
+      (v === 'idle' ? 'idle' : v) + ')"></span>' + esc(lbl[v]) + (on ? ' · current' : '') + '</button>';
+  };
+  openModal('Health override · ' + esc(show.name),
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px;line-height:1.6">Health is derived from ' +
+    'the pipeline — blocked, at-risk and overdue steps. When you know something the pipeline does not ' +
+    '(a client call, a venue problem no task captures yet), set it by hand. The override <b>wins ' +
+    'everywhere</b> — header, season table, portfolio — and says “by hand” so a hand-set green is never ' +
+    'mistaken for a derived one.</p>' +
+    '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
+    btn('go') + btn('warn') + btn('crit') + btn('idle') + '</div>' +
+    '<div style="display:flex;justify-content:space-between;gap:9px;margin-top:14px;align-items:center">' +
+    '<span class="mini">Derived right now: ' + esc(lbl[derived] || derived) + '</span>' +
+    '<span style="display:flex;gap:9px">' +
+    (show.rag_override
+      ? '<button class="btn" ' + act('ragSet', show.id, 'derived') + '>' + icon('refresh') +
+        'Back to derived (' + esc(lbl[derived] || derived) + ')</button>'
+      : '') +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button></span></div>');
+}
+async function ragSetAct(showId, val) {
+  var patch = { rag_override: val === 'derived' ? null : val };
+  try { await api.updateShow(showId, patch); }
+  catch (e) { toast('Not set', String(e && e.message || e)); return; }
+  closeM();
+  toast(val === 'derived' ? 'Back to derived' : 'Health overridden',
+    val === 'derived'
+      ? 'The pipeline speaks for itself again'
+      : 'Set by hand — the pill says so until it is cleared');
+  return render('show', Number(showId));
+}
+
+/* ── A5 · THE TEMPLATE EDITOR'S REAL WRITES ───────────────────────────────────
+   The grid stages everything (rename inline, tplRowDel, tplAddStep) and the
+   two save buttons commit the WHOLE grid: Save = PUT on the live SOP (the
+   type's oldest template — the one createEvent seeds from), Bank = POST a
+   snapshot. tplCollect reads the DOM back with full fidelity — the data-
+   attributes carry owner_role / evidence_type / auto_source / depends_on so a
+   Save cannot strip the flex automation off an event type. */
+function tplCollect() {
+  var steps = [];
+  document.querySelectorAll('#tplEditor .lane-edit').forEach(function (laneEl) {
+    var lane = laneEl.getAttribute('data-lane');
+    if (!lane) return;
+    laneEl.querySelectorAll('.grid-row[data-tplrow]').forEach(function (row) {
+      var nameIn = row.querySelector('.cell-in');
+      var title = nameIn ? String(nameIn.value || '').trim() : '';
+      if (!title) return;                        /* an unnamed row is a non-row */
+      var offIn = row.querySelector('.off-in');
+      var mag = offIn ? Math.abs(Number(offIn.value) || 0) : 0;
+      /* T− = due BEFORE the anchor = negative offset on the wire */
+      var sign = row.getAttribute('data-sign') === '+' ? 1 : -1;
+      steps.push({
+        lane: lane, title: title,
+        due_offset_days: sign * mag,
+        owner_role: row.getAttribute('data-role') || null,
+        evidence_type: row.getAttribute('data-ev') || 'none',
+        auto_source: row.getAttribute('data-auto') || 'none',
+        depends_on_title: row.getAttribute('data-dep') || '',
+        sort_order: steps.length
+      });
+    });
+  });
+  return steps;
+}
+async function tplSaveAct(type) {
+  var rec = tplByType(type);
+  var steps = tplCollect();
+  if (!steps.length) {
+    toast('Nothing to save', 'Every row is unnamed — type step names first, or cancel'); return;
+  }
+  var id = rec && rec.meta ? rec.meta.id : null;
+  try { await api.updateTemplate(id, { event_type: type, steps: steps }); }
+  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  toast('Template saved', steps.length + ' steps — every show seeded from the ' +
+    typeLabel(type) + ' template from now on inherits this grid');
+  return render('templates');
+}
+async function tplBankAct(type) {
+  var rec = tplByType(type);
+  var steps = tplCollect();
+  if (!steps.length) { toast('Nothing to bank', 'The grid is empty'); return; }
+  var base = (rec && rec.meta && rec.meta.name) || (typeLabel(type) + ' SOP');
+  try {
+    await api.createTemplateVersion({
+      name: base + ' — banked ' + TODAY_ISO,
+      event_type: type,
+      description: 'Banked copy of the ' + typeLabel(type) + ' SOP grid (' + TODAY_ISO + ')',
+      steps: steps
+    });
+  } catch (e) { toast('Not banked', String(e && e.message || e)); return; }
+  toast('Copy banked', 'A snapshot of this grid is in the versions list — the live SOP is untouched');
+  return render('templates');
+}
+async function tplDeleteAct(id, type) {
+  var versions = TPL_CACHE.versions[type] || [];
+  var v = versions.filter(function (x) { return x.id === Number(id); })[0];
+  var isLive = versions.length && versions[0].id === Number(id);
+  if (!askConfirm('Delete the template version' + (v ? ' “' + v.name + '”' : '') + '?\n\n' +
+      (isLive
+        ? 'This is the LIVE SOP — the next-oldest version becomes the one new shows seed from' +
+          (versions.length > 1 ? '.' : ', and with no version left the type seeds an empty pipeline.')
+        : 'It is a banked copy — the live SOP is untouched.') +
+      '\n\nShows already seeded keep their steps either way; instantiation copies rows.')) return;
+  try { await api.deleteTemplate(id); }
+  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  toast('Version deleted', isLive ? 'The next version is live now' : 'The banked copy is gone');
+  return render('templates');
+}
+function tplAddStepAct(laneKey) {
+  var laneEl = document.querySelector('#tplEditor .lane-edit[data-lane="' + laneKey + '"]');
+  if (!laneEl) return;
+  var empty = laneEl.querySelector('.lane-empty');
+  if (empty && empty.closest('.grid-row')) empty.closest('.grid-row').remove();
+  var addBtn = laneEl.querySelector('.addstep');
+  if (!addBtn) return;
+  addBtn.insertAdjacentHTML('beforebegin', tplRowHTML({
+    name: '', role: '', off: 14, off_signed: -14,
+    evidence_type: 'none', auto_source: 'none', depends_on_title: '', flag: ''
+  }));
+  var rows = laneEl.querySelectorAll('.grid-row[data-tplrow] .cell-in');
+  var last = rows[rows.length - 1];
+  if (last && last.focus) { last.focus(); }
+}
+function tplRowDelAct(t) {
+  var row = t && t.closest ? t.closest('.grid-row') : null;
+  if (row) row.remove();               /* staged — Save commits the grid */
+}
+
+/* ── A12 · GLOBAL SEARCH — the decorative input, wired ────────────────────────
+   Client-side over what this window has LOADED (projects, shows, jobs, files)
+   — name, venue, city, client, QB number. Hits are the same data-act buttons
+   the rest of the app navigates by. The empty state says the honest half out
+   loud: there is no server-side search route in this wave, so a thing never
+   loaded here cannot be found here. */
+function searchCorpus() {
+  var files = [];
+  Object.keys(FILES_BY_ID).forEach(function (k) {
+    var f = FILES_BY_ID[k];
+    if (f && f.id > 0 && f.status !== 'rejected' && f.status !== 'superseded') files.push(f);
+  });
+  return { folders: PROJECTS.slice(), shows: ALL_SHOWS.slice(), jobs: ALL_JOBS.slice(), files: files };
+}
+function searchHits(q) {
+  q = String(q || '').toLowerCase().trim();
+  if (q.length < 2) return null;
+  var m = function () {
+    for (var i = 0; i < arguments.length; i++) {
+      if (arguments[i] && String(arguments[i]).toLowerCase().indexOf(q) >= 0) return true;
+    }
+    return false;
+  };
+  var c = searchCorpus();
+  return {
+    folders: c.folders.filter(function (p) { return m(p.name, p.client); }).slice(0, 5),
+    shows: c.shows.filter(function (s) { return m(s.name, s.venue, s.city); }).slice(0, 5),
+    jobs: c.jobs.filter(function (j) { return m(j.qb_job_number, j.client, j.name); }).slice(0, 5),
+    files: c.files.filter(function (f) { return m(f.name, f.vendor, f.caption); }).slice(0, 5)
+  };
+}
+function closeSearchPop() {
+  var p = document.getElementById('searchPop');
+  if (p) p.remove();
+  document.removeEventListener('mousedown', searchOutside);
+}
+function searchOutside(ev) {
+  var p = document.getElementById('searchPop'), w = document.getElementById('searchWrap');
+  if (p && !p.contains(ev.target) && !(w && w.contains(ev.target))) closeSearchPop();
+}
+function searchGroupHTML(label, rows) {
+  if (!rows.length) return '';
+  return '<div class="sp-sec">' + esc(label) + '</div>' + rows.join('');
+}
+function renderSearchPop(q) {
+  var hits = searchHits(q);
+  closeSearchPop();
+  if (!hits) return;
+  var groups =
+    searchGroupHTML('Folders', hits.folders.map(function (p) {
+      return '<button class="sp-hit" ' + act('openFolder', p.id) + '>' + icon(typeDef(p.type).icon) +
+        '<span class="sp-t"><b>' + esc(p.name) + '</b><span>' + esc(p.client || '') + '</span></span></button>';
+    })) +
+    searchGroupHTML('Shows', hits.shows.map(function (s) {
+      return '<button class="sp-hit" ' + act('openShow', s.id) + '>' + icon('cal') +
+        '<span class="sp-t"><b>' + esc(s.name) + '</b><span>' +
+        esc([s.venue, s.city, fmtDate(s.event_date)].filter(Boolean).join(' · ')) + '</span></span></button>';
+    })) +
+    searchGroupHTML('Jobs', hits.jobs.map(function (j) {
+      return '<button class="sp-hit" ' + act('openJob', j.id) + '>' + icon('dollar') +
+        '<span class="sp-t"><b>' + esc(j.qb_job_number) + '</b><span>' + esc(j.client || '') + '</span></span></button>';
+    })) +
+    searchGroupHTML('Files', hits.files.map(function (f) {
+      return '<button class="sp-hit" ' + act('openViewer', f.id) + '>' + icon('file') +
+        '<span class="sp-t"><b>' + esc(f.caption || f.name) + '</b><span>' +
+        esc(fileKindLabel(f.kind)) + '</span></span></button>';
+    }));
+  var any = hits.folders.length + hits.shows.length + hits.jobs.length + hits.files.length;
+  var pop = document.createElement('div');
+  pop.className = 'search-pop'; pop.id = 'searchPop';
+  pop.innerHTML = groups + (any
+    ? '<div class="sp-note">' + inlineIcon('search') + ' Searches what this window has loaded — Enter opens the first hit.</div>'
+    : '<div class="sp-note">No matches in what this window has loaded. There is no server-wide search yet ' +
+      '(an honest gap, not a hidden one) — open Projects or the Archive first and what loads becomes findable.</div>');
+  document.body.appendChild(pop);
+  try {
+    var rc = document.getElementById('searchWrap').getBoundingClientRect();
+    pop.style.left = rc.left + 'px';
+    pop.style.top = (rc.bottom + 6) + 'px';
+    pop.style.minWidth = Math.max(rc.width, 300) + 'px';
+  } catch (_) {}
+  /* a click on a hit navigates through the delegated ACTIONS listener; this
+     one only has to get the pop out of the way afterwards */
+  pop.addEventListener('click', function (ev) {
+    if (ev.target && ev.target.closest && ev.target.closest('[data-act]')) closeSearchPop();
+  });
+  setTimeout(function () { document.addEventListener('mousedown', searchOutside); }, 0);
+}
+function initGlobalSearch() {
+  var inp = document.getElementById('globalSearch');
+  if (!inp) return;
+  inp.addEventListener('input', function () {
+    if (bootGate()) return;
+    renderSearchPop(inp.value);
+  });
+  inp.addEventListener('focus', function () {
+    if (bootGate()) return;
+    if (String(inp.value || '').trim().length >= 2) renderSearchPop(inp.value);
+  });
+  inp.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') { closeSearchPop(); inp.blur(); return; }
+    if (ev.key === 'Enter') {
+      var first = document.querySelector('#searchPop .sp-hit');
+      if (first) { first.click(); inp.value = ''; }
+    }
+  });
+}
+
+/* ── D1 · LANDING BY ROLE ─────────────────────────────────────────────────────
+   A tech opening Showrunner in the truck does not need the portfolio — they
+   need what is theirs. Everyone else keeps the projects landing. */
+function landingView() {
+  return CURRENT_USER && CURRENT_USER.role === 'tech' ? 'mytasks' : 'projects';
+}
+
+/* ── polish · photo tags become editable chips ───────────────────────────────
+   PUT /photos/:id whitelists exactly caption + tags and the panel offered only
+   the caption. Each write sends the full corrected array — the route replaces,
+   never merges, so the chips and the record cannot drift. */
+async function phTagAddAct(fileId) {
+  var f = await api.getFile(fileId);
+  if (!f) return;
+  var t = null;
+  try { if (typeof prompt === 'function') t = prompt('New tag for this photo:'); } catch (_) {}
+  t = String(t || '').toLowerCase().trim();
+  if (!t) return;
+  var tags = (f.tags || []).slice();
+  if (tags.indexOf(t) >= 0) { toast('Already tagged', '“' + t + '” is on this photo'); return; }
+  tags.push(t);
+  try { await api.updatePhoto(f.id, { tags: tags }); }
+  catch (e) { toast('Not tagged', String(e && e.message || e)); return; }
+  toast('Tagged', '“' + t + '”');
+  if (CUR.view === 'viewer') return drawViewer(await api.getShow(VIEWER.showId));
+}
+async function phTagDelAct(fileId, tag) {
+  var f = await api.getFile(fileId);
+  if (!f) return;
+  var tags = (f.tags || []).filter(function (x) { return x !== tag; });
+  try { await api.updatePhoto(f.id, { tags: tags }); }
+  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  toast('Tag removed', '“' + tag + '”');
+  if (CUR.view === 'viewer') return drawViewer(await api.getShow(VIEWER.showId));
+}
+
 var ACTIONS = {
   goProjects:    function () { return render('projects'); },
   goFiles:       function () { return render('files'); },
@@ -5009,7 +5521,12 @@ var ACTIONS = {
   proofApprove:  function (t, id) { return proofAction(id, true); },
   proofRevise:   function (t, id) { return proofAction(id, false); },
   setDiv:        async function (t, id, k) { DIV_FILTER = (DIV_FILTER === k && k !== 'all') ? 'all' : k; await render('projects'); },
-  selectTpl:     async function (t, id, k) { selectTpl(k, await api.listProjects()); },
+  selectTpl:     async function (t, id, k) {
+    /* the versions list is per-type — fetch the newly-opened type's before the
+       editor renders, so "live vs banked" is never a stale answer */
+    TPL_CACHE.versions[k] = await api.listTemplateVersions(k).catch(function () { return []; });
+    selectTpl(k, await api.listProjects());
+  },
   addEventType:  function () { addEventType(); },
   openNew:       function () { openNew(); },
   /* F1 — the last mock button in the app is real: picking a type now opens the
@@ -5108,6 +5625,32 @@ var ACTIONS = {
   notifyPick:    function (t) { openNotifyPop(t); },
   notifyToggle:  function (t, id) { notifyToggleAct(id); },
   rosterNotify:  function (t) { toggleRosterNotify(t); },
+  /* ── THE ROUGH + POLISH WAVE · editability audit, second pass ─────────── */
+  /* E4 proposal retarget */
+  rtCommit:      function () { return rtCommitAct(); },
+  rtSkip:        function () { return rtSkipAct(); },
+  /* E8 the proposals review page */
+  goProposals:   function () { return render('proposals'); },
+  propsMore:     function () { PROPS_UI.shown += 25; return render('proposals'); },
+  /* 27 file rename / re-kind */
+  editFile:      function (t, id) { return openFileEdit(id); },
+  feCommit:      function () { return feCommitAct(); },
+  /* D4 tech report — attach the document */
+  repAttach:     function (t, id) { return repAttachAct(id); },
+  repAttachCommit: function () { return repAttachCommitAct(); },
+  /* 9 the RAG override */
+  ragOverride:   function (t, id) { return openRagOverride(id); },
+  ragSet:        function (t, id, k) { return ragSetAct(id, k); },
+  /* A5 the template editor's real writes */
+  tplSave:       function (t, id, k) { return tplSaveAct(k); },
+  tplBank:       function (t, id, k) { return tplBankAct(k); },
+  tplDelete:     function (t, id, k) { return tplDeleteAct(id, k); },
+  tplAddStep:    function (t, id, k) { return tplAddStepAct(k); },
+  tplRowDel:     function (t) { return tplRowDelAct(t); },
+  /* polish: the finance feed digs deeper; photo tags edit in place */
+  finFeedMore:   function () { FEED_UI.shown += 25; return render('finance'); },
+  phTagAdd:      function (t, id) { return phTagAddAct(id); },
+  phTagDel:      function (t, id, k) { return phTagDelAct(id, k); },
   toast:         function (t) { toast(t.getAttribute('data-toast') || '', t.getAttribute('data-toast-sub') || ''); }
 };
 
@@ -5272,7 +5815,7 @@ async function submitLogin() {
     if (me && me.must_change) { openPwGate(null); return; }
     await hydrateSession();
     var r = LOGIN.resume; LOGIN.resume = null;
-    if (r) await r(); else await render('projects');
+    if (r) await r(); else await render(landingView());
   } catch (e) {
     showErr(String((e && e.message) || e));
   } finally {
@@ -5349,6 +5892,8 @@ async function boot() {
     a.onclick = function (e) { e.preventDefault(); if (bootGate()) return; render(a.dataset.view); };
   });
   $('#newBtn').onclick = function () { if (bootGate()) return; openNew(); };
+  /* A12 — the topbar search input stops being decoration */
+  initGlobalSearch();
   /* the theme toggle reads and writes nothing but localStorage, so it stays
      live through the probe — there is no world it could get wrong. */
   $('#themeBtn').onclick = toggleTheme;
@@ -5405,7 +5950,8 @@ async function boot() {
        change has to be re-asserted here or reloading the page skips it. */
     if (me.must_change) { openPwGate(null); return; }
     await hydrateSession();
-    return render('projects');
+    /* D1 — a tech lands on their own work, not the portfolio */
+    return render(landingView());
   }
 
   /* ---- demo mode: the mock store IS the world ---- */
@@ -5418,6 +5964,6 @@ async function boot() {
     if (shows[i].gear && shows[i].gear.pulled) await bindGearFiles(shows[i]);
   }
   await hydrateSession();
-  await render('projects');
+  await render(landingView());
 }
 boot();

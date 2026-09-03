@@ -345,7 +345,14 @@ function rollupSteps(pairs, stage) {
   return { total: total, done: done, pct: total ? Math.round(done / total * 100) : 0,
            blocked: blocked, risk: risk, overdue: overdue, late: late, rag: rag };
 }
-function rollup(show) { return rollupSteps(allSteps(show), show.stage); }
+function rollup(show) {
+  var r = rollupSteps(allSteps(show), show.stage);
+  /* 9's other half, client-side: an explicit rag_override WINS, exactly as
+     lib/mappers.js resolves it on every server read. The counts stay derived —
+     an override changes the headline, never the arithmetic under it. */
+  if (show.rag_override) r.rag = show.rag_override;
+  return r;
+}
 /* folder-level rollup — every step under every show in the project */
 function projectRollup(project) {
   var pairs = [];

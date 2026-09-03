@@ -3888,6 +3888,130 @@ const DEL = (p, o) => call('DELETE', p, o);
   const agentReset = await POST(`/api/users/${HIRE_ID}/reset-password`, {}, { key: K });
   ok('17 GATE: ...nor reset one', agentReset.status === 403, agentReset.body);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('18. templates are WRITABLE — PUT/DELETE floors + the version story');
+  // ══════════════════════════════════════════════════════════════════════════
+  // The Templates screen rendered a full grid editor whose every button was a
+  // toast. POST existed (manager floor); PUT and DELETE are this wave's routes.
+  // The floor is asserted on BOTH halves of each verb: the pm refusal AND the
+  // manager success — a gate that is never exercised green is one refactor from
+  // being a gate on nothing.
+  const seededLed = (await pool.query(
+    `SELECT id FROM event_type_templates WHERE event_type='led' ORDER BY id LIMIT 1`)).rows[0].id;
+  ok('18 FLOOR: POST /api/templates below manager is 403',
+     (await POST('/api/templates', { name: TAG + ' sneak', event_type: 'led' },
+       { token: PMT })).status === 403);
+  ok('18 FLOOR: PUT /api/templates/:id below manager is 403',
+     (await PUT(`/api/templates/${seededLed}`, { name: 'sneak' }, { token: PMT })).status === 403);
+  ok('18 FLOOR: DELETE /api/templates/:id below manager is 403',
+     (await DEL(`/api/templates/${seededLed}`, { token: PMT })).status === 403);
+
+  // a manager banks a new led version (the editor's "Bank a copy")
+  const tplV2 = await POST('/api/templates', {
+    name: TAG + ' led — banked', event_type: 'led', description: 'smoke banked copy',
+    steps: [{ lane: 'venue', title: TAG + ' Confirm rigging points', due_offset_days: -9,
+              owner_role: 'lead_tech' }]
+  }, { token: MGRT });
+  ok('18 a manager POSTs a new version', tplV2.status === 200 && tplV2.body.id > 0, tplV2.body);
+  const liveAfterBank = await GET('/api/templates/led', { token: A });
+  ok('18 ...and the LIVE SOP stays the oldest — banking never hijacks seeding',
+     liveAfterBank.status === 200 && liveAfterBank.body.id === seededLed,
+     { live: liveAfterBank.body.id, seeded: seededLed, banked: tplV2.body.id });
+
+  // PUT replaces the version's rows in ONE transaction, with full fidelity
+  const tplPut = await PUT(`/api/templates/${tplV2.body.id}`, {
+    name: TAG + ' led — edited',
+    steps: [
+      { lane: 'venue', title: TAG + ' Confirm rigging points', due_offset_days: -10,
+        owner_role: 'lead_tech', evidence_type: 'file', auto_source: 'flex' },
+      { lane: 'gear', title: TAG + ' Stage the spare cabinets', due_offset_days: -4 }
+    ]
+  }, { token: MGRT });
+  ok('18 PUT replaces the rows and answers them back',
+     tplPut.status === 200 && (tplPut.body.steps || []).length === 2
+     && tplPut.body.name === TAG + ' led — edited', tplPut.body);
+  ok('18 ...keeping evidence_type/auto_source — a Save cannot strip the flex automation',
+     (tplPut.body.steps || []).some((s) => s.auto_source === 'flex' && s.evidence_type === 'file'),
+     tplPut.body.steps);
+  ok('18 a lane the type does not declare is SKIPPED, never written',
+     ((await PUT(`/api/templates/${tplV2.body.id}`, {
+       steps: [{ lane: 'proof', title: 'wrong lane' },
+               { lane: 'venue', title: TAG + ' kept row' }]
+     }, { token: MGRT })).body.steps || []).length === 1);
+  ok('18 a template cannot change its event type',
+     (await PUT(`/api/templates/${tplV2.body.id}`, { event_type: 'print' },
+       { token: MGRT })).status === 400);
+
+  // DELETE takes the rows with it; the live SOP is untouched
+  ok('18 DELETE removes the banked version', (await DEL(`/api/templates/${tplV2.body.id}`,
+     { token: MGRT })).status === 200);
+  ok('18 ...and its rows leak nowhere',
+     (await pool.query('SELECT COUNT(*)::int AS n FROM template_steps WHERE template_id=$1',
+       [tplV2.body.id])).rows[0].n === 0);
+  ok('18 ...while the seeded SOP still answers',
+     (await GET('/api/templates/led', { token: A })).body.id === seededLed);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('19. proposal overrides — "this belongs to THAT show" reaches the record');
+  // ══════════════════════════════════════════════════════════════════════════
+  // E4: the seam forwarded `overrides` and the client posted {} — so a folder-
+  // anchored proposal confirmed into a document with NO cost, silently. These
+  // assertions pin the server half the new show-picker modal re-posts into.
+  const orphan1 = await POST('/api/agent/documents', {
+    projectId: P, kind: 'receipt', name: TAG + ' showless receipt A', ext: '.pdf',
+    amount: 480, vendor: TAG + ' Hertz Overrides',
+    provenance: { sourceKind: 'email', sourceRef: TAG + ':ov1', confidence: 66 }
+  }, { key: K, idem: TAG + ':ov1#doc' });
+  ok('19 a folder-only doc proposal lands pending with NO show',
+     orphan1.status === 200 && orphan1.body.status === 'proposed', orphan1.body);
+  const ov1Confirm = await POST(`/api/proposals/${orphan1.body.proposalId}/confirm`, {}, { token: A });
+  ok('19 confirmed WITHOUT overrides it files folder-level and creates NO expense — the trap',
+     ov1Confirm.status === 200 && (ov1Confirm.body.created.expenses || []).length === 0,
+     ov1Confirm.body.created);
+
+  const orphan2 = await POST('/api/agent/documents', {
+    projectId: P, kind: 'receipt', name: TAG + ' showless receipt B', ext: '.pdf',
+    amount: 512, vendor: TAG + ' Hertz Overrides',
+    provenance: { sourceKind: 'email', sourceRef: TAG + ':ov2', confidence: 66 }
+  }, { key: K, idem: TAG + ':ov2#doc' });
+  const ov2Confirm = await POST(`/api/proposals/${orphan2.body.proposalId}/confirm`,
+    { overrides: { showId: S, category: 'travel' } }, { token: A });
+  ok('19 confirmed WITH {overrides:{showId}} the cost lands — the retarget modal\'s whole point',
+     ov2Confirm.status === 200 && (ov2Confirm.body.created.expenses || []).length === 1,
+     ov2Confirm.body.created);
+  const ovExpense = await pool.query(
+    'SELECT show_id, budget_line_category FROM expenses WHERE id=$1',
+    [(ov2Confirm.body.created.expenses || [])[0]]);
+  ok('19 ...on the OVERRIDDEN show, in the overridden category',
+     ovExpense.rows[0] && ovExpense.rows[0].show_id === S
+     && ovExpense.rows[0].budget_line_category === 'travel', ovExpense.rows[0]);
+  ok('19 ...and the file row moved onto that show too',
+     (await pool.query('SELECT show_id, status FROM files WHERE id=$1',
+       [orphan2.body.fileId])).rows[0].show_id === S);
+
+  // tasks_batch: the override moves the WHOLE batch to a different show, with
+  // due dates re-derived against the override target's event date
+  const scratchShow = await POST('/api/shows', {
+    project_id: P, name: TAG + ' Retarget scratch', venue: 'x', event_date: '2026-12-01',
+    seed_template: false
+  }, { token: A });
+  const S3 = scratchShow.body.id;
+  const ovBatch = await POST('/api/agent/tasks:batch', {
+    showId: S3, status: 'proposed',
+    provenance: { sourceKind: 'meeting', sourceRef: TAG + ':ovb', confidence: 70 },
+    steps: [{ lane: 'venue', title: TAG + ' Retargeted walkthrough', dueOffsetDays: -3 }]
+  }, { key: K, idem: TAG + ':ovb#tasks' });
+  ok('19 a proposed batch on the wrong show', ovBatch.status === 200 && !!ovBatch.body.proposalId,
+     ovBatch.body);
+  const ovbConfirm = await POST(`/api/proposals/${ovBatch.body.proposalId}/confirm`,
+    { overrides: { showId: S } }, { token: A });
+  ok('19 confirm with overrides RETARGETS the batch', ovbConfirm.status === 200
+     && (ovbConfirm.body.created.steps || []).length === 1, ovbConfirm.body.created);
+  const ovStep = await pool.query('SELECT show_id, due_date FROM steps WHERE id=$1',
+    [(ovbConfirm.body.created.steps || [])[0]]);
+  ok('19 ...the step lives on the override target, due re-derived off ITS event date',
+     ovStep.rows[0].show_id === S && ovStep.rows[0].due_date === '2026-11-11', ovStep.rows[0]);
+
   section('6. cascade integrity — a folder with a child of EVERY type');
   const before = await childCounts(P);
   ok('the smoke folder has children of every wired type',

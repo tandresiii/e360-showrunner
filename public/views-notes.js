@@ -171,9 +171,15 @@ function renderInbox(d) {
   var head = '<div class="bp-h"><b>Inbox</b>' +
     (unread ? '<span class="pill acc" style="padding:1px 8px;font-size:10px"><span class="dot"></span>' + unread + ' unread</span>' : '') +
     (unread ? '<button class="btn sm ghost" ' + act('bellMarkAll') + '>Mark all read</button>' : '') + '</div>';
+  /* E8's front door: the bell caps at 8 and shows only MINE — the review page
+     is the uncapped, everyone's-agents backlog. Linked from both branches so
+     "where did that proposal go" always has an answer on screen. */
+  var allLink = '<div style="display:flex;justify-content:flex-end;margin-top:8px">' +
+    '<button class="btn sm ghost" ' + act('goProposals') + '>' + inlineIcon('eye') + ' All proposals</button></div>';
   if (!items.length && !props.length && !recaps.length) {
     return head + '<div class="bp-empty">' + icon('checkC') + '<b>All caught up</b>' +
-      '<span>@mentions, replies and agent activity land here — each anchored to the thing it’s about.</span></div>';
+      '<span>@mentions, replies and agent activity land here — each anchored to the thing it’s about.</span></div>' +
+      allLink;
   }
   var CAP = 8;
   var rows = human.slice(0, CAP).map(inboxItemHTML).join('') ||
@@ -190,7 +196,71 @@ function renderInbox(d) {
         return feedItem({ type: 'doc', ts: f.created_at, id: f.id, file: f, show: SHOWS_BY_ID[f.show_id] });
       }).join('');
   }
-  return out;
+  return out + allLink;
+}
+
+/* ============================================================================
+   E8 · THE PROPOSALS REVIEW PAGE — the backlog beyond the bell's cap of 8
+   ----------------------------------------------------------------------------
+   listProposals sat in the seam called by nothing while the bell showed the
+   newest eight of MINE and swallowed the rest. This page iterates the whole
+   answer: pending first (the same confirm/reject rows the bell renders, so
+   the two can never disagree about what a proposal looks like), then the
+   resolved record — who decided, when, and the reason a rejection carried.
+   ========================================================================== */
+var PROPS_UI = { shown: 20 };
+function proposalKindTag(p) {
+  var lbl = { document: 'document', tasks_batch: 'task batch', project: 'new event',
+              expense: 'cost', photo: 'photo' }[p.kind] || p.kind;
+  return '<span class="tag">' + esc(lbl) + '</span>';
+}
+function proposalResolvedRow(p) {
+  var f = p.file || {};
+  var confirmed = p.status === 'confirmed';
+  var what = f.vendor || f.name || (p.kind + ' proposal');
+  return '<div class="next-item"' +
+    (f.id > 0 && p.kind !== 'tasks_batch' ? ' ' + act('openViewer', f.id) + ' style="cursor:pointer"' : '') + '>' +
+    '<div class="txt">' + esc(what) +
+    '<span>' + esc(actorName(p.proposed_by)) + ' · ' + esc(fmtDate(String(p.created_at || '').slice(0, 10))) +
+    (p.resolve_reason ? ' · “' + esc(p.resolve_reason) + '”' : '') + '</span></div>' +
+    proposalKindTag(p) +
+    '<span class="pill ' + (confirmed ? 'go' : 'idle') + '"><span class="dot"></span>' +
+    (confirmed ? 'Confirmed' : 'Rejected') + '</span>' +
+    ownerChip(p.resolved_by) + '</div>';
+}
+function viewProposals(rows) {
+  rows = rows || [];
+  var pending = rows.filter(function (p) { return p.status === 'pending'; });
+  var resolved = rows.filter(function (p) { return p.status !== 'pending'; });
+  var pendingRows = pending.map(function (p) {
+    var f = p.file;
+    if (!f) return '';
+    if (f.kind === 'photo') return photoProposalRow(f);
+    return feedItem({ type: 'doc', ts: f.created_at, id: f.id, file: f, show: SHOWS_BY_ID[f.show_id] });
+  }).join('') ||
+    '<div class="empty">Nothing waiting on a human. Agent proposals land here the moment one files.</div>';
+  var shown = Math.max(PROPS_UI.shown, 20);
+  var resolvedRows = resolved.slice(0, shown).map(proposalResolvedRow).join('') ||
+    '<div class="empty">' + (api.isDemo()
+      ? 'The demo store keeps no resolved history — confirm or reject one above and it simply leaves the queue.'
+      : 'Nothing resolved yet.') + '</div>';
+  var more = resolved.length > shown
+    ? '<div style="display:flex;justify-content:center;margin-top:10px">' +
+      '<button class="btn sm ghost" ' + act('propsMore') + '>' + icon('chevD') + 'Show ' +
+      Math.min(25, resolved.length - shown) + ' earlier · ' + (resolved.length - shown) + ' more</button></div>'
+    : '';
+  return '<div class="page-h"><div><h1>Proposals</h1><div class="sub">Everything the agents have asked a ' +
+    'human to decide — file, don’t fire, made a page. Pending proposals confirm or reject right here, ' +
+    'exactly as they do in the bell; the resolved list is the record of who decided and why.</div></div></div>' +
+    '<div class="stats" style="grid-template-columns:repeat(3,1fr)">' +
+    '<div class="stat accent"><div class="rail-c" style="background:var(--warn)"></div><div class="k">Pending · needs a human</div><div class="v" style="color:' + (pending.length ? 'var(--warn)' : 'var(--text)') + '">' + pending.length + '</div></div>' +
+    '<div class="stat"><div class="rail-c" style="background:var(--go)"></div><div class="k">Confirmed</div><div class="v">' + resolved.filter(function (p) { return p.status === 'confirmed'; }).length + '</div></div>' +
+    '<div class="stat"><div class="rail-c" style="background:var(--idle)"></div><div class="k">Rejected</div><div class="v">' + resolved.filter(function (p) { return p.status === 'rejected'; }).length + '</div></div></div>' +
+    '<div class="panel" style="margin-bottom:16px"><h3>Pending · ' + pending.length + '</h3>' +
+    '<div class="fin-feed">' + pendingRows + '</div>' +
+    '<div class="perm-note">' + inlineIcon('lock') + ' Who may resolve one: the person it is assigned to, ' +
+    'the owner of the target folder, or a manager — the server refuses anyone else, whatever this page offers.</div></div>' +
+    '<div class="panel"><h3>Resolved · ' + resolved.length + '</h3><div class="next-list">' + resolvedRows + '</div>' + more + '</div>';
 }
 
 /* one fetch pair, shared by the panel and its refresh */
@@ -213,10 +283,12 @@ async function toggleBellPanel(anchor) {
     pop.style.left = left + 'px';
     pop.style.top = (rc.bottom + 8) + 'px';
   } catch (_) { pop.style.right = '20px'; pop.style.top = '64px'; }
-  /* navigating out of the panel (View on a proposal) should dismiss it */
+  /* navigating out of the panel (View on a proposal, the backlog page) should
+     dismiss it */
   pop.addEventListener('click', function (ev) {
     var t2 = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
-    if (t2 && t2.getAttribute('data-act') === 'openViewer') closeBellPanel();
+    var a2 = t2 && t2.getAttribute('data-act');
+    if (a2 === 'openViewer' || a2 === 'goProposals') closeBellPanel();
   });
   setTimeout(function () { document.addEventListener('mousedown', bellOutside); }, 0);
   return refreshBellPanel();

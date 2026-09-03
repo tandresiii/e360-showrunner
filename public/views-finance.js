@@ -14,6 +14,10 @@
    ========================================================================== */
 
 /* ---------------------------------------------------------- shared pieces -- */
+/* how deep the finance feed renders — grown by the Load-more button, reset
+   never (a person who dug stays dug for the session) */
+var FEED_UI = { shown: 14 };
+
 /* A feed row's SHOW is optional. The inbox hands us `SHOWS_BY_ID[f.show_id]`,
    which is undefined for a doc anchored on a job or a PO rather than a show
    (and for anything whose show has not hydrated yet) — same show-less class as
@@ -175,11 +179,19 @@ function viewFinance(fin) {
     '<div class="perm-note" style="padding:12px 16px;margin-top:0">' + inlineIcon('scale') + ' <b>rental</b> = league deal, E360 retains the gear · <b>sale</b> = individual team agreement, hardware carried as cost-of-goods on the job. <b>Committed</b> = ordered-but-not-received POs — the hatched tier on the burn bars; it becomes actual as hardware lands.</div></div>';
 
   /* --- the feed ------------------------------------------------------------ */
-  var FEED_N = 14;
-  var feedRows = fin.feed.slice(0, FEED_N).map(feedItem).join('') ||
+  /* The cap used to be a hard 14 with a sentence claiming "the full ledger
+     lands with the backend" — the backend LANDED and pages happily; the cap
+     was the client's own. Load-more walks the rest of what this window holds,
+     a screenful at a time, and the button says how many are left instead of
+     blaming a system that already works. */
+  var shown = Math.max(FEED_UI.shown, 14);
+  var feedRows = fin.feed.slice(0, shown).map(feedItem).join('') ||
     '<div class="empty">No money events yet.</div>';
-  var more = fin.feed.length > FEED_N
-    ? '<div class="perm-note">+' + (fin.feed.length - FEED_N) + ' earlier — the full ledger lands with the backend.</div>' : '';
+  var more = fin.feed.length > shown
+    ? '<div style="display:flex;justify-content:center;margin-top:10px">' +
+      '<button class="btn sm ghost" ' + act('finFeedMore') + '>' + icon('chevD') + 'Show ' +
+      Math.min(25, fin.feed.length - shown) + ' earlier · ' + (fin.feed.length - shown) + ' more</button></div>'
+    : '';
   var feedPanel = '<div class="panel"><h3>Finance feed · every money event</h3><div class="fin-feed">' + feedRows + '</div>' + more +
     '<div class="perm-note">' + inlineIcon('bolt') + ' Captured as a <b>byproduct</b> of people doing normal work — docs filed, costs landing, bookings confirming, budgets moving. Agent-filed rows carry their provenance; anything <b>proposed</b> waits for a human confirm.</div></div>';
 

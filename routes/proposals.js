@@ -251,10 +251,19 @@ async function confirmTasksBatch(c, proposal, overrides, session) {
   let sort = (await c.query(
     'SELECT COALESCE(MAX(sort_order),0) AS m FROM steps WHERE show_id=$1', [show.id])).rows[0].m;
   const stepIds = [];
+  // E4. Retargeted batches re-derive their dates. The propose path already
+  // fills `dueDate` against the ORIGIN show, so the old `s.dueDate || …` here
+  // could never re-derive anything: a batch moved to a show three weeks out
+  // kept the wrong show's calendar. When the override moves the batch AND the
+  // step carries an offset, the offset (the agent's actual intent — "T minus
+  // 3") wins against the NEW show's event date; an explicit date with no
+  // offset is kept, because a date typed by hand outranks a formula.
+  const retargeted = intOrNull(overrides.showId) != null
+    && intOrNull(overrides.showId) !== proposal.show_id;
   for (const s of prepared) {
-    // Re-derive the due date against THIS show — an override may have moved
-    // the batch to a show with a different event date.
-    const due = s.dueDate || (s.off != null && show.event_date ? addDays(show.event_date, s.off) : '');
+    const due = (retargeted && s.off != null && show.event_date)
+      ? addDays(show.event_date, s.off)
+      : (s.dueDate || (s.off != null && show.event_date ? addDays(show.event_date, s.off) : ''));
     const r = await c.query(
       `INSERT INTO steps (show_id, lane, title, status, owner, due_date, due_offset_days,
          evidence_type, auto_source, sort_order, notes, provenance, source_ref)

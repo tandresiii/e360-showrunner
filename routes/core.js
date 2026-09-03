@@ -1410,6 +1410,72 @@ router.post('/templates', requireRole('manager'), asyncH(async (req, res) => {
   res.json(dbToTemplate(t));
 }));
 
+// ── the editability wave: the SOP is finally WRITABLE ────────────────────────
+// The Templates screen rendered a full grid editor over these rows and every
+// one of its buttons was a toast. POST existed (above, manager floor); these
+// two are its missing halves, on the same floor. PUT replaces the template's
+// rows in ONE transaction — the editor stages row edits/adds/deletes in the
+// DOM and commits the whole grid, so a half-saved SOP cannot exist. Lanes are
+// validated against the template's event type exactly as POST validates them;
+// a row in a lane the type does not declare is SKIPPED, not an error, which is
+// the same stance instantiateTemplateOnShow takes when reading.
+router.put('/templates/:id', requireRole('manager'), asyncH(async (req, res) => {
+  const cur = (await pool.query('SELECT * FROM event_type_templates WHERE id=$1',
+    [idParam(req)])).rows[0];
+  if (!cur) throw notFound('Template not found');
+  const b = req.body || {};
+  // event_type is IMMUTABLE on purpose: the lane set is the type's, and a
+  // template that switched types would carry rows in lanes its new type never
+  // declared. Retype = save as a new template.
+  if (has(b, 'event_type') && pick(b, 'event_type') !== cur.event_type) {
+    throw badRequest('a template cannot change its event type — save it as a new template instead');
+  }
+  const allowed = await lanesForType(cur.event_type);
+  const t = await withTx(async (c) => {
+    const upd = await c.query(
+      'UPDATE event_type_templates SET name=$1, description=$2 WHERE id=$3 RETURNING *',
+      [pick(b, 'name', cur.name) || cur.name, pick(b, 'description', cur.description) || '', cur.id]);
+    if (has(b, 'steps')) {
+      await c.query('DELETE FROM template_steps WHERE template_id=$1', [cur.id]);
+      let i = 0;
+      for (const s of (pick(b, 'steps') || [])) {
+        const lane = pick(s, 'lane');
+        if (!allowed.includes(lane) || !s.title) continue;
+        await c.query(
+          `INSERT INTO template_steps (template_id, lane, title, due_offset_days, owner_role,
+             evidence_type, auto_source, depends_on_title, sort_order)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [cur.id, lane, s.title, intOrNull(pick(s, 'due_offset_days')), pick(s, 'owner_role') || null,
+           oneOf(pick(s, 'evidence_type'), EVIDENCE_TYPES, 'none'),
+           oneOf(pick(s, 'auto_source'), AUTO_SOURCES, 'none'),
+           pick(s, 'depends_on_title') || pick(s, 'depends_on') || '',
+           intOrNull(pick(s, 'sort_order')) != null ? intOrNull(pick(s, 'sort_order')) : i++]);
+      }
+    }
+    return upd.rows[0];
+  });
+  const steps = await pool.query(
+    'SELECT * FROM template_steps WHERE template_id=$1 ORDER BY sort_order ASC, id ASC', [t.id]);
+  res.json(dbToTemplate(t, { steps: steps.rows.map(dbToTemplateStep) }));
+}));
+
+// DELETE removes a template AND its rows. Shows already seeded keep their
+// steps — instantiation COPIES rows, it never references them — so deleting a
+// template rewrites no history; it only changes what the next show seeds from.
+// Deleting a type's oldest template promotes the next-oldest to default (the
+// seed pick is ORDER BY id LIMIT 1); deleting the last one leaves the type
+// seeding nothing, which the create flow already survives.
+router.delete('/templates/:id', requireRole('manager'), asyncH(async (req, res) => {
+  const cur = (await pool.query('SELECT * FROM event_type_templates WHERE id=$1',
+    [idParam(req)])).rows[0];
+  if (!cur) throw notFound('Template not found');
+  await withTx(async (c) => {
+    await c.query('DELETE FROM template_steps WHERE template_id=$1', [cur.id]);
+    await c.query('DELETE FROM event_type_templates WHERE id=$1', [cur.id]);
+  });
+  res.json({ ok: true, id: cur.id, event_type: cur.event_type });
+}));
+
 router.post('/shows/:id/instantiate-template', requireRole('pm'), asyncH(async (req, res) => {
   const show = await loadShow(idParam(req));
   if (!show) throw notFound('Show not found');

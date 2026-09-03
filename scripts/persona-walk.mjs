@@ -112,9 +112,11 @@ function reach(what, { seam, action, rendered = true }) {
 
 // ── HTTP, the way public/api.js does it (x-auth-token, JSON, no cookies) ────
 let BASE = '';
-async function call(method, p, { token, body, raw } = {}) {
+async function call(method, p, { token, key, idem, body, raw } = {}) {
   const h = {};
   if (token) h['x-auth-token'] = token;
+  if (key) h['x-agent-key'] = key;          // §26 — a personal agent files things
+  if (idem) h['x-idempotency-key'] = idem;
   let payload;
   if (raw !== undefined) { h['Content-Type'] = 'application/octet-stream'; payload = raw; }
   else if (body !== undefined) { h['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
@@ -1251,6 +1253,180 @@ async function main() {
      parseInt((await pool.query(
        `SELECT (SELECT COUNT(*) FROM shows WHERE project_id=$1)
              + (SELECT COUNT(*) FROM jobs WHERE project_id=$1) AS n`, [SPID])).rows[0].n, 10) === 0);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('26 · the proposal that named no show gets pointed at one');
+  // ══════════════════════════════════════════════════════════════════════════
+  // E4's second half. The seam forwarded `overrides` since the seam pass and
+  // the client posted {} — a folder-anchored proposal confirmed into a
+  // document with NO cost, silently. The picker modal re-posts the same
+  // confirm with {overrides:{showId}}; these steps walk that exact wire.
+  reach('Confirm a proposal', { seam: 'confirmDoc', action: 'confirmDoc' });
+  reach('Retarget it (the one-field show picker)',
+    { seam: 'confirmDoc', action: ['rtCommit', 'rtSkip'] });
+  ok('the picker re-posts {overrides:{showId}} — never a bare confirm',
+     /confirmDocAct\(fileId, \{ showId: Number\(showId\) \}\)/.test(APP_JS));
+  ok('…and a Confirm on a show-less proposal asks BEFORE the server has to refuse',
+     /!f0\.show_id/.test(APP_JS) && /openRetarget/.test(APP_JS));
+  const wAK = await POST('/api/keys', { label: 'walk retarget agent', scopes: ['agent:file'] },
+    { token: T.brenden });
+  ok('brenden mints his agent a key', wAK.status === 200 && !!wAK.body.key, wAK.body?.key_prefix);
+  const worp = await POST('/api/agent/documents', {
+    projectId: PROJ, kind: 'receipt', name: 'Hertz — which match?', ext: '.pdf',
+    amount: 480, vendor: 'Hertz',
+    provenance: { sourceKind: 'email', sourceRef: 'walk:ov', sourceLabel: 'Hertz receipt',
+                  confidence: 66 }
+  }, { key: wAK.body.key, idem: 'walk:ov#doc' });
+  ok('…which files a folder-only receipt as a proposal (no show named)',
+     worp.status === 200 && worp.body.status === 'proposed' && !!worp.body.proposalId, worp.body);
+  const wconf = await POST(`/api/proposals/${worp.body.proposalId}/confirm`,
+    { overrides: { showId: SHOW, category: 'travel' } }, { token: T.brenden });
+  ok('confirmed through the picker’s overrides, the cost finally lands',
+     wconf.status === 200 && (wconf.body.created.expenses || []).length === 1,
+     wconf.body.created);
+  ok('…on the show the human pointed at',
+     (await pool.query('SELECT show_id FROM expenses WHERE id=$1',
+       [(wconf.body.created.expenses || [])[0]])).rows[0].show_id === SHOW);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('27 · the proposals backlog is a PAGE, not a popover cap of 8');
+  // ══════════════════════════════════════════════════════════════════════════
+  reach('Proposals review page (nav + bell link)',
+    { seam: 'listProposals', action: ['goProposals', 'propsMore'] });
+  const wplist = await GET('/api/proposals', { token: T.brenden });
+  ok('the review read lists brenden’s resolved proposal, decision and all',
+     wplist.status === 200 && wplist.body.some((p) =>
+       p.id === worp.body.proposalId && p.status === 'confirmed' && p.resolved_by === 'brenden'),
+     wplist.body?.length);
+  const worp2 = await POST('/api/agent/documents', {
+    projectId: PROJ, kind: 'receipt', name: 'Sunbelt — unsure', ext: '.pdf', amount: 75,
+    vendor: 'Sunbelt', provenance: { sourceKind: 'email', sourceRef: 'walk:ov2', confidence: 62 }
+  }, { key: wAK.body.key, idem: 'walk:ov2#doc' });
+  ok('…a second proposal pends', worp2.status === 200 && worp2.body.status === 'proposed');
+  ok('…pat may not resolve somebody else’s',
+     (await POST(`/api/proposals/${worp2.body.proposalId}/reject`, { reason: 'not mine' },
+       { token: T.pat })).status === 403);
+  ok('…brenden rejects it with a reason the page can print',
+     (await POST(`/api/proposals/${worp2.body.proposalId}/reject`, { reason: 'duplicate of last week' },
+       { token: T.brenden })).status === 200);
+  const wplist2 = await GET('/api/proposals?status=rejected', { token: T.brenden });
+  ok('…and the resolved record carries it',
+     wplist2.body.some((p) => p.id === worp2.body.proposalId
+       && p.resolve_reason === 'duplicate of last week'), wplist2.body?.length);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('28 · a mis-filed document gets a new name and the right kind');
+  // ══════════════════════════════════════════════════════════════════════════
+  reach('Rename / re-kind (viewer meta panel)', { seam: 'updateFile', action: ['editFile', 'feCommit'] });
+  const wfile = await POST('/api/files',
+    { show_id: SHOW, kind: 'other', name: 'IMG_2291', ext: 'pdf' }, { token: T.omar });
+  ok('omar registers a camera-roll-named doc', wfile.status === 200, wfile.body);
+  ok('…pat may not touch it (not the uploader, owns nothing)',
+     (await PUT(`/api/files/${wfile.body.id}`, { name: 'hijack' }, { token: T.pat })).status === 403);
+  const wfren = await PUT(`/api/files/${wfile.body.id}`,
+    { name: 'Hertz receipt — Fiserv load-in', kind: 'receipt' }, { token: T.omar });
+  ok('…the uploader renames AND re-kinds it',
+     wfren.status === 200 && wfren.body.kind === 'receipt'
+     && wfren.body.name === 'Hertz receipt — Fiserv load-in', wfren.body);
+  ok('…an unknown kind KEEPS the current one (oneOf, never garbage)',
+     (await PUT(`/api/files/${wfile.body.id}`, { kind: 'meme' }, { token: T.omar })).body.kind === 'receipt');
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('29 · the show report that IS the attached document  (D4)');
+  // ══════════════════════════════════════════════════════════════════════════
+  reach('Attach the document (report editor)',
+    { seam: 'fileTechReport', action: ['repAttach', 'repAttachCommit'] });
+  ok('the promise-string finally has a control behind it',
+     /repAttach/.test(SRC['views-folder.js']));
+  const wrep = (await GET(`/api/shows/${SHOW}/tech-reports`, { token: T.brenden }))
+    .body.reports.find((r) => r.username === 'omar');
+  ok('omar’s report row is in hand', !!wrep, wrep);
+  const wattach = await PUT(`/api/tech-reports/${wrep.id}`, { file_id: wfile.body.id },
+    { token: T.omar });
+  ok('…he attaches the doc he already had — the report keeps its body and gains its file',
+     wattach.status === 200 && wattach.body.report.file_id === wfile.body.id
+     && wattach.body.report.status === 'filed', wattach.body.report);
+  const wForeignShow = await POST('/api/shows',
+    { project_id: PROJ, name: 'Foreign-doc scratch', seed_template: false }, { token: T.tom });
+  const wother = await POST('/api/files',
+    { show_id: wForeignShow.body.id, kind: 'other', name: 'foreign doc', ext: 'pdf' },
+    { token: T.tom });
+  ok('…a file from ANOTHER show is refused — a report cannot smuggle one in',
+     wother.status === 200 &&
+     (await PUT(`/api/tech-reports/${wrep.id}`, { file_id: wother.body.id },
+       { token: T.omar })).status === 400, wother.body?.id);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('30 · the health pill obeys a person who knows better  (rag_override)');
+  // ══════════════════════════════════════════════════════════════════════════
+  reach('Health override (pencil on the pill)', { seam: 'updateShow', action: ['ragOverride', 'ragSet'] });
+  ok('the client rollup honors the override everywhere the pill renders',
+     /rag_override/.test(SRC['components.js']) && /by hand/.test(SRC['views-folder.js']));
+  ok('…pat cannot repaint somebody else’s show',
+     (await PUT(`/api/shows/${SHOW}`, { rag_override: 'go' }, { token: T.pat })).status === 403);
+  const wrag = await PUT(`/api/shows/${SHOW}`, { rag_override: 'crit' }, { token: T.brenden });
+  ok('the owner sets it by hand', wrag.status === 200 && wrag.body.rag === 'crit'
+     && wrag.body.rag_override === 'crit', { rag: wrag.body.rag, o: wrag.body.rag_override });
+  ok('…the read agrees — override WINS over derived',
+     (await GET(`/api/shows/${SHOW}`, { token: T.omar })).body.rag === 'crit');
+  const wragClear = await PUT(`/api/shows/${SHOW}`, { rag_override: null }, { token: T.brenden });
+  ok('…and clearing it hands the pill back to the pipeline',
+     wragClear.status === 200 && wragClear.body.rag_override === null, wragClear.body.rag);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('31 · the template editor’s Save button saves  (A5)');
+  // ══════════════════════════════════════════════════════════════════════════
+  reach('Template editor writes', {
+    seam: ['updateTemplate', 'createTemplateVersion', 'deleteTemplate', 'listTemplateVersions'],
+    action: ['tplSave', 'tplBank', 'tplDelete', 'tplAddStep', 'tplRowDel'] });
+  ok('the Save button is not a toast any more',
+     !/toastAttrs\('Template saved'/.test(SRC['views-global.js']));
+  ok('a pm cannot rewrite the SOP — POST',
+     (await POST('/api/templates', { name: 'sneak', event_type: 'led' }, { token: T.brenden })).status === 403);
+  const wtplLive = await GET('/api/templates/led', { token: T.morgan });
+  ok('a pm cannot rewrite the SOP — PUT / DELETE',
+     (await PUT(`/api/templates/${wtplLive.body.id}`, { name: 'sneak' }, { token: T.brenden })).status === 403 &&
+     (await DEL(`/api/templates/${wtplLive.body.id}`, { token: T.brenden })).status === 403);
+  const wbank = await POST('/api/templates', {
+    name: 'LED SOP — banked by walk', event_type: 'led',
+    steps: [{ lane: 'venue', title: 'Walk-added rigging check', due_offset_days: -9 }]
+  }, { token: T.morgan });
+  ok('a manager banks a copy', wbank.status === 200 && wbank.body.id > 0, wbank.body);
+  ok('…and the LIVE SOP stays the oldest — banking never hijacks what seeds',
+     (await GET('/api/templates/led', { token: T.morgan })).body.id === wtplLive.body.id);
+  const wput = await PUT(`/api/templates/${wbank.body.id}`, {
+    steps: [{ lane: 'venue', title: 'Walk-edited rigging check', due_offset_days: -12 },
+            { lane: 'gear', title: 'Walk-added spare count', due_offset_days: -5 }]
+  }, { token: T.morgan });
+  ok('…edits the grid in one transaction', wput.status === 200 && (wput.body.steps || []).length === 2,
+     wput.body.steps?.length);
+  ok('…and deletes the banked copy, rows and all',
+     (await DEL(`/api/templates/${wbank.body.id}`, { token: T.morgan })).status === 200 &&
+     (await pool.query('SELECT COUNT(*)::int AS n FROM template_steps WHERE template_id=$1',
+       [wbank.body.id])).rows[0].n === 0);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('32 · the small honest things — search, landing, feed, NAS, tags, archive');
+  // ══════════════════════════════════════════════════════════════════════════
+  ok('A12 · the topbar search is wired, not decoration',
+     /initGlobalSearch\(\)/.test(APP_JS) && /globalSearch/.test(APP_JS));
+  ok('…and its empty state admits the gap instead of hiding it',
+     /no server-wide search yet/i.test(APP_JS));
+  ok('D1 · a tech lands on their own work at boot',
+     /landingView/.test(APP_JS) && /'tech' \? 'mytasks'/.test(APP_JS));
+  reach('Finance feed digs deeper', { seam: 'getFinanceOverview', action: 'finFeedMore' });
+  ok('…the false "full ledger lands with the backend" sentence is gone',
+     !/full ledger lands with the backend/.test(SRC['views-finance.js']));
+  ok('36 · the NAS card asks the probe instead of hardcoding green',
+     !/>reachable</.test(SRC['views-global.js']) && /ctx\.health/.test(SRC['views-global.js']));
+  reach('Photo tag chips edit in place', { seam: 'updatePhoto', action: ['phTagAdd', 'phTagDel'] });
+  reach('Archive folder (season header)', { seam: 'archiveProject', action: 'archiveProject' });
+  ok('…a manager cannot archive — admin floor holds',
+     (await POST(`/api/projects/${PROJ}/archive`, {}, { token: T.morgan })).status === 403);
+  const warch = await POST(`/api/projects/${PROJ}/archive`, {}, { token: T.tom });
+  ok('…Tom archives the folder from its header', warch.status === 200, warch.body);
+  ok('…and puts it back — nothing was lost',
+     (await POST(`/api/projects/${PROJ}/unarchive`, {}, { token: T.tom })).status === 200);
 
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);

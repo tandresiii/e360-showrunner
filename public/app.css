@@ -1531,3 +1531,18 @@ tr.archived:hover td{opacity:1}
   #printArea .cs-day{page-break-inside:avoid}
   .nav-scrim{display:none!important}
 }
+
+/* ═══ A12 · GLOBAL SEARCH — the topbar dropdown (rough+polish wave) ═══
+   The roster-pop's shell at the bell-pop's width: grouped hits, each one a
+   normal data-act button, so navigation is the same delegated path as every
+   other click in the app. */
+.search-pop{position:fixed; z-index:80; max-width:min(440px,calc(100vw - 24px)); max-height:min(480px,calc(100vh - 90px)); overflow:auto; background:var(--surface); border:1px solid var(--border-strong); border-radius:var(--r); box-shadow:var(--shadow); padding:6px}
+.search-pop .sp-sec{font-size:10.5px; text-transform:uppercase; letter-spacing:.09em; color:var(--muted); font-weight:700; padding:9px 9px 4px}
+.search-pop .sp-hit{display:flex; align-items:center; gap:9px; width:100%; text-align:left; background:none; border:0; border-radius:var(--r-sm); padding:7px 9px; cursor:pointer; color:var(--text); font-family:inherit}
+.search-pop .sp-hit:hover{background:var(--surface-2)}
+.search-pop .sp-hit svg{width:15px; height:15px; color:var(--muted); flex:none}
+.search-pop .sp-t{display:flex; flex-direction:column; min-width:0}
+.search-pop .sp-t b{font-size:12.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.search-pop .sp-t span{font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.search-pop .sp-note{font-size:11px; color:var(--muted); padding:8px 9px 6px; line-height:1.5; border-top:1px solid var(--border); margin-top:4px}
+.search-pop .sp-note:first-child{border-top:0; margin-top:0}

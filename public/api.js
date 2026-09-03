@@ -745,7 +745,14 @@ var api = (function () {
         /* the mock's `off` is a T-minus MAGNITUDE; the column is signed */
         off: Math.abs(Number(s.due_offset_days) || 0),
         flag: s.depends_on_title ? 'dep'
-            : (s.auto_source && s.auto_source !== 'none' ? 'auto' : '')
+            : (s.auto_source && s.auto_source !== 'none' ? 'auto' : ''),
+        /* the editor writes the grid BACK now, so the row's full fidelity has
+           to survive the reshape — a Save that silently stripped auto_source
+           would disarm the flex automation on the whole event type */
+        off_signed: Number(s.due_offset_days) || 0,
+        evidence_type: s.evidence_type || 'none',
+        auto_source: s.auto_source || 'none',
+        depends_on_title: s.depends_on_title || ''
       });
     });
     if (!row) steps = TEMPLATE_STEPS[type] || {};
@@ -1556,7 +1563,13 @@ var api = (function () {
       }
       return Promise.all([SR.get('/api/templates'), eventTypes()]).then(function (r) {
         var byType = {};
-        (r[0] || []).forEach(function (t) { if (!byType[t.event_type]) byType[t.event_type] = t; });
+        /* the OLDEST row per type — the SAME pick rule the server's seeding
+           uses (ORDER BY id LIMIT 1), so the card, the editor and what a new
+           show actually seeds from can never be three different templates */
+        (r[0] || []).forEach(function (t) {
+          var cur = byType[t.event_type];
+          if (!cur || (Number(t.id) || 0) < (Number(cur.id) || 0)) byType[t.event_type] = t;
+        });
         var keys = Object.keys(byType);
         (r[1].types || []).forEach(function (t) { if (keys.indexOf(t.key) < 0) keys.push(t.key); });
         return keys.map(function (type) { return shapeTpl(type, byType[type], r[1]); });
@@ -3798,13 +3811,64 @@ var api = (function () {
     },
 
     /* ---- E8. the proposals backlog, beyond the bell's cap of 8 ----------- */
+    /* The REVIEW PAGE's read. Normalized to ONE shape in both modes:
+       [{id, kind, status, proposed_by, created_at, resolved_by, resolved_at,
+         resolve_reason, show_id, project_id, file}], where `file` is the same
+       row the bell renders through feedItem — the materialized quarantined doc
+       when there is one, a synthesized stub when the proposal IS the record
+       (the myInbox reshape, reused). The demo store has no proposal rows, only
+       proposed files, so its twin wraps them as pending entries; a resolved
+       backlog is a server fact and the demo answers it with an honest empty. */
     listProposals: function (opts) {
       opts = opts || {};
-      if (!API()) return ok(proposalsForUser(ME));
-      return SR.get('/api/proposals' + SR.qs({
-        status: opts.status || null, kind: opts.kind || null,
-        limit: Number(opts.limit) || 100
-      }));
+      if (!API()) {
+        var rows = proposalsForUser(ME).map(function (f) {
+          return { id: null, kind: f.kind, status: 'pending',
+                   proposed_by: (f.provenance && 'agent:' + f.provenance.agent_user) || 'agent',
+                   created_at: f.created_at, resolved_by: null, resolved_at: null,
+                   resolve_reason: null, show_id: f.show_id || null,
+                   project_id: f.project_id || null, file: f };
+        });
+        if (opts.status && opts.status !== 'pending') rows = [];
+        return ok(rows);
+      }
+      return Promise.all([
+        SR.get('/api/proposals' + SR.qs({
+          status: opts.status || null, kind: opts.kind || null,
+          limit: Number(opts.limit) || 100
+        })),
+        SR.get('/api/files' + SR.qs({ status: 'proposed', limit: 200 }))
+          .then(null, function () { return []; })
+      ]).then(function (r) {
+        var byId = {};
+        (r[1] || []).map(A.file).forEach(function (f) { byId[f.id] = f; });
+        return (r[0] || []).map(function (p) {
+          var ids = (p.created_rows && p.created_rows.files) || [];
+          var f = null;
+          for (var i = 0; i < ids.length && !f; i++) {
+            f = byId[ids[i]] || FILES_BY_ID[ids[i]] || null;
+          }
+          if (!f) {
+            /* nothing materialized (or already filed on confirm) — synthesize
+               the minimum a review row prints, same stand as myInbox */
+            var pl = p.payload || {};
+            f = A.file({ id: -p.id, kind: pl.kind || 'other',
+                         name: pl.name || (p.kind + ' proposal'),
+                         vendor: pl.vendor || null,
+                         amount: pl.amount != null ? Number(pl.amount) : null,
+                         show_id: p.show_id || null, project_id: p.project_id || null,
+                         status: p.status === 'pending' ? 'proposed' : p.status,
+                         created_at: p.created_at, provenance: p.provenance || null,
+                         meta: '', tags: [] });
+          }
+          f.proposal_id = p.id;
+          return { id: p.id, kind: p.kind, status: p.status,
+                   proposed_by: p.proposed_by, created_at: p.created_at,
+                   resolved_by: p.resolved_by || null, resolved_at: p.resolved_at || null,
+                   resolve_reason: p.resolve_reason || null,
+                   show_id: p.show_id || null, project_id: p.project_id || null, file: f };
+        });
+      });
     },
     /* E4. `overrides` is the whole re-targeting mechanism — how a human says
        "this belongs to THAT show". The client posted {} and so a low-confidence
@@ -4045,6 +4109,80 @@ var api = (function () {
       });
     },
 
+    /* ==================================================================== */
+    /* THE ROUGH + POLISH WAVE (2026-09-03, evening) — the audit's second      */
+    /* tier: doors that exist but stick, and copy that lies.                   */
+    /*                                                                        */
+    /*   E4   retarget       confirmDoc(fileId, overrides)  — above, now FED   */
+    /*   E8   review page    listProposals                  — above, reshaped  */
+    /*   27   file rename    PUT /files/:id     -> updateFile                  */
+    /*   A5   templates      PUT/DELETE (new)   -> update/deleteTemplate,      */
+    /*                       POST (existed)     -> createTemplateVersion       */
+    /*   36   NAS card       GET /api/health    -> health                      */
+    /* ==================================================================== */
+
+    /* ---- 27. rename / re-kind a file ------------------------------------- */
+    /* PUT /files/:id has taken name + kind since the wiring pass and nothing
+       tracked it in any list. The gate travels: the server's sentence is
+       "canEditProject OR the uploader", which is canDeleteFile()'s predicate,
+       so the pencil and the trash render for exactly the same people. */
+    updateFile: function (id, patch) {
+      patch = patch || {};
+      if (!API()) {
+        var f = FILES_BY_ID[Number(id)];
+        if (!f) return fail('file ' + id + ' not found');
+        if (patch.name !== undefined && String(patch.name).trim()) f.name = String(patch.name).trim();
+        /* mirror the server's oneOf: an unknown kind KEEPS the current one */
+        if (patch.kind && _FILE_KINDS.indexOf(patch.kind) >= 0) f.kind = patch.kind;
+        var s = SHOWS_BY_ID[f.show_id];
+        if (s && s.activity) s.activity.unshift(mkAct(ME, 'file.update', f.name, 0, _nowHM()));
+        return ok(f);
+      }
+      return SR.put('/api/files/' + Number(id), patch).then(A.file);
+    },
+
+    /* ---- A5. the SOP is writable — the template editor's three writes ---- */
+    /* The editor loads GET /templates/:type — the type's OLDEST template,
+       which is the one createEvent and Seed-pipeline seed from. So Save is a
+       PUT on that row: "every show seeded from this template inherits the
+       change", exactly as the editor's hint always claimed. POST banks a
+       snapshot copy (visible in the versions list, deletable, never the one
+       that seeds unless the live one is deleted); DELETE removes a version.
+       The demo twin rewrites TEMPLATE_STEPS so the grid re-renders what was
+       saved; versions are a server fact and the demo says so. */
+    listTemplateVersions: function (type) {
+      if (!API()) return ok([]);
+      return SR.get('/api/templates' + SR.qs({ event_type: type })).then(function (rows) {
+        return (rows || []).map(function (t) {
+          return { id: t.id, name: t.name, description: t.description || '',
+                   event_type: t.event_type, created_at: t.created_at,
+                   steps: (t.steps || []).length };
+        }).sort(function (a, b) { return a.id - b.id; });
+      });
+    },
+    updateTemplate: function (id, body) {
+      if (!API()) return _saveLocalTemplate(body);
+      return SR.put('/api/templates/' + Number(id), body || {});
+    },
+    createTemplateVersion: function (body) {
+      if (!API()) return _saveLocalTemplate(body);
+      return SR.post('/api/templates', body || {});
+    },
+    deleteTemplate: function (id) {
+      if (!API()) return fail('template versions live on the server — the demo has only its built-in config');
+      return SR.del('/api/templates/' + Number(id));
+    },
+
+    /* ---- 36. the health probe, for the one card that claimed to know ----- */
+    /* GET /api/health is public and secret-free (a driver name, a boolean, a
+       host); the Settings NAS card hardcoded green "reachable" instead of
+       asking. Demo answers null and the card says "modeled" — a fictional NAS
+       does not get a live status. */
+    health: function () {
+      if (!API()) return ok(null);
+      return SR.get('/api/health', { quiet: true }).then(null, function () { return null; });
+    },
+
     /* ---- A8. the served feature flags, consumed at last ------------------ */
     /* GET /api/config reports features.schedulerPush and the README says the UI
        greys the button; the UI never read it. Demo has no server, so it answers
@@ -4147,6 +4285,33 @@ var api = (function () {
     delete SHOWS_BY_ID[s.id];
     for (var k = ALL_SHOWS.length - 1; k >= 0; k--) if (ALL_SHOWS[k].id === s.id) ALL_SHOWS.splice(k, 1);
   }
+  /* ---- the rough+polish wave's demo-twin helpers ------------------------- */
+  /* the server's FILE_KINDS whitelist, mirrored so a demo re-kind follows the
+     same oneOf rule: an unknown kind keeps the current one, never errors */
+  var _FILE_KINDS = ['spec', 'proof', 'contract', 'confirmation', 'recording', 'other',
+                     'receipt', 'invoice', 'po', 'transcript', 'photo', 'report'];
+  /* the template editor's demo twin: rebuild TEMPLATE_STEPS[type] from the
+     grid the person just saved, so the re-render shows exactly what was kept.
+     Sign flip on purpose: the store's `off` is positive-means-T-minus and the
+     wire's due_offset_days is negative-means-before. */
+  function _saveLocalTemplate(body) {
+    body = body || {};
+    var type = body.event_type;
+    if (!EVENT_TYPES[type]) return fail('unknown event type "' + type + '"');
+    var byLane = {};
+    (body.steps || []).forEach(function (s) {
+      if (!s || !s.title || !s.lane) return;
+      (byLane[s.lane] = byLane[s.lane] || []).push({
+        name: String(s.title), role: s.owner_role || '',
+        off: -(Number(s.due_offset_days) || 0),
+        flag: s.depends_on_title ? 'dep'
+            : (s.auto_source && s.auto_source !== 'none' ? 'auto' : '')
+      });
+    });
+    TEMPLATE_STEPS[type] = byLane;
+    return ok({ event_type: type, name: body.name || null, demo: true });
+  }
+
   /* find a milestone by id across the local store — small data, honest scan */
   function _localMilestone(id) {
     for (var i = 0; i < ALL_SHOWS.length; i++) {

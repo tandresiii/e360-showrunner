@@ -134,6 +134,17 @@ function viewShow(show, opts) {
   return archBanner + '<div class="ef-head">' +
     '<div class="ef-top"><div>' +
     '<div class="ef-title"><h1>' + esc(title) + '</h1>' + typeTag(show.type) + jobTag + ragPill(r.rag) +
+    /* 9's last mile: rag_override rode the PUT whitelist from the start and no
+       control anywhere set it. The pencil lives ON the health pill it governs;
+       an overridden pill says so, because a hand-set green must never read as
+       a derived one. Server gate: canEditProject (manager+ / pm-owner). */
+    (show.rag_override
+      ? '<span class="mini" title="Health is overridden by hand — the pipeline-derived status is ignored until the override is cleared">by hand</span>'
+      : '') +
+    (canEditFolderOf(show)
+      ? '<button class="iconbtn" style="width:24px;height:24px" title="Set or clear a health override" ' +
+        act('ragOverride', show.id) + '>' + icon('pencil') + '</button>'
+      : '') +
       lifecycleChip(show) + archivedChip(show) + '</div>' +
     /* F4 — the scope line sits directly under the title: "what we're
        delivering" belongs next to what we're calling it. */
@@ -1634,11 +1645,24 @@ function reportStatusPill(r) {
   return '<span class="pill ' + esc(m.pill) + '"><span class="dot"></span>' + esc(m.label) + '</span>';
 }
 function reportEditor(rep, show) {
+  /* D4's promise, kept: three UI strings said "or attach the document you
+     already have" and tech_reports.file_id sat unwritten. The chip names the
+     attached doc when one exists; the button opens the picker (a file already
+     on this show, or a fresh upload) — either way the write is the same
+     file_id the backend always accepted. */
+  var doc = rep.file_id ? FILES_BY_ID[rep.file_id] : null;
+  var attachRow = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">' +
+    (doc
+      ? '<span class="tag" title="Filed with this report">' + inlineIcon('doc') + ' ' + esc(doc.name) + '</span>'
+      : '') +
+    '<button class="btn sm ghost" ' + act('repAttach', rep.id) + '>' + icon('link') +
+      (doc ? 'Replace the document' : 'Attach the document you already have') + '</button></div>';
   return '<div class="rep-editor" data-report="' + Number(rep.id) + '">' +
     '<textarea class="rep-in" id="repIn' + Number(rep.id) + '" rows="7" placeholder="' +
     esc('What happened on site. Gear that failed or needs attention, venue notes worth writing into ' +
         'the next advance, hours, anything the next crew should know. Plain words are fine.') +
     '">' + esc(rep.body || '') + '</textarea>' +
+    attachRow +
     '<div class="rep-erow">' +
     '<span class="rep-hint">' + inlineIcon('lock') +
       'Internal. This never reaches a client — the recap generator cannot read it.</span>' +

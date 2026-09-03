@@ -18,6 +18,7 @@
       <a data-view="mytasks"><span data-ic="check"></span><span>My Tasks</span><span class="count" id="c-mine">0</span></a>
       <a data-view="finance"><span data-ic="scale"></span><span>Finance</span><span class="count" id="c-fin">0</span></a>
       <a data-view="purchasing"><span data-ic="cart"></span><span>Purchasing</span><span class="count" id="c-po">0</span></a>
+      <a data-view="proposals"><span data-ic="eye"></span><span>Proposals</span></a>
       <a data-view="changes"><span data-ic="bolt"></span><span>What changed</span></a>
       <a data-view="calendar"><span data-ic="cal"></span><span>Calendar</span></a>
       <a data-view="team"><span data-ic="users"></span><span>Team</span></a>
@@ -36,7 +37,7 @@
     <div class="topbar">
       <button class="iconbtn navbtn" id="menuBtn" title="Menu" data-act="toggleNav"><span data-ic="menu"></span></button>
       <div class="crumb" id="crumb"><b>Projects</b></div>
-      <div class="search"><span data-ic="search"></span><input placeholder="Search events, people, files…"></div>
+      <div class="search" id="searchWrap"><span data-ic="search"></span><input id="globalSearch" placeholder="Search shows, folders, jobs, files…" autocomplete="off"></div>
       <div class="spacer"></div>
       <button class="iconbtn" id="themeBtn" title="Toggle theme"></button>
       <button class="iconbtn" id="bellBtn" title="Inbox — mentions, replies &amp; agent activity" data-act="toggleBell"><span data-ic="bell"></span><span class="bell-badge" id="bellBadge" style="display:none"></span></button>

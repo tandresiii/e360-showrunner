@@ -205,6 +205,15 @@ function viewSeason(project) {
     '<button class="btn ghost" ' + toastAttrs('Not built yet',
       'Pushing a whole season is a per-show fan-out — open a show and use Push to Scheduler, which is real') + '>' +
       icon('send') + 'Push season</button>' +
+    /* A15's other half: ACTIONS.archiveProject existed and rendered nowhere,
+       so the admin path into the archive was auto-sweep or nothing. It sits
+       beside Delete because it is Delete's honest alternative — out of the
+       working set, nothing lost. Admin-only, the same floor as the route. */
+    (canArchive() && !project.archived_at
+      ? '<button class="btn ghost" ' + act('archiveProject', project.id) +
+        ' title="Move this folder and every show in it out of the working set — nothing is deleted, and the Archive view still opens it">' +
+        icon('box') + 'Archive</button>'
+      : '') +
     /* the honest, typed way out — deleteProjectAct owns the confirm that
        names the cascade, so the button itself stays quiet */
     (canEditFolder(project)

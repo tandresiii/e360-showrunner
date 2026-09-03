@@ -1,5 +1,78 @@
 # Showrunner — product coherence review
 
+> ## STATUS — THE ROUGH + POLISH WAVE, 2026-09-03 (evening)
+>
+> The audit's second tier: doors that exist but stick, and copy that lies.
+> All walk-gated (§26–32), smoke §18–19.
+>
+> **Closed this wave:**
+> * **E4 · proposal retargeting** — the seam forwarded `overrides` since the
+>   seam pass and nothing ever collected one. A Confirm on a show-less
+>   proposal now opens a one-field show picker (proactively — before the
+>   server has to refuse — and reactively on the overrides-400) and re-posts
+>   `{overrides:{showId}}`; a "Folder only" escape keeps the old behavior an
+>   explicit choice. Fixed alongside it: `confirmTasksBatch` claimed to
+>   re-derive due dates on retarget and never could (propose-time dates
+>   pre-filled the field it checked) — a retargeted batch now back-schedules
+>   against the target show's own event date. Mutation-tested: drop the
+>   overrides from the picker's re-post and walk §26 goes red.
+> * **E8 · a proposals review page** — `listProposals` was in the seam,
+>   called by nothing, while the bell capped at 8 and showed only YOURS. A
+>   nav entry + a bell footer link open the backlog: pending first (the same
+>   confirm/reject rows the bell renders, so the two can never disagree),
+>   then the resolved record with who decided, when, and the rejection
+>   reason. Paged client-side over the fetched answer.
+> * **27 · file rename / re-kind** — `PUT /files/:id` took name + kind since
+>   the wiring pass; a pencil now sits beside Delete in the viewer meta panel
+>   for exactly the people the route accepts (uploader OR folder editor —
+>   canDeleteFile's predicate, which is the same server sentence).
+> * **D4 · a tech report can BE the attached document** — `tech_reports.file_id`
+>   existed, three UI strings promised it, nothing wrote it. The report editor
+>   offers "Attach the document you already have": an existing file on the
+>   show, or a fresh upload (kind `report`), through the same POST the written
+>   form uses. Files-from-other-shows still refused.
+> * **9 · the RAG override** — `rag_override` rode the PUT whitelist from the
+>   start with no control anywhere. A pencil on the show header's health pill
+>   (manager+/pm-owner, the route's gate) sets go/warn/crit/idle or clears
+>   back to derived; the client rollup now honors the override exactly as
+>   `lib/mappers.js` does, and an overridden pill says **by hand** so a
+>   hand-set green is never mistaken for a derived one.
+> * **A5 · the template editor saves** — every button on the Templates grid
+>   was a toast. The grid now stages row edits/adds/removes in the DOM and
+>   **Save** commits the whole grid as one `PUT /api/templates/:id` on the
+>   live SOP (the type's oldest row — the one createEvent and Seed-pipeline
+>   actually copy from, so the editor's "every show seeded inherits the
+>   change" hint is finally true). **Bank a copy** POSTs a snapshot; a
+>   versions list shows live-vs-banked and deletes one (`DELETE`, new route).
+>   Both new routes are manager-floor, asserted on both halves in smoke §18
+>   and mutation-tested (floor lowered to pm → four smoke reds). Fidelity
+>   note: the reshape now carries `evidence_type`/`auto_source`/`depends_on`
+>   through the editor so a Save cannot strip the flex automation off a type.
+> * **A12 · global search** — the decorative topbar input is a real
+>   client-side filter over loaded folders/shows/jobs/files (name, venue,
+>   city, client, QB number), grouped dropdown, Enter opens the first hit.
+>   The empty state says the honest half out loud: there is no server-side
+>   search route in this wave, so what was never loaded cannot be found.
+> * **D1 · landing by role** — techs land on My Tasks at boot and login;
+>   everyone else keeps the portfolio.
+> * **Polish:** manual **Archive** button on the season header (admin floor,
+>   beside Delete — the honest alternative to it) · finance feed **load-more**
+>   and the false "full ledger lands with the backend" sentence deleted (the
+>   backend landed; the cap was the client's own) · the Settings **NAS card
+>   reads /api/health** — config vs measured last-contact, never a hardcoded
+>   green "reachable" (the 2026-08-28 lesson, now in the UI) · **photo tag
+>   chips edit in place** (add/remove, pm+ or the shooter — the PUT's whole
+>   whitelist is caption + tags and only caption had a control).
+>
+> **Deliberately cut from this wave, and why:** template owner-role editing
+> (the role column is display-only — template roles are planning slugs from
+> templates.json, not the five login roles; offering the login-role picker
+> would write the wrong vocabulary) · add-a-lane (a lane set belongs to the
+> event TYPE's config, not to one template — the button now says so instead
+> of toasting a fake success) · the "Preview schedule" toast-button was
+> removed rather than faked · season-wide "Apply to all shows" / "Push
+> season" stay honestly-not-built · no server-side search route.
+
 > ## STATUS — THE BLOCKER WAVE, 2026-09-03
 >
 > A read-only editability audit (2026-09-02) re-walked the seam pass's
