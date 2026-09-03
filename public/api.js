@@ -1878,7 +1878,10 @@ var api = (function () {
        POST /api/pos                 -> createPO(body)
        PUT  /api/pos/:id/status      -> updatePOStatus(id, status)   [gated]
        POST /api/pos/:id/approve     -> approvePO(id)   [admins + Candice]
-       POST /api/pos/:id/lines       -> addPOLine(id, body)
+       POST /api/pos/:id/lines      -> addPOLine(id, body)
+       PUT  /api/pos/:id/lines/:lid -> updatePOLine(id, lid, body) [needed/quoted]
+       DEL  /api/pos/:id/lines/:lid -> deletePOLine(id, lid)       [needed/quoted]
+       DEL  /api/pos/:id            -> deletePO(id)   [manager+ · needs reopen]
        GET  /api/procurement/risks   -> listProcurementRisks()
        GET  /api/jobs/:id/committed  -> listCommitted(jobId)
        ==================================================================== */
@@ -1965,6 +1968,70 @@ var api = (function () {
         return r && r.line ? r.line : r;
       });
     },
+    /* the correction window mirrors the server exactly: lines are open while
+       the PO is needed or quoted, frozen from ordered on — a commitment reads
+       back exactly as it was placed (routes/purchasing.js LINE_EDITABLE). */
+    updatePOLine: function (poId, lineId, body) {
+      body = body || {};
+      if (!API()) {
+        var po = POS_BY_ID[Number(poId)];
+        if (!po) return fail('PO ' + poId + ' not found');
+        var l = (PO_LINES_BY_PO[po.id] || []).filter(function (x) { return x.id === Number(lineId); })[0];
+        if (!l) return fail('line ' + lineId + ' is not on ' + po.po_number);
+        if (po.status !== 'needed' && po.status !== 'quoted') {
+          return fail(po.po_number + ' is ' + po.status + ' — an ordered PO’s lines are a commitment');
+        }
+        if (body.item !== undefined) {
+          if (!String(body.item || '').trim()) return fail('a line needs an item');
+          l.item = String(body.item).trim();
+        }
+        if (body.detail !== undefined) l.detail = body.detail || '';
+        if (body.qty !== undefined) {
+          if (!(Number(body.qty) > 0)) return fail('qty must be greater than zero');
+          l.qty = Number(body.qty);
+        }
+        if (body.unit_cost !== undefined) l.unit_cost = Number(body.unit_cost) || 0;
+        if (body.category !== undefined && BUDGET_CATS[body.category]) l.category = body.category;
+        if (body.job_id !== undefined) l.job_id = body.job_id ? Number(body.job_id) : null;
+        if (body.show_id !== undefined) l.show_id = body.show_id ? Number(body.show_id) : null;
+        if (body.ownership !== undefined) {
+          l.ownership = body.ownership === 'inventory' || body.ownership === 'cogs'
+            ? body.ownership : deriveOwnership(l.job_id || po.job_id || null);
+        }
+        po.activity.unshift(mkAct(ME, 'edited a line on ' + po.po_number,
+          l.item + ' · ' + l.qty + ' × $' + Number(l.unit_cost).toLocaleString('en-US'), 0, _nowHM()));
+        return ok(l);
+      }
+      return SR.put('/api/pos/' + Number(poId) + '/lines/' + Number(lineId), body, { notifyOk: true });
+    },
+    deletePOLine: function (poId, lineId) {
+      function unindex(poIdN, lineIdN) {
+        var cached = PO_LINES_BY_ID[lineIdN];
+        delete PO_LINES_BY_ID[lineIdN];
+        var i = cached ? PO_LINES.indexOf(cached) : -1;
+        if (i >= 0) PO_LINES.splice(i, 1);
+        var arr = PO_LINES_BY_PO[poIdN] || [];
+        for (var j = arr.length - 1; j >= 0; j--) if (arr[j].id === lineIdN) arr.splice(j, 1);
+      }
+      if (!API()) {
+        var po = POS_BY_ID[Number(poId)];
+        if (!po) return fail('PO ' + poId + ' not found');
+        var l = (PO_LINES_BY_PO[po.id] || []).filter(function (x) { return x.id === Number(lineId); })[0];
+        if (!l) return fail('line ' + lineId + ' is not on ' + po.po_number);
+        if (po.status !== 'needed' && po.status !== 'quoted') {
+          return fail(po.po_number + ' is ' + po.status + ' — an ordered PO’s lines are a commitment');
+        }
+        unindex(po.id, l.id);
+        po.activity.unshift(mkAct(ME, 'removed a line from ' + po.po_number,
+          l.item + ' · $' + Number(poLineTotal(l)).toLocaleString('en-US'), 0, _nowHM()));
+        return ok({ ok: true, id: l.id, po_id: po.id });
+      }
+      return SR.del('/api/pos/' + Number(poId) + '/lines/' + Number(lineId), null, { notifyOk: true })
+        .then(function (r) {
+          unindex(Number(poId), Number(lineId));   /* the cache must not resurrect it */
+          return r;
+        });
+    },
 
     /* the approval gate lives on the SERVER — quoted cannot advance to ordered
        while the total is over the threshold and unapproved. Enforced, not
@@ -2021,6 +2088,61 @@ var api = (function () {
       }
       return SR.post('/api/pos/' + Number(id) + '/approve', {}, { notifyOk: true })
         .then(function (r) { return A.po(r && r.po ? r.po : r); });
+    },
+    /* DELETE /api/pos/:id — manager+ on the server (routes/purchasing.js), so
+       the demo refuses below that too. The local half of deletePoCascade, told
+       the same way the database tells it: lines go, COVERED NEEDS REOPEN (a
+       covered claim pointing at nothing is a lie), expenses that already
+       landed survive with the po link cut, po-anchored notes go with their
+       anchor. The API branch purges the same caches so a re-render without a
+       refetch cannot resurrect the order. */
+    deletePO: function (id) {
+      function purgeLocal(po) {
+        (PO_LINES_BY_PO[po.id] || []).slice().forEach(function (l) {
+          delete PO_LINES_BY_ID[l.id];
+          var i = PO_LINES.indexOf(l);
+          if (i >= 0) PO_LINES.splice(i, 1);
+        });
+        delete PO_LINES_BY_PO[po.id];
+        ALL_NEEDS.forEach(function (nd) {
+          if (nd.covered_by_po_id !== po.id) return;
+          nd.covered_by_po_id = null;
+          if (nd.status === 'covered') {
+            nd.status = 'open'; nd.checked_by = null; nd.checked_at = null;
+          }
+          nd.updated_at = TODAY_ISO;
+        });
+        ALL_EXPENSES.forEach(function (e) { if (e.po_id === po.id) e.po_id = null; });
+        for (var i2 = ALL_NOTES.length - 1; i2 >= 0; i2--) {
+          var n = ALL_NOTES[i2];
+          if (n.anchor_type === 'po' && Number(n.anchor_id) === po.id) {
+            delete NOTES_BY_ID[n.id];
+            ALL_NOTES.splice(i2, 1);
+          }
+        }
+        delete POS_BY_ID[po.id];
+        var pi = ALL_POS.indexOf(po);
+        if (pi >= 0) ALL_POS.splice(pi, 1);
+      }
+      if (!API()) {
+        var po = POS_BY_ID[Number(id)];
+        if (!po) return fail('PO ' + id + ' not found');
+        if (CURRENT_USER.role !== 'admin' && CURRENT_USER.role !== 'manager') {
+          return fail('deleting a purchase order is a manager act — a pm cancels by asking one');
+        }
+        var p = PROJECTS_BY_ID[po.project_id];
+        if (p && p.activity) {
+          p.activity.unshift(mkAct(ME, 'deleted ' + po.po_number,
+            po.vendor + ' · $' + Number(poTotal(po)).toLocaleString('en-US'), 0, _nowHM(), true));
+        }
+        purgeLocal(po);
+        return ok({ ok: true, id: po.id, po_number: po.po_number });
+      }
+      return SR.del('/api/pos/' + Number(id), null, { notifyOk: true }).then(function (r) {
+        var cached = POS_BY_ID[Number(id)];
+        if (cached) purgeLocal(cached);
+        return r;
+      });
     },
 
     /* ================= NEEDS LIST =======================================
@@ -3546,6 +3668,19 @@ var api = (function () {
       if (!API()) {
         var po = POS_BY_ID[Number(id)];
         if (!po) return fail('PO ' + id + ' not found');
+        /* the number freezes at ordered — it is the paper trail. Mirrors the
+           server's 409 (routes/purchasing.js PUT /api/pos/:id) so the demo
+           teaches the same rule the database enforces. */
+        if (patch && patch.po_number !== undefined) {
+          if (po.status !== 'needed' && po.status !== 'quoted') {
+            return fail(po.po_number + ' is ' + po.status + ' — a PO number is locked once it is ordered');
+          }
+          var nextNum = String(patch.po_number || '').trim();
+          if (!nextNum) return fail('po_number cannot be blank');
+          var dup = ALL_POS.filter(function (x) { return x.po_number === nextNum && x.id !== po.id; })[0];
+          if (dup) return fail(nextNum + ' already exists');
+          patch.po_number = nextNum;
+        }
         Object.keys(patch || {}).forEach(function (k) { po[k] = patch[k]; });
         po.activity = po.activity || [];
         po.activity.unshift(mkAct(ME, 'po.update', 'updated ' + po.po_number, 0, _nowHM(),

@@ -617,6 +617,101 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('deleting a job takes its needs checklist with it — zero orphans',
      delJ2.status === 200 && j2Orphans.rows[0].n === 0, j2Orphans.rows[0]);
 
+  // ── PO editing after creation + the honest delete (purchasing polish) ─────
+  // the RAISED po is 'needed': its lines are open for correction, its vendor
+  // is TBD by design, and the way out of TBD is a plain PUT
+  const RPO = raised.body.po.id;
+  const rl = raised.body.po.lines;
+  const techLineEdit = await PUT(`/api/pos/${RPO}/lines/${rl[0].id}`, { qty: 3 }, { token: TECHT });
+  ok('a tech is below the line-edit floor', techLineEdit.status === 403, techLineEdit.body);
+  const pm2LineEdit = await PUT(`/api/pos/${RPO}/lines/${rl[0].id}`, { qty: 3 }, { token: PM2T });
+  ok('...and a pm who owns nothing fails the ownership half', pm2LineEdit.status === 403,
+     pm2LineEdit.body);
+  const lineEdit = await PUT(`/api/pos/${RPO}/lines/${rl[0].id}`, { qty: 4, unit_cost: 275 },
+    { token: PMT });
+  ok('PUT /api/pos/:id/lines/:lineId corrects a line while needed/quoted',
+     lineEdit.status === 200 && Number(lineEdit.body.qty) === 4
+     && Number(lineEdit.body.unit_cost) === 275, lineEdit.body);
+  const ghostLine = await PUT(`/api/pos/${RPO}/lines/999999`, { qty: 1 }, { token: PMT });
+  ok('...a line that is not on the PO is a 404', ghostLine.status === 404, ghostLine.body);
+  const lineDel = await DEL(`/api/pos/${RPO}/lines/${rl[1].id}`, { token: PMT });
+  ok('DELETE /api/pos/:id/lines/:lineId removes it', lineDel.status === 200, lineDel.body);
+  const rpoLines = await pool.query('SELECT COUNT(*)::int AS n FROM po_lines WHERE po_id=$1', [RPO]);
+  ok('...leaving exactly one line behind', rpoLines.rows[0].n === 1, rpoLines.rows[0]);
+
+  const vend = await PUT(`/api/pos/${RPO}`,
+    { vendor: 'Show Support Co', memo: TAG + ' ancillaries' }, { token: PMT });
+  ok('the deliberate TBD vendor is one PUT away from real',
+     vend.status === 200 && vend.body.vendor === 'Show Support Co', vend.body);
+  const vendAct = await pool.query(
+    `SELECT changes FROM activity WHERE po_id=$1 AND action='po.update' ORDER BY id DESC LIMIT 1`, [RPO]);
+  ok('...and the rename is a before→after diff (vendor TBD → real)',
+     (vendAct.rows[0].changes || []).some((c) => c.field === 'vendor' && c.from === 'TBD'),
+     vendAct.rows[0]);
+
+  // THE FREEZE — an ordered PO refuses line changes and a renumber: 409s that
+  // name the status, because a commitment reads back exactly as placed
+  const poLine0 = await pool.query('SELECT id FROM po_lines WHERE po_id=$1 LIMIT 1', [PO]);
+  const frozenEdit = await PUT(`/api/pos/${PO}/lines/${poLine0.rows[0].id}`, { qty: 99 }, { token: A });
+  ok('an ordered PO\'s lines are a commitment — the edit is a 409', frozenEdit.status === 409,
+     frozenEdit.body);
+  const frozenDel = await DEL(`/api/pos/${PO}/lines/${poLine0.rows[0].id}`, { token: A });
+  ok('...the delete too', frozenDel.status === 409, frozenDel.body);
+  const frozenNum = await PUT(`/api/pos/${PO}`, { po_number: 'PO-99-001' }, { token: A });
+  ok('...and the number is locked once ordered (the paper trail)', frozenNum.status === 409,
+     frozenNum.body);
+
+  // raise-po carries a vendor when the picker names one up front
+  const vNeed = await POST('/api/needs', { job_id: J, item: TAG + ' vendored probe', est_cost: 90 },
+    { token: A });
+  const vRaise = await POST('/api/needs/raise-po',
+    { job_id: J, need_ids: [vNeed.body.id], vendor: 'Named Up Front LLC' }, { token: A });
+  ok('raise-po lands the vendor named in the picker', vRaise.status === 200
+     && vRaise.body.po.vendor === 'Named Up Front LLC', vRaise.body.po);
+
+  // DELETE /api/pos/:id — manager floor, and the cascade tells the truth:
+  // covered needs REOPEN, po-anchored notes go with their anchor, zero orphans
+  const poNote = await POST('/api/notes', { anchor_type: 'po', anchor_id: RPO,
+    body: 'chase the freight quote' }, { token: A });
+  ok('a note can anchor on the PO (delete-cascade fuel)', poNote.status === 200, poNote.body);
+  const delAsPm = await DEL(`/api/pos/${RPO}`, { token: PMT });
+  ok('deleting a PO is a manager act — a pm (even the owner) is refused',
+     delAsPm.status === 403, delAsPm.body);
+  const delGhostPo = await DEL('/api/pos/999999', { token: A });
+  ok('...a PO that never existed is a 404, not {ok:true}', delGhostPo.status === 404, delGhostPo.body);
+  const delMgr = await DEL(`/api/pos/${RPO}`, { token: MGRT });
+  ok('DELETE /api/pos/:id — a manager may', delMgr.status === 200 && delMgr.body.ok === true,
+     delMgr.body);
+  const reopenedRows = await pool.query(
+    'SELECT status, covered_by_po_id, checked_by FROM purchase_needs WHERE id = ANY($1::int[])',
+    [raiseIds]);
+  ok('THE CASCADE REOPENS the needs it covered — never "covered by nothing"',
+     reopenedRows.rows.length === 2 && reopenedRows.rows.every(
+       (r) => r.status === 'open' && r.covered_by_po_id === null && r.checked_by === null),
+     reopenedRows.rows);
+  const rpoOrphans = await pool.query(
+    `SELECT (SELECT COUNT(*)::int FROM po_lines WHERE po_id=$1)
+          + (SELECT COUNT(*)::int FROM activity WHERE po_id=$1)
+          + (SELECT COUNT(*)::int FROM notes WHERE anchor_type='po' AND anchor_id=$1) AS n`, [RPO]);
+  ok('...zero orphans — lines, activity and notes all went with it', rpoOrphans.rows[0].n === 0,
+     rpoOrphans.rows[0]);
+
+  // and the expense half: a received PO's actuals SURVIVE the delete, unlinked
+  const xpo = await POST('/api/pos', { vendor: TAG + ' Expense Probe Co', project_id: P, job_id: J },
+    { token: A });
+  await POST(`/api/pos/${xpo.body.id}/lines`, { item: 'probe kit', qty: 1, unit_cost: 900,
+    ownership: 'cogs', show_id: S }, { token: A });
+  for (const st of ['quoted', 'ordered', 'shipped', 'received']) {
+    await PUT(`/api/pos/${xpo.body.id}/status`, { status: st }, { token: A });
+  }
+  const xExp = await pool.query('SELECT id FROM expenses WHERE po_id=$1', [xpo.body.id]);
+  ok('receiving the probe PO landed its cogs line as an actual', xExp.rows.length === 1, xExp.rows);
+  const delXpo = await DEL(`/api/pos/${xpo.body.id}`, { token: A });
+  const xExpAfter = await pool.query('SELECT po_id FROM expenses WHERE id=$1', [xExp.rows[0].id]);
+  ok('...and deleting the PO leaves the actual ON THE BOOKS with the po link cut',
+     delXpo.status === 200 && xExpAfter.rows.length === 1 && xExpAfter.rows[0].po_id === null,
+     xExpAfter.rows);
+
   // notes (31-37)
   const note = await POST('/api/notes', { anchor_type: 'show', anchor_id: S,
     body: `Power tie-in is the risk here. @${pmUser} can you confirm the dock window?` }, { token: A });

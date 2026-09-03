@@ -1735,6 +1735,16 @@ function poNeedsApproval(po) {
 function canApprovePOs(user) {
   return canSeeFinance(user || CURRENT_USER);
 }
+/* WHO may delete a PO — the server floor is manager+ (routes/purchasing.js
+   DELETE /api/pos/:id, requireRole('manager')). Rendered, not just enforced:
+   the button never dangles a guaranteed 403 in front of a pm. Deliberately a
+   separate predicate from canApprovePOs — deleting an order and approving
+   spend are different decisions (a manager without finance can delete, and
+   Candice-without-manager could approve but not delete). */
+function canDeletePOs(user) {
+  var u = user || CURRENT_USER;
+  return !!u && (u.role === 'admin' || u.role === 'manager');
+}
 function poUnreconciled(po) {
   return (po.status === 'ordered' || po.status === 'shipped' || po.status === 'received') && !po.invoice_file_id;
 }

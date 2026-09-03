@@ -491,6 +491,69 @@ async function main() {
   ok('…and a wrong item deletes cleanly', dropped.status === 200, dropped.body);
 
   // ══════════════════════════════════════════════════════════════════════════
+  section('8c · the vendor lands, a line is fixed, and the delete is honest');
+  // ══════════════════════════════════════════════════════════════════════════
+  // The raise deliberately lands vendor TBD — the checklist knows what is
+  // needed before anyone knows who sells it. So the walk now does what Candice
+  // does across a season: raise a SUBSET (the freight vendor is not the copper
+  // vendor), set the real vendor on the TBD order, fix a line, drop a line,
+  // and finally delete an order and watch the checklist REOPEN rather than
+  // stand covered by nothing.
+  reach('Set the vendor / edit the PO', { seam: 'updatePO', action: ['editPO', 'poEditCommit'] });
+  reach('Pick WHICH items raise', { action: ['needRaisePo', 'needRaiseCommit'] });
+  reach('Edit / remove a PO line', { seam: ['updatePOLine', 'deletePOLine'],
+    action: ['poLineEdit', 'poLineCommit', 'poLineDelete'] });
+  reach('Delete a PO', { seam: 'deletePO', action: 'poDelete' });
+
+  const n1 = (await POST('/api/needs', { job_id: JOB, item: 'Edge trim', qty: 2, est_cost: 120 },
+    { token: T.brenden })).body;
+  const n2 = (await POST('/api/needs', { job_id: JOB, item: 'Data drums', qty: 1, est_cost: 480 },
+    { token: T.brenden })).body;
+  const n3 = (await POST('/api/needs', { job_id: JOB, item: 'Truck straps', qty: 6, est_cost: 40 },
+    { token: T.brenden })).body;
+  const sub = await POST('/api/needs/raise-po',
+    { job_id: JOB, need_ids: [n1.id, n2.id], vendor: 'Show Support Co' }, { token: T.brenden });
+  ok('a SUBSET raises — two items to one vendor, named in the picker',
+     sub.status === 200 && (sub.body.po.lines || []).length === 2
+     && sub.body.po.vendor === 'Show Support Co', sub.body.po);
+  const openLeft = (await GET(`/api/needs?job_id=${JOB}&status=open`, { token: T.brenden })).body;
+  ok('…and the unchecked item stays OPEN for the next vendor',
+     openLeft.some((x) => x.id === n3.id), openLeft.map((x) => x.item));
+  const SPO = sub.body.po.id;
+
+  const rename = await PUT(`/api/pos/${SPO}`,
+    { vendor: 'Show Support Co LLC', memo: 'ancillaries — Fiserv' }, { token: T.brenden });
+  ok('vendor and memo are editable after creation', rename.status === 200
+     && rename.body.vendor === 'Show Support Co LLC', rename.body);
+  const renameAct = await pool.query(
+    `SELECT changes FROM activity WHERE po_id=$1 AND action='po.update' ORDER BY id DESC`, [SPO]);
+  ok('…and the rename is a before→after diff, not a shrug',
+     (renameAct.rows[0]?.changes || []).some((c) => c.field === 'vendor'), renameAct.rows[0]);
+
+  const [lA, lB] = sub.body.po.lines;
+  const lFix = await PUT(`/api/pos/${SPO}/lines/${lA.id}`, { qty: 3, unit_cost: 110 },
+    { token: T.brenden });
+  ok('a line can be corrected while the PO is needed', lFix.status === 200
+     && Number(lFix.body.qty) === 3, lFix.body);
+  const lDrop = await DEL(`/api/pos/${SPO}/lines/${lB.id}`, { token: T.brenden });
+  ok('…or removed', lDrop.status === 200, lDrop.body);
+  const spoNow = await GET(`/api/pos/${SPO}`, { token: T.brenden });
+  ok('…and the order reads back one line, retotalled',
+     (spoNow.body.lines || []).length === 1 && Number(spoNow.body.lines[0].qty) === 3,
+     spoNow.body.lines);
+
+  ok('deleting a PO is a manager act — the pm who raised it is refused',
+     (await DEL(`/api/pos/${SPO}`, { token: T.brenden })).status === 403);
+  const delAsTom = await DEL(`/api/pos/${SPO}`, { token: T.tom });
+  ok('…Tom deletes it', delAsTom.status === 200, delAsTom.body);
+  const backRows = (await GET(`/api/needs?job_id=${JOB}`, { token: T.brenden })).body;
+  const back1 = backRows.find((x) => x.id === n1.id);
+  ok('THE HONEST CONSEQUENCE — the needs it covered reopen, never "covered by nothing"',
+     !!back1 && back1.status === 'open' && !back1.covered_by_po_id && !back1.checked_by, back1);
+  // tidy the probes so the later money sections read the job the same as before
+  for (const nid of [n1.id, n2.id, n3.id]) await DEL(`/api/needs/${nid}`, { token: T.brenden });
+
+  // ══════════════════════════════════════════════════════════════════════════
   section('9 · Candice does the money  (C1 · C2 — and the margin gate, both ways)');
   // ══════════════════════════════════════════════════════════════════════════
   reach('Budget lines', { seam: ['addBudgetLine', 'updateBudgetLine', 'deleteBudgetLine'],

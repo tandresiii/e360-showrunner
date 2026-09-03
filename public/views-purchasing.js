@@ -42,7 +42,10 @@ function poRiskChip(risk) {
 }
 function poApprovalChip(po) {
   if (!poNeedsApproval(po)) return '';
-  return '<span class="pill warn" style="padding:1px 8px;font-size:10px" title="Over the $5,000 threshold — needs sign-off from an admin or Candice before ordering">' +
+  /* the threshold is server config (Settings can move it), so no surface may
+     hardcode $5,000 — a chip quoting a stale number teaches the wrong rule */
+  return '<span class="pill warn" style="padding:1px 8px;font-size:10px" title="Over the ' +
+    esc(fmtMoney(PO_APPROVAL_THRESHOLD)) + ' threshold — needs sign-off from an admin or Candice before ordering">' +
     inlineIcon('lock') + ' approval</span>';
 }
 function poInvoiceChip(po) {
@@ -59,7 +62,10 @@ function poCard(po) {
   return '<button class="po-card" ' + act('openPO', po.id) + '>' +
     '<div class="po-top"><span class="po-num">' + esc(po.po_number) + '</span><span style="flex:1"></span>' +
     poRiskChip(poWorstRisk(po)) + poApprovalChip(po) + poInvoiceChip(po) + '</div>' +
-    '<b class="po-vend">' + esc(po.vendor) + '</b>' +
+    '<b class="po-vend">' + esc(po.vendor) +
+    (/^TBD\b/i.test(po.vendor)
+      ? ' <span class="mini dep" title="Vendor not chosen yet — open the PO and set it">set vendor</span>' : '') +
+    '</b>' +
     '<div class="po-sub">' + esc(sub) + '</div>' +
     (po.provenance ? provBadge(po.provenance) : '') +
     '<div class="po-foot"><span class="money">' + esc(fmtMoney(poTotal(po))) + '</span><span style="flex:1"></span>' + jobsChip(jobs) + '</div></button>';
@@ -116,7 +122,7 @@ function poApprovalQueue(approvals) {
       '<button class="btn sm ghost" ' + act('openPO', po.id) + '>' + icon('eye') + 'Open</button></div>';
   }).join('') || '<div class="empty" style="padding:20px">Nothing waiting — every over-threshold PO is signed off.</div>';
   return '<div class="panel"><h3>Awaiting approval · ' + approvals.length + '</h3><div class="next-list">' + rows + '</div>' +
-    '<div class="perm-note">' + inlineIcon('lock') + ' POs over <b>$5,000</b> need sign-off from an <b>admin — Tom, Tony or Jim — or Candice</b> (finance) before <b>quoted</b> can advance to <b>ordered</b>; under the threshold auto-approves. Tom’s confirmed rule — mirrored in Settings.</div></div>';
+    '<div class="perm-note">' + inlineIcon('lock') + ' POs over <b>' + esc(fmtMoney(PO_APPROVAL_THRESHOLD)) + '</b> need sign-off from an <b>admin — Tom, Tony or Jim — or Candice</b> (finance) before <b>quoted</b> can advance to <b>ordered</b>; under the threshold auto-approves. Tom’s confirmed rule — mirrored in Settings.</div></div>';
 }
 
 /* ============================================================================
@@ -193,7 +199,7 @@ function poApprovalPanel(po) {
   if (poNeedsApproval(po)) {
     body = '<div class="callout" style="margin-bottom:0;border-color:color-mix(in srgb,var(--warn) 40%,var(--border));background:linear-gradient(180deg,var(--warn-ghost),transparent)">' +
       '<div class="ci" style="color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent)">' + icon('lock') + '</div>' +
-      '<div><b>Approval required — ' + esc(fmtMoney(total)) + ' is over the $5,000 threshold</b>' +
+      '<div><b>Approval required — ' + esc(fmtMoney(total)) + ' is over the ' + esc(fmtMoney(PO_APPROVAL_THRESHOLD)) + ' threshold</b>' +
       '<p>' + (po.status === 'quoted' ? 'This PO cannot advance to <b>ordered</b> until an admin or Candice signs off.' : 'It will need sign-off from an admin or Candice before it can be ordered.') + '</p>' +
       (po.status === 'quoted'
         ? (canApprove
@@ -203,11 +209,11 @@ function poApprovalPanel(po) {
   } else if (a && a.approved_by) {
     body = '<div class="glance"><div class="g"><span class="k">Approved by</span><span>' + av(a.approved_by) + ' <b style="font-weight:600">' + esc(userName(a.approved_by)) + '</b></span></div>' +
       '<div class="g"><span class="k">Approved</span><span class="mono">' + esc(fmtDateFull(a.approved_at)) + '</span></div>' +
-      '<div class="g"><span class="k">Why</span><span class="mono" style="font-size:11.5px">over $5,000 — admin / finance sign-off</span></div></div>';
+      '<div class="g"><span class="k">Why</span><span class="mono" style="font-size:11.5px">over ' + esc(fmtMoney(PO_APPROVAL_THRESHOLD)) + ' — admin / finance sign-off</span></div></div>';
   } else if (total <= PO_APPROVAL_THRESHOLD) {
-    body = '<div class="glance"><div class="g"><span class="k">Gate</span><span class="mono" style="color:var(--go)">auto-approved · under $5,000</span></div></div>';
+    body = '<div class="glance"><div class="g"><span class="k">Gate</span><span class="mono" style="color:var(--go)">auto-approved · under ' + esc(fmtMoney(PO_APPROVAL_THRESHOLD)) + '</span></div></div>';
   } else {
-    body = '<div class="glance"><div class="g"><span class="k">Gate</span><span class="mono" style="color:var(--warn)">will need admin / finance sign-off · over $5,000</span></div></div>';
+    body = '<div class="glance"><div class="g"><span class="k">Gate</span><span class="mono" style="color:var(--warn)">will need admin / finance sign-off · over ' + esc(fmtMoney(PO_APPROVAL_THRESHOLD)) + '</span></div></div>';
   }
   return '<div class="panel"><h3>Approval</h3>' + body + '</div>';
 }
@@ -237,9 +243,22 @@ function viewPO(po) {
   if (!po.quote_file_id && (po.status === 'needed' || po.status === 'quoted')) {
     acts.push('<button class="btn ghost" ' + act('poAttachQuote', po.id) + '>' + icon('file') + 'Attach quote</button>');
   }
+  /* the way out of the deliberate TBD (raise-from-needs, agent drafts) has to
+     be the loudest button on the page while it lasts */
+  var tbd = /^TBD\b/i.test(po.vendor);
+  acts.push('<button class="btn ' + (tbd ? 'primary' : 'ghost') + '" ' + act('editPO', po.id) + '>' +
+    icon('pencil') + (tbd ? 'Set vendor' : 'Edit PO') + '</button>');
   acts.push('<button class="btn ghost" ' + act('openAddPOLine', po.id) + '>' + icon('plus') + 'Add line</button>');
+  if (canDeletePOs(CURRENT_USER)) {
+    acts.push('<button class="btn ghost" title="Delete this PO — lines and notes go, checklist items it covers reopen, landed costs stay on the books" ' +
+      act('poDelete', po.id) + '>' + icon('trash') + 'Delete</button>');
+  }
 
   /* ---- lines table ---- */
+  /* the server's LINE_EDITABLE window, drawn: correction buttons exist while
+     the PO is needed/quoted and vanish at ordered — the same moment the 409
+     starts. Rendering them frozen would be a guaranteed error message. */
+  var linesOpen = po.status === 'needed' || po.status === 'quoted';
   var lineRows = lines.map(function (l) {
     var jid = poLineJobId(l), job = jid ? JOBS_BY_ID[jid] : null;
     var s = l.show_id ? SHOWS_BY_ID[l.show_id] : null;
@@ -253,18 +272,26 @@ function viewPO(po) {
       '<td><span class="tag">' + esc(BUDGET_CATS[l.category] || l.category) + '</span></td>' +
       '<td>' + (job ? jobChip(job) + ' ' + dealTag(job) : '<span class="mini">—</span>') + '</td>' +
       '<td style="color:var(--muted);font-size:12px">' + (s ? esc(showLabel(s)) : '<span class="mini" title="Not pinned to one show — serves the season">season</span>') + '</td>' +
-      '<td>' + ownershipTag(l.ownership) + flexHint + '</td></tr>';
+      '<td>' + ownershipTag(l.ownership) + flexHint + '</td>' +
+      (linesOpen
+        ? '<td style="white-space:nowrap;text-align:right">' +
+          '<button class="iconbtn" title="Edit this line" ' + act('poLineEdit', l.id) + '>' + icon('pencil') + '</button> ' +
+          '<button class="iconbtn" title="Remove this line" ' + act('poLineDelete', l.id) + '>' + icon('trash') + '</button></td>'
+        : '') + '</tr>';
   }).join('');
   var totRow = '<tr><td style="font-weight:700;border-top:2px solid var(--border-strong)">Total</td>' +
     '<td style="border-top:2px solid var(--border-strong)"></td><td style="border-top:2px solid var(--border-strong)"></td>' +
     '<td class="money" style="font-weight:700;border-top:2px solid var(--border-strong)">' + esc(fmtMoney(total)) + '</td>' +
-    '<td colspan="4" style="border-top:2px solid var(--border-strong)"></td></tr>';
+    '<td colspan="' + (linesOpen ? 5 : 4) + '" style="border-top:2px solid var(--border-strong)"></td></tr>';
   var linesCard = '<div class="card"><div class="card-h"><h3>Lines · ' + lines.length + '</h3>' + poStatusPill(po.status) + '</div>' +
     (lines.length
-      ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Item</th><th class="money">Qty</th><th class="money">Unit</th><th class="money">Total</th><th>Category</th><th>Bills to</th><th>Show</th><th>Ownership</th></tr></thead><tbody>' + lineRows + totRow + '</tbody></table></div>'
+      ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Item</th><th class="money">Qty</th><th class="money">Unit</th><th class="money">Total</th><th>Category</th><th>Bills to</th><th>Show</th><th>Ownership</th>' +
+        (linesOpen ? '<th></th>' : '') + '</tr></thead><tbody>' + lineRows + totRow + '</tbody></table></div>'
       : '<div class="empty">No lines yet — add what needs buying.</div>') +
     '<div class="perm-note" style="padding:12px 16px;margin-top:0">' + inlineIcon('scale') +
-    ' <b>cogs</b> lines ride the allocated job’s budget (committed once ordered, actual once received) · <b>inventory</b> lines are E360 capex — the deal keeps the gear, so they never hit a job budget.</div></div>';
+    ' <b>cogs</b> lines ride the allocated job’s budget (committed once ordered, actual once received) · <b>inventory</b> lines are E360 capex — the deal keeps the gear, so they never hit a job budget.' +
+    (linesOpen ? '' : ' Lines froze when this PO was ordered — a commitment reads back exactly as placed.') +
+    '</div></div>';
 
   /* ---- totals by job ---- */
   var byJob = {};
@@ -546,16 +573,16 @@ function needsPanel(job) {
       esc('~' + fmtMoney(openEst) + ' to buy') + '</span>' : '') +
     '<span style="flex:1"></span>' +
     (open.length
-      ? '<button class="btn sm primary" title="One PO at needed — every open item becomes a line, checked off against it" ' +
+      ? '<button class="btn sm primary" title="Pick the items and name the vendor — one PO at needed, each item checked off against it" ' +
         act('needRaisePo', job.id) + '>' + icon('cart') + 'Raise PO from open items</button>'
       : '<span class="pill go"><span class="dot"></span>All covered</span>') + '</div>' +
     '<div class="tbl-wrap"><table class="tbl">' +
     '<thead><tr><th></th><th>Item</th><th class="money">Qty</th><th class="money">Est</th><th>Category</th><th>Covered by</th><th></th></tr></thead>' +
     '<tbody>' + rows.map(needRow).join('') + needAddRow(job.id) + '</tbody></table></div>' +
     '<div class="perm-note" style="padding:12px 16px;margin-top:0">' + inlineIcon('cart') +
-    ' Check = handled outside a PO · <b>Raise PO</b> turns the open items into one order at <b>needed</b> and ' +
-    'links each back here · <b>n/a</b> keeps the decision on record, struck through. Estimates are planning ' +
-    'numbers — money only moves on the PO.</div></div>';
+    ' Check = handled outside a PO · <b>Raise PO</b> opens a picker — the checked items become one order at ' +
+    '<b>needed</b>, linked back here; what you uncheck stays open for the next vendor · <b>n/a</b> keeps the ' +
+    'decision on record, struck through. Estimates are planning numbers — money only moves on the PO.</div></div>';
 }
 
 /* the Purchasing cockpit's rollup: what every job still needs, at a glance */

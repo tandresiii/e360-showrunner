@@ -1429,6 +1429,10 @@ async function poAdvance(poId) {
       upd.status === 'ordered' ? fmtMoney(poTotal(upd)) + ' now committed against its jobs'
       : upd.status === 'received' ? 'Cogs lines landed as actuals' + (upd.invoice_file_id ? ' — reconciled (invoice was on file)' : ' — attach the invoice to reconcile')
       : upd.status === 'reconciled' ? 'Invoice on file — closed out'
+      /* the moment it becomes gated is the moment to say who holds the key —
+         otherwise the requester learns it from a 403 three clicks later */
+      : upd.status === 'quoted' && poNeedsApproval(upd)
+        ? 'Over ' + fmtMoney(PO_APPROVAL_THRESHOLD) + ' — an admin (Tom, Tony, Jim) or Candice must approve before it can be ordered'
       : upd.vendor);
   } catch (e) {
     toast('Blocked', String(e && e.message || e));
@@ -1449,13 +1453,16 @@ async function poApprove(poId) {
 async function poAttachInvoice(poId) {
   var po = await api.getPO(poId);
   var s = poPrimaryShow(po);
-  if (!s) return;
+  /* the attach modal files against a show — a PO whose folder has no shows at
+     all has nowhere to anchor the paperwork, and a silent return here read as
+     a dead button. Say so instead. */
+  if (!s) { toast('No show to file against', po.po_number + '’s folder has no shows yet — add one, then attach the invoice'); return; }
   return openAddFinDoc(s.id, { poId: po.id, poKindHint: 'invoice' });
 }
 async function poAttachQuote(poId) {
   var po = await api.getPO(poId);
   var s = poPrimaryShow(po);
-  if (!s) return;
+  if (!s) { toast('No show to file against', po.po_number + '’s folder has no shows yet — add one, then attach the quote'); return; }
   return openAddFinDoc(s.id, { poId: po.id, poKindHint: 'quote' });
 }
 
@@ -1466,7 +1473,7 @@ async function openNewPO() {
     return '<option value="' + Number(p.id) + '"' + (CUR.projectId === p.id ? ' selected' : '') + '>' + esc(p.name) + '</option>';
   }).join('');
   openModal('New purchase order',
-    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">Opens in <b>needed</b> — add lines, quote it out, then order. Over $5,000 needs sign-off from an admin — Tom, Tony or Jim — or Candice before it can be ordered.</p>' +
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">Opens in <b>needed</b> — add lines, quote it out, then order. Over ' + esc(fmtMoney(PO_APPROVAL_THRESHOLD)) + ' needs sign-off from an admin — Tom, Tony or Jim — or Candice before it can be ordered.</p>' +
     '<div class="fin-inputs" style="grid-template-columns:1.4fr 1fr">' +
     finLabelWrap('Vendor', '<input id="poVendor" class="cell-in" placeholder="who we’re buying from (or TBD)">') +
     finLabelWrap('Folder', '<select id="poProject" class="cell-in">' + projOpts + '</select>') +
@@ -1553,6 +1560,169 @@ async function commitAddPOLine() {
     return;
   }
   return refreshFinanceUI();
+}
+
+/* ---- edit PO scalars (vendor · memo · number) ------------------------------
+   The raise-from-needs flow lands vendor TBD ON PURPOSE — the checklist knows
+   what is needed before anyone knows who sells it — so the way OUT of TBD has
+   to be one obvious click, not a support question. The number freezes at
+   ordered (it is the paper trail; the server 409s and the input says so).
+   Dates live in the Delivery modal, docs in the attach flow — this modal is
+   the three fields nothing else owned. */
+var PENDING_PO_EDIT = null;
+async function openEditPO(poId) {
+  var po = await api.getPO(poId);
+  PENDING_PO_EDIT = { poId: po.id };
+  var locked = po.status !== 'needed' && po.status !== 'quoted';
+  openModal('Edit ' + po.po_number,
+    '<div class="fin-inputs" style="grid-template-columns:1.4fr 1fr">' +
+    finLabelWrap('Vendor', '<input id="pePoVendor" class="cell-in" value="' +
+      esc(/^TBD\b/i.test(po.vendor) ? '' : po.vendor) + '" placeholder="who we’re buying from (or TBD)">') +
+    finLabelWrap('PO number', locked
+      ? '<input class="cell-in" value="' + esc(po.po_number) + '" disabled title="Locked once ordered — the number is the paper trail">'
+      : '<input id="pePoNumber" class="cell-in" value="' + esc(po.po_number) + '">') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Memo', '<input id="pePoMemo" class="cell-in" value="' + esc(po.memo || '') +
+      '" placeholder="what this order is for">') + '</div>' +
+    (locked
+      ? '<div class="hint" style="margin-top:4px">' + icon('lock') + '<span>' + esc(po.po_number) +
+        ' is <b>' + esc(po.status) + '</b> — the number is locked; vendor and memo stay editable.</span></div>'
+      : '') +
+    notifyRow() +
+    _foot(act('poEditCommit'), 'Save'));
+}
+async function poEditCommit() {
+  if (!PENDING_PO_EDIT) return;
+  var poId = PENDING_PO_EDIT.poId;
+  var patch = { vendor: _v('pePoVendor') || 'TBD', memo: _v('pePoMemo') };
+  var numEl = document.getElementById('pePoNumber');
+  if (numEl) {
+    var num = String(numEl.value || '').trim();
+    if (!num) { toast('A PO number is required', 'It is the paper trail — blank is not a number'); return; }
+    patch.po_number = num;
+  }
+  stageNotifies();
+  var po;
+  try { po = await api.updatePO(poId, patch); }
+  catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  PENDING_PO_EDIT = null;
+  closeM();
+  var suffix = await sendNotifies('po', poId, 'updated ' + po.po_number + ' —');
+  toast('Saved ' + po.po_number, po.vendor + (po.memo ? ' · ' + po.memo : '') + suffix);
+  return refreshFinanceUI();
+}
+
+/* ---- edit / remove a line (open only while needed / quoted) ---------------
+   The server's LINE_EDITABLE window, surfaced: the buttons only render in
+   that window (views-purchasing.js) and the modal re-checks on open, because
+   somebody else may have ordered the PO since the screen was drawn. */
+var PENDING_PO_LINE_EDIT = null;
+async function openEditPOLine(lineId) {
+  var l = PO_LINES_BY_ID[Number(lineId)];
+  if (!l) return;
+  var po = await api.getPO(l.po_id);
+  if (po.status !== 'needed' && po.status !== 'quoted') {
+    toast('Lines are frozen', po.po_number + ' is ' + po.status + ' — an ordered PO’s lines are a commitment');
+    return refreshFinanceUI();
+  }
+  PENDING_PO_LINE_EDIT = { poId: po.id, lineId: l.id };
+  var p = PROJECTS_BY_ID[po.project_id];
+  var jobOpts = ((p && p.jobs) || ALL_JOBS).map(function (j) {
+    return '<option value="' + Number(j.id) + '"' + (j.id === (l.job_id || po.job_id) ? ' selected' : '') + '>' +
+      esc(j.qb_job_number + ' · ' + j.client + (j.deal_type ? ' · ' + j.deal_type : '')) + '</option>';
+  }).join('');
+  /* the line's current pin must be an option even when the folder cache has
+     not loaded its shows — otherwise saving would silently unpin it to
+     "season", which is a data change nobody made */
+  var seenShow = {};
+  var showOpts = '<option value="">season-wide</option>' + ((p && p.shows) || []).map(function (s) {
+    seenShow[s.id] = 1;
+    return '<option value="' + Number(s.id) + '"' + (s.id === l.show_id ? ' selected' : '') + '>' + esc(showLabel(s)) + '</option>';
+  }).join('');
+  if (l.show_id && !seenShow[l.show_id]) {
+    var ls = SHOWS_BY_ID[l.show_id];
+    showOpts += '<option value="' + Number(l.show_id) + '" selected>' +
+      esc(ls ? showLabel(ls) : 'show #' + Number(l.show_id)) + '</option>';
+  }
+  var catOpts = BUDGET_CAT_ORDER.map(function (c) {
+    return '<option value="' + esc(c) + '"' + (c === l.category ? ' selected' : '') + '>' + esc(BUDGET_CATS[c]) + '</option>';
+  }).join('');
+  openModal('Edit line · ' + po.po_number,
+    '<div class="fin-inputs" style="grid-template-columns:1.6fr 84px 110px">' +
+    finLabelWrap('Item', '<input id="plItem" class="cell-in" value="' + esc(l.item) + '">') +
+    finLabelWrap('Qty', '<input id="plQty" class="cell-in" type="number" min="1" value="' + esc(l.qty) + '">') +
+    finLabelWrap('Unit $', '<input id="plUnit" class="cell-in" type="number" min="0" value="' + esc(l.unit_cost) + '">') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Detail', '<input id="plDetail" class="cell-in" value="' + esc(l.detail || '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+    finLabelWrap('Category', '<select id="plCat" class="cell-in">' + catOpts + '</select>') +
+    finLabelWrap('Ownership', '<select id="plOwn" class="cell-in">' +
+      '<option value=""' + '>auto — from the job’s deal type</option>' +
+      '<option value="cogs"' + (l.ownership === 'cogs' ? ' selected' : '') + '>cogs — cost on the job</option>' +
+      '<option value="inventory"' + (l.ownership === 'inventory' ? ' selected' : '') + '>inventory — E360 keeps it</option></select>') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+    finLabelWrap('Bills to', '<select id="plJob" class="cell-in">' + jobOpts + '</select>') +
+    finLabelWrap('Show', '<select id="plShow" class="cell-in">' + showOpts + '</select>') +
+    '</div>' +
+    _foot(act('poLineCommit'), 'Save line'));
+}
+async function poLineCommit() {
+  if (!PENDING_PO_LINE_EDIT) return;
+  var item = _v('plItem');
+  var qty = Number(_v('plQty'));
+  if (!item || !(qty > 0)) { toast('Item + quantity required', 'Name the thing and how many'); return; }
+  var l;
+  try {
+    l = await api.updatePOLine(PENDING_PO_LINE_EDIT.poId, PENDING_PO_LINE_EDIT.lineId, {
+      item: item, qty: qty,
+      detail: _v('plDetail'),
+      unit_cost: Number(_v('plUnit')) || 0,
+      category: _v('plCat') || 'gear',
+      job_id: Number(_v('plJob')) || null,
+      show_id: Number(_v('plShow')) || null,
+      ownership: _v('plOwn') || null
+    });
+  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  PENDING_PO_LINE_EDIT = null;
+  closeM();
+  toast('Line saved', l.item + ' · ' + l.qty + ' × ' + fmtMoney(l.unit_cost));
+  return refreshFinanceUI();
+}
+async function poLineDeleteAct(lineId) {
+  var l = PO_LINES_BY_ID[Number(lineId)];
+  if (!l) return;
+  var po = POS_BY_ID[l.po_id];
+  if (!askConfirm('Remove “' + l.item + '” from ' + (po ? po.po_number : 'this PO') + '?\n\n' +
+      'The line and its ' + fmtMoney(poLineTotal(l)) + ' come off the order. The checklist item it ' +
+      'came from (if any) stays covered — uncheck it there if it still needs buying.')) return;
+  try { await api.deletePOLine(l.po_id, l.id); }
+  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  toast('Line removed', l.item);
+  return refreshFinanceUI();
+}
+
+/* ---- delete the whole PO (manager+, server-enforced) ----------------------
+   The confirm names every consequence the cascade has, because "what happened
+   to my checklist" is exactly the question a silent delete plants. */
+async function poDeleteAct(poId) {
+  var po = await api.getPO(poId);
+  var covered = ALL_NEEDS.filter(function (nd) { return nd.covered_by_po_id === po.id; }).length;
+  var landed = (PO_LINES_BY_PO[po.id] || []).filter(function (l) { return l.expense_id; }).length;
+  if (!askConfirm('Delete ' + po.po_number + ' (' + po.vendor + ', ' + fmtMoney(poTotal(po)) + ')?\n\n' +
+      'Its lines and notes go with it.' +
+      (covered ? '\n' + covered + ' checklist item' + (covered === 1 ? '' : 's') + ' it was covering reopen' + (covered === 1 ? 's' : '') + '.' : '') +
+      (landed ? '\nCosts that already landed stay on the books, just without the PO link.' : '') +
+      '\nThe deletion is logged to the folder’s activity.')) return;
+  try { await api.deletePO(po.id); }
+  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  toast('Deleted ' + po.po_number,
+    covered ? covered + ' checklist item' + (covered === 1 ? '' : 's') + ' reopened — still needs buying'
+            : po.vendor + ' — logged to the folder’s activity');
+  updatePoCount();
+  return render('purchasing');
 }
 
 /* ============================================================================
@@ -1671,15 +1841,51 @@ async function needCommit() {
   } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
   return refreshFinanceUI();
 }
+/* v1 swept EVERY open item into one TBD order in a single click. Real seasons
+   split: cabinets from one vendor, freight from another, consumables from a
+   third — so the raise now opens a picker with every open item checked and a
+   vendor field. Only what stays checked lands on the PO; the rest stay open
+   for the next raise. The server contract is unchanged (need_ids was always a
+   list); this is the UI finally using it. */
+var PENDING_RAISE = null;
 async function needRaiseAct(jobId) {
   var open = needsForJob(jobId).filter(function (nd) { return nd.status === 'open'; });
   if (!open.length) { toast('Nothing open', 'Every item is covered or n/a'); return; }
+  PENDING_RAISE = { jobId: Number(jobId) };
+  var rows = open.map(function (nd) {
+    var est = nd.est_cost == null ? null : (nd.qty || 1) * nd.est_cost;
+    return '<label class="next-item" style="cursor:pointer;gap:10px">' +
+      '<input type="checkbox" class="nrPick" value="' + Number(nd.id) + '" checked>' +
+      '<div class="txt"><b style="font-weight:600">' + esc(nd.item) + '</b>' +
+      (nd.detail ? '<span>' + esc(nd.detail) + '</span>' : '') + '</div>' +
+      '<span class="mini">' + esc('× ' + nd.qty) + '</span>' +
+      '<span class="money" style="font-size:12.5px">' + esc(est == null ? '—' : fmtMoney(est)) + '</span></label>';
+  }).join('');
+  openModal('Raise a PO from the needs list',
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">One order at <b>needed</b> — each checked ' +
+    'item becomes a line and is checked off against it. Uncheck what a different vendor will supply; ' +
+    'it stays open for the next raise.</p>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Vendor', '<input id="nrVendor" class="cell-in" placeholder="who’s quoting these — leave blank for TBD">') +
+    '</div>' +
+    '<div class="next-list" style="max-height:300px;overflow:auto;margin:4px 0 6px">' + rows + '</div>' +
+    _foot(act('needRaiseCommit'), 'Raise PO', 'cart'));
+}
+async function needRaiseCommit() {
+  if (!PENDING_RAISE) return;
+  var picks = [];
+  var els = document.querySelectorAll('.nrPick');
+  for (var i = 0; i < els.length; i++) if (els[i].checked) picks.push(Number(els[i].value));
+  if (!picks.length) { toast('Pick at least one item', 'Nothing checked means nothing to order'); return; }
+  var vendor = _v('nrVendor');
   var r;
-  try {
-    r = await api.raiseNeedsPO(jobId, open.map(function (nd) { return nd.id; }));
-  } catch (e) { toast('Not raised', String(e && e.message || e)); return; }
+  try { r = await api.raiseNeedsPO(PENDING_RAISE.jobId, picks, vendor || undefined); }
+  catch (e) { toast('Not raised', String(e && e.message || e)); return; }
+  PENDING_RAISE = null;
+  closeM();
   toast('Opened ' + r.po.po_number,
-    open.length + ' item' + (open.length === 1 ? '' : 's') + ' → one PO at needed — set the vendor, quote it out');
+    picks.length + ' item' + (picks.length === 1 ? '' : 's') + ' → one PO at needed' +
+    (/^TBD\b/i.test(r.po.vendor) ? ' — set the vendor, then quote it out' : ' · ' + r.po.vendor));
   updatePoCount();
   return render('po', r.po.id);
 }
@@ -4027,6 +4233,12 @@ var ACTIONS = {
   commitNewPO:   function () { return commitNewPO(); },
   openAddPOLine: function (t, id) { return openAddPOLine(id); },
   commitAddPOLine: function () { return commitAddPOLine(); },
+  editPO:        function (t, id) { return openEditPO(id); },
+  poEditCommit:  function () { return poEditCommit(); },
+  poLineEdit:    function (t, id) { return openEditPOLine(id); },
+  poLineCommit:  function () { return poLineCommit(); },
+  poLineDelete:  function (t, id) { return poLineDeleteAct(id); },
+  poDelete:      function (t, id) { return poDeleteAct(id); },
   /* needs list — the per-job ancillaries checklist */
   needToggle:    function (t, id) { return needToggleAct(id); },
   needNa:        function (t, id) { return needNaAct(id); },
@@ -4036,6 +4248,7 @@ var ACTIONS = {
   needDelete:    function (t, id) { return needDeleteAct(id); },
   needSeed:      function (t, id) { return needSeedAct(id); },
   needRaisePo:   function (t, id) { return needRaiseAct(id); },
+  needRaiseCommit: function () { return needRaiseCommit(); },
   openShowFin:   function (t, id) { return openShowFin(id); },
   confirmDoc:    function (t, id) { return confirmDocAct(id); },
   rejectDoc:     function (t, id) { return rejectDocAct(id); },
