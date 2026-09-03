@@ -450,7 +450,7 @@ function viewSettings(ctx) {
           ? '<span style="color:' + (ps.riskCrit ? 'var(--crit)' : 'var(--warn)') + '">' + ps.riskCrit + ' crit · ' + ps.riskWarn + ' warn</span>'
           : '<span style="color:var(--go)">clear</span>') +
         '<div class="set-row"><span class="k">Purchasing view</span><span class="v"><button class="btn sm ghost" ' + act('goPurchasing') + '>' + icon('cart') + 'Open Purchasing</button></span></div>' +
-        '<div class="perm-note" style="margin-top:10px">' + inlineIcon('lock') + ' Over $5,000, approval sits with the admins — <b>Tom, Tony, Jim</b> — plus <b>Candice</b> via her finance capability. Tom’s confirmed rule.</div>';
+        '<div class="perm-note" style="margin-top:10px">' + inlineIcon('lock') + ' Over ' + esc(fmtMoney(PO_APPROVAL_THRESHOLD)) + ', approval sits with the admins — <b>Tom, Tony, Jim</b> — plus <b>Candice</b> via her finance capability. Tom’s confirmed rule.</div>';
     })()) +
     /* ══ F3 · NOTIFICATIONS — the user's own card ═══════════════════════════
        Tony's rule made a setting. The BELL is not on this card and never will
