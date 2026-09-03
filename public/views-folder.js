@@ -81,6 +81,38 @@ function viewShow(show, opts) {
       esc('Record that the client committed — signed or PO\'d. Datestamped and logged, and it ' +
           'unlocks the scheduler push.') + '">' + icon('checkC') + 'Confirm</button>'
     : '';
+  /* push v2 — the push affordance reads the show's scheduler state. Unlinked:
+     one button that opens the create-vs-link choice. Linked: "Push updates"
+     (with a warn dot when the show changed after the last push), the deep link
+     into the staffing app, and unlink for whoever may edit. The provenance
+     line under the header sub answers "did this reach staffing, when, by
+     whom" without opening anything. */
+  var schedLinked = !!show.scheduler_event_id;
+  var pushBtn = schedLinked
+    ? '<button class="btn primary" ' + act('pushSched', show.id) + ' title="' +
+      esc('Re-sync staffing event #' + show.scheduler_event_id + ' — you choose whether hand-entered ' +
+          'staffing rows are kept (default) or replaced.') + '">' + icon('send') + 'Push updates' +
+      (show.scheduler_stale ? ' <span class="n" style="color:var(--warn)">●</span>' : '') + '</button>'
+    : '<button class="btn primary" ' + act('pushSched', show.id) + '>' + icon('send') + 'Push to Scheduler</button>';
+  var schedBtns = schedLinked
+    ? '<button class="btn ghost" ' + act('viewInScheduler', show.id) + '>' + icon('link') + 'View in Scheduler</button>' +
+      (canEditFolderOf(show)
+        ? '<button class="btn ghost" ' + act('unlinkSched', show.id) + ' title="' +
+          esc('Clears the link here only — nothing is deleted in the staffing app.') + '">' +
+          icon('x') + 'Unlink</button>'
+        : '')
+    : '';
+  var schedLine = schedLinked
+    ? '<span>' + icon('send') + ' ' +
+      (show.scheduler_pushed_at
+        ? 'Pushed <b>' + esc(fmtAgo(show.scheduler_pushed_at)) + ' ago</b> by <b>' +
+          esc(userName(show.scheduler_pushed_by) || show.scheduler_pushed_by || '—') +
+          '</b> · event #' + esc(show.scheduler_event_id) +
+          (show.scheduler_stale
+            ? ' <b style="color:var(--warn)">· changed since — push updates</b>' : '')
+        : 'Linked to staffing event <b>#' + esc(show.scheduler_event_id) + '</b> · nothing pushed yet') +
+      '</span>'
+    : '';
   /* F6 — archived shows announce themselves and offer the way back */
   var archBanner = show.archived_at
     ? '<div class="arch-banner">' + icon('box') +
@@ -115,13 +147,15 @@ function viewShow(show, opts) {
     (canEditFolderOf(show)
       ? '<span><button class="lnk-btn" ' + act('editShow', show.id) + '>' + inlineIcon('pencil') +
         'Edit event</button></span>' : '') +
+    schedLine +
     '</div>' +
     '</div>' +
     '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
     (single ? '' : '<button class="btn ghost" ' + act('openFolder', p.id) + '>' + icon('folder') + 'Back to season</button>') +
     (firstFile != null ? '<button class="btn ghost" ' + act('openViewer', firstFile) + '>' + icon('img') + 'Open in Viewer</button>' : '') +
+    schedBtns +
     confirmBtn +
-    '<button class="btn primary" ' + act('pushSched', show.id) + '>' + icon('send') + 'Push to Scheduler</button>' +
+    pushBtn +
     '</div></div>' +
     stageTimeline(show) +
     '<div class="ef-meta">' + metas + '</div>' +

@@ -4053,25 +4053,120 @@ async function poEtaCommit() {
   return refreshFinanceUI();
 }
 
-/* ── A7/A8 · THE LIVE PUSH ───────────────────────────────────────────────────
-   The most-proven integration in the app could only ever rehearse: pushSched()
-   called the route with no {live}, and the toast said "(dry run)". The dry run
-   is now the CONFIRM STEP — you read the payload and its problems, then you
-   send. And features.schedulerPush is finally consumed rather than served and
-   ignored, so a box with no SCHEDULER_BASE_URL says so instead of rehearsing. */
+/* ── A7/A8 · THE LIVE PUSH — now with the create-vs-link choice ─────────────
+   Tom, 2026-09-02: "when we push to staffing we get the choice to start a new
+   event or integrate into an already started one — and I want to be able to
+   update things when we put new stuff in."  So the button forks:
+
+     unlinked show  → the CHOICE modal (create new · link existing), then the
+                      dry-run confirm — which is still the send gate.
+     linked show    → straight to the dry-run confirm as "Push updates", with
+                      the keep-vs-override decision made fresh EVERY push
+                      (Tom, 2026-09-03). 'keep' is always the pre-selected
+                      answer; override gets its own scary-honest confirm and
+                      is never remembered.
+
+   features.schedulerPush still gates the real server — a box with no
+   SCHEDULER_BASE_URL says so instead of rehearsing. The file:// demo has no
+   server to be honest about, so its twin renders the whole flow instead. */
 async function pushSched(showId) {
   var feats = {};
   try { feats = await api.features(); } catch (e) { feats = {}; }
-  if (!feats.schedulerPush) {
+  if (SR.isApi() && !feats.schedulerPush) {
     toast('Scheduler not configured',
       'This server has no SCHEDULER_BASE_URL — there is nothing to push to');
     return;
   }
   var show = await api.getShow(showId);
+  if (!show.scheduler_event_id) return openPushChoice(show);
+  return openPushConfirm(show);
+}
+
+/* The choice itself. Two cards, no default — the person answers every time an
+   unlinked show is pushed, which is exactly what was asked for. */
+function openPushChoice(show) {
+  PENDING_PUSH = { showId: Number(show.id), linked: false };
+  openModal('Push ' + showLabel(show) + ' to the staffing app',
+    '<div class="hint" style="margin:0 0 12px">' + icon('send') + '<span>This show is not linked to a staffing ' +
+    'event yet. Start one, or push into an event somebody already opened over there.</span></div>' +
+    '<button class="btn ghost" style="width:100%;justify-content:flex-start;padding:14px" ' +
+      act('pushChoiceNew', show.id) + '>' + icon('plus') +
+      '<span style="text-align:left"><b>Create a new event</b><br>' +
+      '<span style="color:var(--muted);font-size:12.5px">The push creates the staffing event and fills it — ' +
+      'crew, bookings, contacts, travel.</span></span></button>' +
+    '<button class="btn ghost" style="width:100%;justify-content:flex-start;padding:14px;margin-top:8px" ' +
+      act('pushChoiceLink', show.id) + '>' + icon('link') +
+      '<span style="text-align:left"><b>Link to an existing event</b><br>' +
+      '<span style="color:var(--muted);font-size:12.5px">Pick the event already started in the staffing app; ' +
+      'the push goes into it. Rows entered by hand over there are kept unless you say otherwise.</span></span></button>' +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button></div>');
+}
+async function pushChoiceNewAct(showId) {
+  var show = await api.getShow(showId);
+  return openPushConfirm(show);
+}
+
+/* "Link to existing" — the searchable picker over GET /api/scheduler/events.
+   Filtering is client-side over name + venue + dates: the staffing app has no
+   search parameter and the whole table is what its own dashboard loads. */
+async function pushChoiceLinkAct(showId) {
+  var events;
+  try { events = await api.listSchedulerEvents(); }
+  catch (e) { toast('Could not list staffing events', String(e && e.message || e)); return; }
+  PENDING_PUSH = { showId: Number(showId), linked: false };
+  var rows = (events || []).map(function (ev) {
+    var when = (ev.setup || ev.eventDate || '—') + (ev.breakdown ? ' → ' + ev.breakdown : '');
+    var hay = ((ev.name || '') + ' ' + (ev.location || '') + ' ' + when).toLowerCase();
+    return '<button class="btn ghost" style="width:100%;justify-content:flex-start;margin-top:6px" ' +
+      act('pushPickEvent', ev.id) + ' data-name="' + esc(hay) + '">' + icon('cal') +
+      '<span style="text-align:left"><b>' + esc(ev.name || ('event #' + ev.id)) + '</b>' +
+      (ev.archived ? ' <span class="n" style="color:var(--warn)">archived</span>' : '') + '<br>' +
+      '<span style="color:var(--muted);font-size:12px">' + esc(when) +
+      (ev.location ? ' · ' + esc(ev.location) : '') + ' · #' + Number(ev.id) + '</span></span></button>';
+  }).join('');
+  openModal('Link to an existing staffing event',
+    '<div class="hint" style="margin:0 0 10px">' + icon('link') + '<span>Linking binds the show; it sends ' +
+    'nothing. The push that follows goes into the event you pick.</span></div>' +
+    '<input id="sevSearch" class="cell-in" style="width:100%" placeholder="Search by name, venue or date…">' +
+    '<div id="sevList" style="max-height:320px;overflow-y:auto;margin-top:4px">' +
+    (rows || '<div class="empty" style="padding:18px">The staffing app has no events yet — create a new one instead.</div>') +
+    '</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button></div>');
+  var inp = $('#sevSearch');
+  if (inp && inp.addEventListener) {
+    inp.addEventListener('input', function () {
+      var q = String(inp.value || '').toLowerCase().trim();
+      var els = document.querySelectorAll('#sevList [data-name]');
+      for (var i = 0; i < els.length; i++) {
+        els[i].style.display = !q || els[i].getAttribute('data-name').indexOf(q) >= 0 ? '' : 'none';
+      }
+    });
+  }
+}
+async function pushPickEventAct(eventId) {
+  var showId = PENDING_PUSH && PENDING_PUSH.showId;
+  if (!showId) { closeM(); return; }
+  var r;
+  try { r = await api.linkSchedulerEvent(showId, eventId); }
+  catch (e) { toast('Could not link', String(e && e.message || e)); return; }
+  toast('Linked to the staffing app',
+    'event #' + eventId + (r && r.event && r.event.name ? ' — ' + r.event.name : '') +
+    ' · nothing sent yet');
+  var show = await refreshShowTab(showId);
+  return openPushConfirm(show);
+}
+
+/* The dry-run confirm — still the send gate, for both arms of the choice.
+   When the show is linked it also carries the keep-vs-override radios; the
+   send button reads them, and override detours through its own confirm. */
+async function openPushConfirm(show) {
+  var showId = Number(show.id);
   var dry;
   try { dry = await api.pushToScheduler(showId, { live: false }); }
   catch (e) { toast('Could not build the push', String(e && e.message || e)); return; }
-  PENDING_PUSH = { showId: Number(showId), linked: !!show.scheduler_event_id };
+  PENDING_PUSH = { showId: showId, linked: !!show.scheduler_event_id };
   /* The dry run answers { dryRun, ready, problems[], rosterNote, targets, payloads }
      — `payloads` PLURAL, and it is the only place the crew list and the child
      counts live. Reading a key the server does not send is exactly the
@@ -4084,9 +4179,20 @@ async function pushSched(showId) {
     return '<div class="meta-row"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + '</span></div>';
   };
   var clean = dry.ready !== undefined ? !!dry.ready : !probs.length;
-  openModal('Push ' + showLabel(show) + ' to the staffing app',
+  var linked = !!show.scheduler_event_id;
+  /* the state line: who pushed last, and whether the copy over there is behind */
+  var pushedLine = show.scheduler_pushed_at
+    ? '<div class="hint" style="margin-top:10px">' + inlineIcon('clock') + '<span>Pushed ' +
+      esc(fmtAgo(show.scheduler_pushed_at)) + ' ago by <b>' +
+      esc(userName(show.scheduler_pushed_by) || show.scheduler_pushed_by || '—') + '</b> · event #' +
+      esc(show.scheduler_event_id) +
+      (show.scheduler_stale
+        ? ' — <b style="color:var(--warn)">the show changed since, staffing is behind</b>'
+        : ' — up to date') + '</span></div>'
+    : '';
+  openModal((linked ? 'Push updates — ' : 'Push ') + showLabel(show) + (linked ? '' : ' to the staffing app'),
     '<div class="hint" style="margin:0 0 12px">' + icon('send') + '<span>This is the <b>dry run</b>. Nothing has ' +
-    'left the building. Read what would be created over there, then send it for real.</span></div>' +
+    'left the building. Read what would be ' + (linked ? 'synced' : 'created') + ' over there, then send it for real.</span></div>' +
     row('Event', showLabel(show)) +
     row('Dates', (show.load_in_date || '—') + ' → ' + (show.strike_date || show.event_date || '—')) +
     row('Crew', crewNames.length ? crewNames.join(', ') : '— nobody on the crew yet —') +
@@ -4095,10 +4201,21 @@ async function pushSched(showId) {
     row('Venue contacts', String((pl.venueContacts || []).length)) +
     (dry.rosterNote ? '<div class="hint" style="margin-top:10px">' + inlineIcon('users') + '<span>' +
       esc(dry.rosterNote) + '</span></div>' : '') +
-    (show.scheduler_event_id
+    pushedLine +
+    (linked
       ? '<div class="callout" style="margin:12px 0 0"><div class="ci">' + icon('link') + '</div><div>' +
-        '<b>Already linked</b><p>This show is staffing event <b>' + esc(show.scheduler_event_id) + '</b>. Sending ' +
-        'again <b>updates</b> it — rows a human added over there survive.</p></div></div>'
+        '<b>Pushing into staffing event #' + esc(show.scheduler_event_id) + '</b>' +
+        '<p>The event may hold rows people entered over there by hand. Choose what this push does with them ' +
+        '— the choice is asked every time and never remembered:</p>' +
+        '<label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer">' +
+        '<input type="radio" name="pushMode" value="keep" checked style="margin-top:3px">' +
+        '<span><b>Keep what’s there</b> — Showrunner replaces only the rows it created; anything ' +
+        'entered by hand in the staffing app is never modified or deleted.</span></label>' +
+        '<label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;cursor:pointer">' +
+        '<input type="radio" name="pushMode" value="override" style="margin-top:3px">' +
+        '<span><b style="color:var(--warn)">Override</b> — replace the event’s bookings, venue contacts and ' +
+        'client contacts wholesale, hand-entered rows included. Asks again before it fires.</span></label>' +
+        '</div></div>'
       : '') +
     (clean
       ? '<div class="hint" style="margin-top:12px">' + inlineIcon('checkC') + '<span>Pre-flight passed — every ' +
@@ -4111,21 +4228,83 @@ async function pushSched(showId) {
     '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
     '<button class="btn ghost" ' + act('closeModal') + '>Close</button>' +
     (clean ? '<button class="btn primary" ' + act('pushLive', showId) + '>' + icon('send') +
-      (show.scheduler_event_id ? 'Send the update' : 'Send it for real') + '</button>' : '') +
+      (linked ? 'Send the update' : 'Send it for real') + '</button>' : '') +
     '</div>');
 }
+function pushModeChosen() {
+  var sel = document.querySelector('input[name="pushMode"]:checked');
+  return sel && sel.value === 'override' ? 'override' : 'keep';
+}
 async function pushLiveAct(showId) {
+  /* override is a two-key launch: the radio AND its own confirm. Nothing about
+     the choice is stored anywhere — next push starts at 'keep' again. */
+  if (pushModeChosen() === 'override') return openOverrideConfirm(showId);
+  return doPushLive(showId, 'keep');
+}
+function openOverrideConfirm(showId) {
+  var eventId = null;
+  var s = SHOWS_BY_ID[Number(showId)];
+  if (s) eventId = s.scheduler_event_id;
+  openModal('Replace everything on staffing event #' + esc(eventId || '?') + '?',
+    '<div class="callout"><div class="ci">' + icon('alert') + '</div><div>' +
+    '<b>This deletes rows Showrunner did not create.</b>' +
+    '<p>Every booking, venue contact and client contact currently on staffing event <b>#' +
+    esc(eventId || '?') + '</b> will be deleted and replaced with this show’s rows — including anything ' +
+    'someone typed into the staffing app by hand. That work is not recoverable from here.</p>' +
+    '<p>Travel legs are the one exception: staffing has no way to delete them, so existing legs are ' +
+    'overwritten by key, never removed.</p>' +
+    '<p>If you are not certain, go back and send with <b>Keep what’s there</b> instead.</p>' +
+    '</div></div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" style="background:var(--crit)" ' + act('pushOverrideGo', showId) + '>' +
+    icon('alert') + 'Replace and push</button></div>');
+}
+async function pushOverrideGoAct(showId) { return doPushLive(showId, 'override'); }
+async function doPushLive(showId, mode) {
   var linked = !!(PENDING_PUSH && PENDING_PUSH.linked);
   var r;
-  try { r = await api.pushToScheduler(showId, { live: true, force: linked }); }
+  try { r = await api.pushToScheduler(showId, { live: true, force: linked, mode: mode }); }
   catch (e) { toast('Push refused', String(e && e.message || e)); return; }
   PENDING_PUSH = null;
   closeM();
   var c = r.counts || {};
   toast('Pushed to the staffing app',
     'event ' + (r.schedulerEventId || '—') + ' · ' + (c.bookings || 0) + ' bookings · ' +
-    (c.travel || 0) + ' travel legs' + (r.created ? ' — created' : ' — updated'));
+    (c.travel || 0) + ' travel legs' +
+    (r.created ? ' — created' : mode === 'override' ? ' — updated · replaced existing rows' : ' — updated'));
   return refreshShowTab(showId);
+}
+
+/* ── unlink — clears the binding HERE; deletes nothing over there ─────────── */
+async function unlinkSchedAct(showId) {
+  var show = await api.getShow(showId);
+  if (!show.scheduler_event_id) { toast('Not linked', 'This show has no staffing event to unlink'); return; }
+  openModal('Unlink from staffing event #' + esc(show.scheduler_event_id) + '?',
+    '<div class="hint" style="margin:0 0 12px">' + icon('link') + '<span>This clears the link on the ' +
+    'Showrunner side only. <b>Nothing is deleted in the staffing app</b> — the event and every row on it ' +
+    'stay exactly as they are. The next push will ask again: create a new event, or link one.</span></div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:12px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('unlinkGo', showId) + '>' + icon('x') + 'Unlink</button></div>');
+}
+async function unlinkGoAct(showId) {
+  var r;
+  try { r = await api.unlinkSchedulerEvent(showId); }
+  catch (e) { toast('Could not unlink', String(e && e.message || e)); return; }
+  closeM();
+  toast('Unlinked', 'event #' + (r && r.unlinkedEventId || '—') +
+    ' still exists in the staffing app, untouched');
+  return refreshShowTab(showId);
+}
+
+/* ── the deep link — the staffing app opened AT the linked event ──────────── */
+async function viewInSchedulerAct(showId) {
+  var show = await api.getShow(showId);
+  if (show.scheduler_deep_link) { window.open(show.scheduler_deep_link, '_blank'); return; }
+  toast('No scheduler behind this button', SR.isApi()
+    ? 'This server has no SCHEDULER_BASE_URL — there is no staffing app to open'
+    : 'The demo has no staffing app to open');
 }
 
 /* ── B7 · PROOFS ─────────────────────────────────────────────────────────────
@@ -4334,6 +4513,14 @@ var ACTIONS = {
   closeNav:      function () { setNavOpen(false); },
   pushSched:     function (t, id) { return pushSched(id); },
   pushLive:      function (t, id) { return pushLiveAct(id); },
+  /* push v2 — the create-vs-link choice, the picker, override, unlink, deep link */
+  pushChoiceNew:  function (t, id) { return pushChoiceNewAct(id); },
+  pushChoiceLink: function (t, id) { return pushChoiceLinkAct(id); },
+  pushPickEvent:  function (t, id) { return pushPickEventAct(id); },
+  pushOverrideGo: function (t, id) { return pushOverrideGoAct(id); },
+  unlinkSched:    function (t, id) { return unlinkSchedAct(id); },
+  unlinkGo:       function (t, id) { return unlinkGoAct(id); },
+  viewInScheduler: function (t, id) { return viewInSchedulerAct(id); },
 
   /* ── THE SEAM PASS · every route that had no door ──────────────────────── */
   /* B1 crew */

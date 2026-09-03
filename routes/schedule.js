@@ -704,6 +704,9 @@ router.put('/crew/:id', pmPlus, asyncH(async (req, res) => {
     sets.push(`travel=$${params.length}::jsonb`);
   }
   if (!sets.length) throw badRequest('nothing to update');
+  // The scheduler stale check compares this stamp against the show's last push
+  // — a crew line is half of what a push publishes.
+  sets.push('updated_at=NOW()');
   params.push(id);
 
   const crew = await withTx(async (c) => {

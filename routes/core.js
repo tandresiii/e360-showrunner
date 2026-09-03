@@ -45,7 +45,8 @@ const { scopeFromDocs, scopeQuestions } = require('../lib/speccheck');
 // so the dry run and the live push can never drift.
 const {
   buildSchedulerPayloads, pushShowToScheduler, schedulerConfigured,
-  schedulerCredentialed, fetchRoster, validateForPush, deriveBookingCategory, mapEventType
+  schedulerCredentialed, fetchRoster, validateForPush, deriveBookingCategory, mapEventType,
+  fetchSchedulerEvents, notConfigured: schedulerNotConfigured, PUSH_MODES
 } = require('../lib/scheduler');
 
 const router = express.Router();
@@ -112,6 +113,37 @@ async function hydrateShow(row, q = pool, { withSteps = false, extra: more = nul
     'SELECT * FROM steps WHERE show_id=$1 ORDER BY sort_order ASC, id ASC', [row.id])).rows;
   const extra = { rag: deriveRag(steps, row) || row.rag || 'idle' };
   if (withSteps) extra.steps = steps.map(dbToStep);
+  // ── scheduler push state, derived here because it needs the children ──────
+  // `scheduler_stale` answers "did anything the push publishes change after the
+  // last push?" — the show row itself (name, dates, venue, header times) plus
+  // its steps and crew lines, all of which cross the wire. schedule_items are
+  // deliberately NOT consulted: the day-by-day schedule never leaves Showrunner
+  // (B.1 sends only the four header times), so an edit there cannot make the
+  // staffing copy stale. Compared in SQL so the timezone semantics are
+  // Postgres's own; the same-statement NOW() that stamps pushed_at and
+  // updated_at together makes a fresh push read exactly not-stale.
+  // Costs one query, and only on a show that has actually been pushed.
+  if (row.scheduler_pushed_at) {
+    const st = await q.query(
+      `SELECT (s.updated_at > s.scheduler_pushed_at)
+           OR EXISTS (SELECT 1 FROM steps t
+                      WHERE t.show_id = s.id AND t.updated_at > s.scheduler_pushed_at)
+           OR EXISTS (SELECT 1 FROM crew_assignments ca
+                      WHERE ca.show_id = s.id
+                        AND GREATEST(ca.created_at, ca.updated_at) > s.scheduler_pushed_at)
+              AS stale
+       FROM shows s WHERE s.id = $1`, [row.id]);
+    extra.scheduler_stale = !!(st.rows[0] && st.rows[0].stale);
+  } else {
+    extra.scheduler_stale = false;
+  }
+  // "View in Scheduler" — the same URL shape the push response has always
+  // returned. Auth-gated (every show read is), so the base URL is not leaked
+  // through the public /api/config; null while the integration is unconfigured
+  // and the UI says so instead of opening nothing.
+  extra.scheduler_deep_link = row.scheduler_event_id && process.env.SCHEDULER_BASE_URL
+    ? `${String(process.env.SCHEDULER_BASE_URL).replace(/\/+$/, '')}/?event=${row.scheduler_event_id}`
+    : null;
   return dbToShow(row, more ? { ...extra, ...more } : extra);
 }
 async function showsFor(projectId, q = pool) {
@@ -1515,6 +1547,18 @@ router.post('/shows/:id/push-to-scheduler', requireRole('pm'), asyncH(async (req
       hint: 'Pass { "force": true } to re-push (updates the linked event).'
     });
   }
+  // How this push treats children already on the event (Tom, 2026-09-03).
+  // 'keep' is the default and the only value that needs no confirm: rows a
+  // person entered in the staffing app are never touched. 'override' replaces
+  // the event's children wholesale and is chosen FRESH each push — nothing here
+  // remembers it. An unknown value is a 400, never a silent fallback: the
+  // difference between the two is somebody's hand-entered itinerary.
+  const mode = has(req.body, 'mode')
+    ? oneOf(String(pick(req.body, 'mode') || '').trim(), PUSH_MODES, null)
+    : 'keep';
+  if (!mode) {
+    throw badRequest(`unknown push mode "${pick(req.body, 'mode')}" — one of ${PUSH_MODES.join(', ')}`);
+  }
   const steps = (await pool.query('SELECT * FROM steps WHERE show_id=$1', [show.id])).rows;
   const crew = (await pool.query('SELECT * FROM crew_assignments WHERE show_id=$1', [show.id])).rows;
   // The Showrunner roster, for the identity link: steps.owner and
@@ -1563,7 +1607,11 @@ router.post('/shows/:id/push-to-scheduler', requireRole('pm'), asyncH(async (req
         venueContacts: `POST /api/venue-contacts  ×${payloads.venueContacts.length}`,
         clientContacts: `POST /api/client-contacts  ×${payloads.clientContacts.length}`,
         travel: `POST /api/travel  ×${payloads.travel.length}  (upsert on travel_key)`,
-        childCleanup: 'DELETE the child ids recorded in shows.pushed_child_ids first (M8)'
+        childCleanup: mode === 'override'
+          ? 'DELETE every booking / venue contact / client contact on the event first — ' +
+            'override replaces hand-entered staffing rows too'
+          : 'DELETE the child ids recorded in shows.pushed_child_ids first (M8) — ' +
+            'rows entered by hand in the staffing app are never touched'
       },
       payloads
     });
@@ -1607,7 +1655,7 @@ router.post('/shows/:id/push-to-scheduler', requireRole('pm'), asyncH(async (req
   }
 
   const result = await pushShowToScheduler({
-    project, show, steps, crew, users,
+    project, show, steps, crew, users, mode,
     tracked: show.pushed_child_ids || null,
     // Persist the link the MOMENT the event exists. The fan-out is resumable,
     // not atomic (§2.7): a failure past this point leaves a linked, partly
@@ -1622,15 +1670,20 @@ router.post('/shows/:id/push-to-scheduler', requireRole('pm'), asyncH(async (req
   await withTx(async (c) => {
     await c.query(
       `UPDATE shows SET scheduler_event_id=$1, pushed_child_ids=$2::jsonb, stage=$3,
-         scheduler_pushed_at=NOW(), updated_at=NOW() WHERE id=$4`,
+         scheduler_pushed_at=NOW(), scheduler_pushed_by=$4, updated_at=NOW() WHERE id=$5`,
       [result.eventId, JSON.stringify(result.tracked),
-       show.stage === 'closed' ? show.stage : 'scheduled', show.id]);
+       show.stage === 'closed' ? show.stage : 'scheduled', req.actor, show.id]);
     await logActivity(c, {
       projectId: project.id, showId: show.id, actor: req.actor,
       action: 'scheduler.push',
       detail: `${result.created ? 'created' : 'updated'} staffing event #${result.eventId} — ` +
               `${result.counts.bookings} bookings, ${result.counts.venueContacts} venue contacts, ` +
-              `${result.counts.clientContacts} client contacts, ${result.counts.travel} travel legs`,
+              `${result.counts.clientContacts} client contacts, ${result.counts.travel} travel legs` +
+              // The mode is part of the record: an override that removed
+              // somebody's hand-entered rows must be answerable from the trail.
+              (result.created ? '' : result.mode === 'override'
+                ? ' · mode override — replaced the event’s existing children'
+                : ' · mode keep — hand-entered staffing rows untouched'),
       accent: true
     });
   });
@@ -1640,12 +1693,127 @@ router.post('/shows/:id/push-to-scheduler', requireRole('pm'), asyncH(async (req
     dryRun: false,
     schedulerEventId: result.eventId,
     created: result.created,
+    mode: result.mode,
     clientId: result.clientId,
     counts: result.counts,
     removed: result.removed,
     crewNames: result.crewNames,
     deepLink: `${process.env.SCHEDULER_BASE_URL.replace(/\/+$/, '')}/?event=${result.eventId}`
   });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+// LINK TO AN EXISTING STAFFING EVENT  (Tom, 2026-09-02: "we get the choice to
+// start a new event or integrate into an already started one")
+// ────────────────────────────────────────────────────────────────────────────
+// The push above CREATES an event when the show is unlinked. These three routes
+// are the other arm of the choice: list the staffing app's events, bind one to
+// the show, and undo the binding. The binding itself is purely local —
+// scheduler_event_id plus the push-ledger columns — so linking sends nothing
+// and unlinking deletes nothing remote. Only a subsequent push writes.
+// ════════════════════════════════════════════════════════════════════════════
+
+// The honest 501, ANSWERED rather than thrown — same device as the live push
+// above, so a deliberate "not configured yet" never prints a stack trace as if
+// the server had failed. The message still names the exact env vars to set.
+function schedulerUnconfigured501(res) {
+  return res.status(501).json({
+    error: schedulerNotConfigured(
+      schedulerConfigured() ? 'SCHEDULER_USER / SCHEDULER_PASS' : 'SCHEDULER_BASE_URL').message
+  });
+}
+
+// GET /api/scheduler/events — the candidate list for the "Link to existing
+// event" picker. pm+, same floor as the push; proxied so the browser never
+// needs staffing credentials. Unconfigured ⇒ the same honest 501 as the push.
+router.get('/scheduler/events', requireRole('pm'), asyncH(async (req, res) => {
+  if (!schedulerCredentialed()) return schedulerUnconfigured501(res);
+  res.json(await fetchSchedulerEvents());
+}));
+
+// POST /api/shows/:id/scheduler-link  { event_id } — bind the show to an event
+// that already exists in the staffing app. The next push goes INTO that event
+// (read-modify-write PUT + child sync) instead of creating one.
+router.post('/shows/:id/scheduler-link', requireRole('pm'), asyncH(async (req, res) => {
+  const show = await loadShow(idParam(req));
+  if (!show) throw notFound('Show not found');
+  const project = await loadProject(show.project_id);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to link this show');
+  if (!schedulerCredentialed()) return schedulerUnconfigured501(res);
+
+  const eventId = intOrNull(pick(req.body, 'event_id'));
+  if (!eventId || eventId <= 0) throw badRequest('event_id (a staffing event id) is required');
+  // Re-binding a linked show silently would orphan the push ledger for the old
+  // event; the unlink affordance exists precisely so this stays a two-step,
+  // eyes-open act.
+  if (show.scheduler_event_id && Number(show.scheduler_event_id) !== eventId) {
+    throw conflict(`This show is already linked to staffing event #${show.scheduler_event_id}.`, {
+      hint: 'Unlink first (DELETE /api/shows/:id/scheduler-link), then link the new event.'
+    });
+  }
+  // The id must name a real event NOW — a stale picker or a typo becomes a 400
+  // here rather than a half-bound show whose next push 404s mid-fan-out.
+  const events = await fetchSchedulerEvents();
+  const ev = events.find((e) => Number(e.id) === eventId);
+  if (!ev) {
+    throw badRequest(`Staffing event #${eventId} does not exist (it may have been deleted) — ` +
+                     'refresh the event list and pick again.');
+  }
+
+  const updated = await withTx(async (c) => {
+    // A fresh binding starts with an EMPTY push ledger: nothing in that event
+    // is ours yet, so the first push's delete pass has nothing to delete and
+    // every row already there — a human's — survives by construction.
+    const r = await c.query(
+      `UPDATE shows SET scheduler_event_id=$1, pushed_child_ids=NULL,
+         scheduler_pushed_at=NULL, scheduler_pushed_by=NULL, updated_at=NOW()
+       WHERE id=$2 RETURNING *`, [eventId, show.id]);
+    await logActivity(c, {
+      projectId: show.project_id, showId: show.id, actor: req.actor,
+      action: 'scheduler.link', accent: true,
+      detail: `linked to staffing event #${eventId} — ${ev.name || 'unnamed'}` +
+              (ev.eventDate ? ` (${ev.eventDate})` : '')
+    });
+    return r.rows[0];
+  });
+
+  res.json({ ok: true, show: await hydrateShow(updated), event: ev });
+}));
+
+// DELETE /api/shows/:id/scheduler-link — clear the binding. LOCAL ONLY: the
+// staffing event and every row on it stay exactly as they are (the rows this
+// show pushed included — they are real bookings someone may be relying on).
+// Afterwards the push offers the create-vs-link choice again. Works with the
+// integration unconfigured, because it touches nothing remote.
+router.delete('/shows/:id/scheduler-link', requireRole('pm'), asyncH(async (req, res) => {
+  const show = await loadShow(idParam(req));
+  if (!show) throw notFound('Show not found');
+  const project = await loadProject(show.project_id);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to unlink this show');
+  if (!show.scheduler_event_id) {
+    throw conflict('This show is not linked to a staffing event.', {
+      hint: 'Nothing to unlink — the next push will offer create-new or link-existing.'
+    });
+  }
+  const oldEventId = show.scheduler_event_id;
+
+  const updated = await withTx(async (c) => {
+    // The ledger goes with the binding: those child ids belong to the OLD
+    // event, and a later push into a different event must not reach back and
+    // delete rows there.
+    const r = await c.query(
+      `UPDATE shows SET scheduler_event_id=NULL, pushed_child_ids=NULL,
+         scheduler_pushed_at=NULL, scheduler_pushed_by=NULL, updated_at=NOW()
+       WHERE id=$1 RETURNING *`, [show.id]);
+    await logActivity(c, {
+      projectId: show.project_id, showId: show.id, actor: req.actor,
+      action: 'scheduler.unlink', accent: true,
+      detail: `unlinked from staffing event #${oldEventId} — nothing was deleted in the staffing app`
+    });
+    return r.rows[0];
+  });
+
+  res.json({ ok: true, show: await hydrateShow(updated), unlinkedEventId: oldEventId });
 }));
 
 module.exports = router;

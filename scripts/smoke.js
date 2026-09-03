@@ -1506,6 +1506,234 @@ const DEL = (p, o) => call('DELETE', p, o);
      ros2.status === 200 && Array.isArray(ros2.body.crew) && !!ros2.body.scheduler, ros2.status);
 
   // ══════════════════════════════════════════════════════════════════════════
+  // 12b. SCHEDULER v2 — create / link / update / override, against a LOCAL FAKE
+  // ─────────────────────────────────────────────────────────────────────────
+  // Everything above ran with the integration UNCONFIGURED, proving the honest
+  // 501s. This section is the other half: a local stand-in for the staffing app
+  // (scripts/fake-scheduler.js — the endpoint surface copied from
+  // staffing/server.js) is booted, the env vars are pointed at it, and the
+  // whole v2 flow is driven end to end. The one assertion that matters most:
+  // a row a human typed into the staffing app is NEVER counted dead by a
+  // keep-mode push — and IS replaced by an explicit override, because that
+  // difference is somebody's hand-entered itinerary.
+  // The env is restored (and the 501s re-proven) at the end, so nothing here
+  // can leak configuration into the sections that follow.
+  // ══════════════════════════════════════════════════════════════════════════
+  section('12b. scheduler v2 — the choice, the invariant, updates, override');
+
+  const { startFakeScheduler } = require('./fake-scheduler');
+  const fake = await startFakeScheduler({ user: 'showrunner', pass: 'fake-pass' });
+  process.env.SCHEDULER_BASE_URL = fake.url;
+  process.env.SCHEDULER_USER = 'showrunner';
+  process.env.SCHEDULER_PASS = 'fake-pass';
+  schedLib.schedulerResetToken();          // the cache may hold a dead token from nothing — belt and braces
+  fake.seed.roster('Dana Fields');
+  fake.seed.roster('Marcus Webb');
+
+  // a self-contained fixture: its own folder, its own shows, controlled crew
+  const v2P = (await POST('/api/projects',
+    { name: TAG + ' sched v2', client: TAG + ' SchedCo', type: 'led' }, { token: A })).body;
+  const mkV2Show = async (name) => (await POST('/api/shows', {
+    project_id: v2P.id, name, venue: 'Fake Arena',
+    load_in_date: '2026-11-20', event_date: '2026-11-21', strike_date: '2026-11-22'
+  }, { token: A })).body;
+
+  // ── the create-new arm ────────────────────────────────────────────────────
+  const shA = await mkV2Show(TAG + ' v2 create');
+  await POST(`/api/shows/${shA.id}/confirm`, {}, { token: A });
+  await POST(`/api/shows/${shA.id}/crew`, {
+    name: 'Dana Fields', role_on_site: 'Lead',
+    travel: { out: { flight_num: 'AA10', arrival_date: '2026-11-20' } }
+  }, { token: A });
+  await POST('/api/steps', { show_id: shA.id, lane: 'logistics', title: 'Hotel block', status: 'todo' },
+    { token: A });
+  const evCountBefore = fake.state.events.length;
+  const pushA = await POST(`/api/shows/${shA.id}/push-to-scheduler`, { live: true }, { token: A });
+  ok('create-new: the live push creates a staffing event', pushA.status === 200
+     && pushA.body.created === true && pushA.body.mode === 'keep', pushA.body);
+  ok('create-new: the event exists in the fake with the show\'s name',
+     fake.state.events.length === evCountBefore + 1
+     && fake.state.events.some((e) => e.event === TAG + ' v2 create'), fake.state.events.map((e) => e.event));
+  ok('create-new: the travel leg landed under the |inbound sentinel',
+     !!fake.state.travel[`Dana Fields|${pushA.body.schedulerEventId}|inbound`],
+     Object.keys(fake.state.travel));
+  const shAafter = await GET(`/api/shows/${shA.id}`, { token: A });
+  ok('create-new: scheduler_event_id + pushed at/by persisted on the show',
+     shAafter.body.scheduler_event_id === pushA.body.schedulerEventId
+     && !!shAafter.body.scheduler_pushed_at && shAafter.body.scheduler_pushed_by === 'admin',
+     { id: shAafter.body.scheduler_event_id, at: shAafter.body.scheduler_pushed_at,
+       by: shAafter.body.scheduler_pushed_by });
+  ok('create-new: a fresh push reads NOT stale', shAafter.body.scheduler_stale === false,
+     shAafter.body.scheduler_stale);
+  ok('create-new: the deep link points into the fake scheduler',
+     shAafter.body.scheduler_deep_link === `${fake.url}/?event=${pushA.body.schedulerEventId}`,
+     shAafter.body.scheduler_deep_link);
+
+  // ── the link-existing arm — with FOREIGN rows already on the event ────────
+  // "Brendon started this one": a hand-entered booking, venue contact, client
+  // contact and travel leg. None of them is Showrunner's to touch.
+  const brendonEv = fake.seed.event({ event: 'Brendon started this one',
+    eventDate: '2026-11-21', setup: '2026-11-20', breakdown: '2026-11-22', location: 'Fake Arena' });
+  const fBooking = fake.seed.booking(brendonEv.id, { customLabel: 'hand-entered forklift' });
+  const fVenue = fake.seed.venueContact(brendonEv.id);
+  const fClient = fake.seed.clientContact(brendonEv.id);
+  const fTravelKey = `Marcus Webb|${brendonEv.id}|inbound`;
+  fake.seed.travel(fTravelKey);
+
+  const list = await GET('/api/scheduler/events', { token: A });
+  ok('GET /api/scheduler/events proxies the staffing list', list.status === 200
+     && Array.isArray(list.body)
+     && list.body.some((e) => e.id === brendonEv.id && e.name === 'Brendon started this one'),
+     list.status);
+  ok('...trimmed to picker fields — no staff[] / techNotes riding along',
+     list.body.every((e) => !('staff' in e) && !('techNotes' in e)), Object.keys(list.body[0] || {}));
+  const listTech = await GET('/api/scheduler/events', { token: TECHT });
+  ok('...and it sits on the pm floor like the push (tech is 403)', listTech.status === 403, listTech.status);
+
+  const shB = await mkV2Show(TAG + ' v2 link');
+  await POST(`/api/shows/${shB.id}/confirm`, {}, { token: A });
+  await POST(`/api/shows/${shB.id}/crew`, { name: 'Dana Fields', role_on_site: 'Lead' }, { token: A });
+  await POST('/api/steps', { show_id: shB.id, lane: 'logistics', title: 'Feeder cable + distro', status: 'todo' },
+    { token: A });
+
+  const badLink = await POST(`/api/shows/${shB.id}/scheduler-link`, { event_id: 999999 }, { token: A });
+  ok('linking a nonexistent staffing event is a 400 that says so',
+     badLink.status === 400 && /does not exist/.test(badLink.body.error || ''), badLink.body);
+  const link = await POST(`/api/shows/${shB.id}/scheduler-link`, { event_id: brendonEv.id }, { token: A });
+  ok('link-existing binds the show and sends nothing', link.status === 200
+     && link.body.show.scheduler_event_id === brendonEv.id
+     && link.body.event.name === 'Brendon started this one'
+     && fake.state.bookings.length === (pushA.body.counts.bookings + 1), link.body);
+  const actLink = await GET(`/api/activity?show_id=${shB.id}&action=scheduler.link`, { token: A });
+  ok('the link is on the activity trail', actLink.status === 200 && actLink.body.length === 1
+     && /Brendon started this one/.test(actLink.body[0].detail || ''), actLink.body);
+  const relink = await POST(`/api/shows/${shA.id}/scheduler-link`, { event_id: brendonEv.id }, { token: A });
+  ok('re-binding a linked show is a 409 pointing at unlink', relink.status === 409
+     && /[Uu]nlink first/.test(JSON.stringify(relink.body)), relink.body);
+
+  // THE INVARIANT (keep mode, the default): push INTO Brendon's event; his rows live.
+  const pushB = await POST(`/api/shows/${shB.id}/push-to-scheduler`, { live: true, force: true },
+    { token: A });
+  ok('link-existing: the push UPDATES the linked event, creating nothing', pushB.status === 200
+     && pushB.body.created === false && pushB.body.schedulerEventId === brendonEv.id
+     && fake.state.events.length === evCountBefore + 2, pushB.body);
+  ok('link-existing: the event kept its id and took the show\'s fields (read-modify-write)',
+     fake.state.events.some((e) => e.id === brendonEv.id && e.event === TAG + ' v2 link'),
+     fake.state.events.map((e) => ({ id: e.id, event: e.event })));
+  ok('THE INVARIANT: the hand-entered booking survived the push',
+     fake.state.bookings.some((b) => b.id === fBooking.id), fake.state.bookings.map((b) => b.customLabel));
+  ok('THE INVARIANT: the hand-entered venue + client contacts survived',
+     fake.state.venueContacts.some((v) => v.id === fVenue.id)
+     && fake.state.clientContacts.some((c) => c.id === fClient.id),
+     { venue: fake.state.venueContacts.length, client: fake.state.clientContacts.length });
+  ok('THE INVARIANT: the foreign travel leg survived', !!fake.state.travel[fTravelKey],
+     Object.keys(fake.state.travel));
+  ok('...and OUR booking landed beside Brendon\'s',
+     fake.state.bookings.some((b) => b.eventId === brendonEv.id && b.customLabel === 'Feeder cable + distro'),
+     fake.state.bookings.map((b) => b.customLabel));
+  const ledgerB = (await pool.query('SELECT pushed_child_ids FROM shows WHERE id=$1', [shB.id]))
+    .rows[0].pushed_child_ids;
+  ok('the push ledger records ONLY our ids — never a foreign one',
+     Array.isArray(ledgerB.bookings) && ledgerB.bookings.length > 0
+     && !ledgerB.bookings.includes(fBooking.id)
+     && !ledgerB.venueContacts.includes(fVenue.id)
+     && !ledgerB.clientContacts.includes(fClient.id), ledgerB);
+
+  // ── stale detection + the update push ─────────────────────────────────────
+  const shBfresh = await GET(`/api/shows/${shB.id}`, { token: A });
+  ok('after the push the show reads NOT stale', shBfresh.body.scheduler_stale === false,
+     shBfresh.body.scheduler_stale);
+  await POST('/api/steps', { show_id: shB.id, lane: 'logistics', title: '53ft dry van', status: 'todo' },
+    { token: A });
+  const shBstale = await GET(`/api/shows/${shB.id}`, { token: A });
+  ok('STALE: adding a step after the push flips the indicator',
+     shBstale.body.scheduler_stale === true, shBstale.body.scheduler_stale);
+  const ourBefore = ledgerB.bookings.length;
+  const push2 = await POST(`/api/shows/${shB.id}/push-to-scheduler`, { live: true, force: true },
+    { token: A });
+  ok('UPDATE push: our previous rows were swept (removed = what the ledger held)',
+     push2.status === 200 && push2.body.removed.bookings === ourBefore, push2.body.removed);
+  ok('UPDATE push: the new booking is over there now',
+     fake.state.bookings.some((b) => b.eventId === brendonEv.id && b.customLabel === '53ft dry van'),
+     fake.state.bookings.map((b) => b.customLabel));
+  ok('UPDATE push: Brendon\'s booking is STILL alive after the delete-then-insert',
+     fake.state.bookings.some((b) => b.id === fBooking.id), fake.state.bookings.length);
+  ok('UPDATE push: stale is back to false',
+     (await GET(`/api/shows/${shB.id}`, { token: A })).body.scheduler_stale === false);
+  const shBcrewStale = await POST(`/api/shows/${shB.id}/crew`,
+    { name: 'Marcus Webb', role_on_site: 'Hand' }, { token: A });
+  ok('STALE: a crew change flips it too', shBcrewStale.status === 200
+     && (await GET(`/api/shows/${shB.id}`, { token: A })).body.scheduler_stale === true);
+
+  // ── override — the explicit, per-push opt-out of the invariant ────────────
+  const badMode = await POST(`/api/shows/${shB.id}/push-to-scheduler`,
+    { live: true, force: true, mode: 'bananas' }, { token: A });
+  ok('an unknown mode is a 400 naming the value, never a silent fallback',
+     badMode.status === 400 && /bananas/.test(badMode.body.error || ''), badMode.body);
+  const push3 = await POST(`/api/shows/${shB.id}/push-to-scheduler`,
+    { live: true, force: true, mode: 'override' }, { token: A });
+  ok('OVERRIDE: the push reports the mode it ran in', push3.status === 200
+     && push3.body.mode === 'override', push3.body);
+  ok('OVERRIDE: Brendon\'s hand-entered rows are gone — replaced, as confirmed',
+     !fake.state.bookings.some((b) => b.id === fBooking.id)
+     && !fake.state.venueContacts.some((v) => v.id === fVenue.id)
+     && !fake.state.clientContacts.some((c) => c.id === fClient.id),
+     fake.state.bookings.map((b) => b.customLabel));
+  ok('OVERRIDE: our full set landed', fake.state.bookings.filter((b) => b.eventId === brendonEv.id).length
+     === push3.body.counts.bookings, push3.body.counts);
+  ok('OVERRIDE: travel legs are NOT deleted — staffing has no DELETE for them',
+     !!fake.state.travel[fTravelKey], Object.keys(fake.state.travel));
+  const actPush = await GET(`/api/activity?show_id=${shB.id}&action=scheduler.push`, { token: A });
+  ok('the activity trail records WHICH mode each push ran',
+     actPush.body.some((a) => /mode override/.test(a.detail || ''))
+     && actPush.body.some((a) => /mode keep/.test(a.detail || '')),
+     actPush.body.map((a) => a.detail));
+
+  // ── unlink — local only, nothing remote touched ───────────────────────────
+  const remoteSnapshot = JSON.stringify({
+    events: fake.state.events.length, bookings: fake.state.bookings.length,
+    venue: fake.state.venueContacts.length, client: fake.state.clientContacts.length,
+    travel: Object.keys(fake.state.travel).length
+  });
+  const un = await DEL(`/api/shows/${shB.id}/scheduler-link`, { token: A });
+  ok('unlink clears the binding and the push ledger', un.status === 200
+     && un.body.show.scheduler_event_id === null && un.body.show.scheduler_pushed_at === null
+     && un.body.unlinkedEventId === brendonEv.id, un.body.show && un.body.show.scheduler_event_id);
+  ok('unlink touched NOTHING remote — every staffing count identical',
+     JSON.stringify({
+       events: fake.state.events.length, bookings: fake.state.bookings.length,
+       venue: fake.state.venueContacts.length, client: fake.state.clientContacts.length,
+       travel: Object.keys(fake.state.travel).length
+     }) === remoteSnapshot, remoteSnapshot);
+  const unAgain = await DEL(`/api/shows/${shB.id}/scheduler-link`, { token: A });
+  ok('unlinking an unlinked show is a 409, not a shrug', unAgain.status === 409, unAgain.body);
+  const actUnlink = await GET(`/api/activity?show_id=${shB.id}&action=scheduler.unlink`, { token: A });
+  ok('the unlink activity line says nothing was deleted remotely',
+     actUnlink.body.length === 1 && /nothing was deleted/.test(actUnlink.body[0].detail || ''),
+     actUnlink.body);
+
+  // ── restore the unconfigured world and re-prove the honest refusals ───────
+  delete process.env.SCHEDULER_BASE_URL;
+  delete process.env.SCHEDULER_USER;
+  delete process.env.SCHEDULER_PASS;
+  schedLib.schedulerResetToken();
+  await fake.close();
+  const list501 = await GET('/api/scheduler/events', { token: A });
+  ok('env cleared: the event listing is the honest 501 again',
+     list501.status === 501 && /SCHEDULER_BASE_URL/.test(list501.body.error || ''), list501.body);
+  const link501 = await POST(`/api/shows/${shB.id}/scheduler-link`, { event_id: 1 }, { token: A });
+  ok('env cleared: linking refuses honestly too', link501.status === 501, link501.body);
+  const live501 = await POST(`/api/shows/${shA.id}/push-to-scheduler`, { live: true, force: true },
+    { token: A });
+  ok('env cleared: the live push is the 501 it was before this section',
+     live501.status === 501, live501.body);
+  const unOffline = await DEL(`/api/shows/${shA.id}/scheduler-link`, { token: A });
+  ok('unlink still WORKS unconfigured — it touches nothing remote',
+     unOffline.status === 200 && unOffline.body.show.scheduler_event_id === null, unOffline.body);
+  // this section's fixture folder goes with it — the cleanup gate counts leftovers
+  await DEL(`/api/projects/${v2P.id}`, { token: A });
+
+  // ══════════════════════════════════════════════════════════════════════════
   // 13. SPEC BIND (D1–D4, D6–D8) — bound against Tom's REAL banked specs
   // ══════════════════════════════════════════════════════════════════════════
   section('13. spec-bind, the chain, and the stack-aware checker');

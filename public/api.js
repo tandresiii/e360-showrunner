@@ -1586,11 +1586,55 @@ var api = (function () {
       if (!API()) {
         var s = SHOWS_BY_ID[Number(showId)];
         if (!s) return fail('show ' + showId + ' not found');
-        if (opts.live) return fail('a live push needs the Showrunner server and a configured scheduler');
-        return ok({ dryRun: true, show: s.name });
+        /* push v2: the demo twin simulates BOTH halves — the dry run built
+           from the local store and a live "push" that only marks the store —
+           so the confirm modal and the pushed/stale states render from
+           file://. The mode ('keep'|'override') rides through so the
+           activity line records the same choice the server would. */
+        if (!opts.live) return ok(demoSchedulerDry(s));
+        var r = demoSchedulerPush(s, opts);
+        return r.error ? fail(r.error) : ok(r);
       }
       return SR.post('/api/shows/' + Number(showId) + '/push-to-scheduler',
-        { live: !!opts.live, force: !!opts.force }, { timeout: 60000 });
+        { live: !!opts.live, force: !!opts.force,
+          mode: opts.mode === 'override' ? 'override' : 'keep' }, { timeout: 60000 });
+    },
+
+    /* ---- the create-vs-link choice (push v2) --------------------------- */
+    /* Tom, 2026-09-02: "we get the choice to start a new event or integrate
+       into an already started one." Create-new is the push above with the
+       show unlinked; these three are the existing-event arm. Linking binds
+       show.scheduler_event_id and sends NOTHING; unlinking clears it and
+       deletes NOTHING remote. Server-side the routes are pm-floor and answer
+       the honest 501 while the integration is unconfigured. */
+    listSchedulerEvents: function () {
+      if (!API()) return ok(DEMO_SCHED_EVENTS.slice());
+      return SR.get('/api/scheduler/events');
+    },
+    linkSchedulerEvent: function (showId, eventId) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        var r = demoSchedulerLink(s, eventId);
+        return r.error ? fail(r.error) : ok(r);
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/scheduler-link',
+        { event_id: Number(eventId) }).then(function (r) {
+          if (r && r.show) A.show(r.show);
+          return r;
+        });
+    },
+    unlinkSchedulerEvent: function (showId) {
+      if (!API()) {
+        var s2 = SHOWS_BY_ID[Number(showId)];
+        if (!s2) return fail('show ' + showId + ' not found');
+        var r2 = demoSchedulerUnlink(s2);
+        return r2.error ? fail(r2.error) : ok(r2);
+      }
+      return SR.del('/api/shows/' + Number(showId) + '/scheduler-link').then(function (r) {
+        if (r && r.show) A.show(r.show);
+        return r;
+      });
     },
 
     /* ================= FINANCE ==========================================

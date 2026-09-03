@@ -2497,6 +2497,125 @@ function schedDayTag(show, day) {
   return '';
 }
 
+/* ---- scheduler push twin (push v2 — the create-vs-link choice) -------------
+   The staffing app's event list as GET /api/scheduler/events trims it, plus
+   the local mutations behind link / unlink / push — so the whole flow (the
+   choice modal, the searchable picker, the linked / pushed / unlink states)
+   renders from file:// with no server. In this world the "staffing app" is
+   this array; against a real unconfigured server the routes answer their
+   honest 501 and none of this is consulted. Ids start at 501 so nobody
+   confuses them with a demo show id. */
+var DEMO_SCHED_EVENTS = [
+  { id: 501, name: 'AVCA First Serve 2026', eventDate: dayISO(10), setup: dayISO(9),
+    breakdown: dayISO(12), location: 'Fiserv Forum — Milwaukee, WI', clientId: null, archived: false },
+  { id: 502, name: 'Marlins Opening Homestand — print install', eventDate: dayISO(8), setup: dayISO(8),
+    breakdown: dayISO(15), location: 'loanDepot Park — Miami, FL', clientId: null, archived: false },
+  { id: 503, name: 'LOVB Madison — court + perimeter', eventDate: dayISO(17), setup: dayISO(16),
+    breakdown: dayISO(18), location: 'Alliant Energy Center — Madison, WI', clientId: null, archived: false },
+  { id: 504, name: 'USA v Brazil friendly — field boards', eventDate: dayISO(231), setup: dayISO(230),
+    breakdown: dayISO(231), location: 'Northwest Stadium — Landover, MD', clientId: null, archived: false },
+  { id: 505, name: 'Bucks in-bowl activation', eventDate: dayISO(-12), setup: dayISO(-14),
+    breakdown: dayISO(-11), location: 'Fiserv Forum — Milwaukee, WI', clientId: null, archived: true }
+];
+var _demoSchedEventSeq = 900;      /* ids for events a demo push "creates" */
+function demoSchedEventById(id) {
+  return DEMO_SCHED_EVENTS.filter(function (e) { return e.id === Number(id); })[0] || null;
+}
+/* wall-clock HH:MM for the activity lines these twins write */
+function _demoHM() {
+  var d = new Date(), h = String(d.getHours()), m = String(d.getMinutes());
+  return (h.length < 2 ? '0' + h : h) + ':' + (m.length < 2 ? '0' + m : m);
+}
+/* The dry run, from the local store — same keys the server answers (payloads
+   PLURAL), so the confirm modal reads one shape in both worlds. */
+function demoSchedulerDry(s) {
+  var steps = s.steps || [];
+  var crew = s.crew_assignments || [];
+  var crewNames = [];
+  var add = function (n) { if (n && crewNames.indexOf(n) < 0) crewNames.push(n); };
+  steps.forEach(function (st) {
+    if (st.lane === 'crew' && st.owner && st.status !== 'na') add(userName(st.owner) || st.owner);
+  });
+  crew.forEach(function (c) { add(c.name || userName(c.username) || c.username); });
+  var travel = [];
+  crew.forEach(function (c) {
+    if (c.travel && c.travel.out) travel.push({ leg: 'arrival' });
+    if (c.travel && c.travel.back) travel.push({ leg: 'departure' });
+  });
+  var problems = [];
+  if (!isConfirmed(s)) {
+    problems.push('This show is not confirmed yet. Confirming records that the client committed and is what unlocks the push.');
+  }
+  if (!s.load_in_date) problems.push('The show has no load-in date.');
+  return {
+    dryRun: true,
+    note: 'No data sent — the demo twin of the dry run.',
+    ready: !problems.length,
+    problems: problems,
+    rosterNote: 'Demo — crew names are not checked against a staffing roster here.',
+    linkedEventId: s.scheduler_event_id || null,
+    payloads: {
+      eventPayload: { event: s.name },
+      bookings: steps.filter(function (st) { return st.lane === 'logistics'; })
+        .map(function (st) { return { customLabel: st.title }; }),
+      venueContacts: steps.filter(function (st) { return st.lane === 'venue' && st.owner; })
+        .map(function (st) { return { name: st.owner }; }),
+      clientContacts: [],
+      travel: travel,
+      crewNames: crewNames
+    }
+  };
+}
+function demoSchedulerLink(s, eventId) {
+  var ev = demoSchedEventById(eventId);
+  if (!ev) return { error: 'staffing event #' + eventId + ' does not exist — refresh the list and pick again' };
+  if (s.scheduler_event_id && Number(s.scheduler_event_id) !== Number(eventId)) {
+    return { error: 'already linked to staffing event #' + s.scheduler_event_id + ' — unlink first' };
+  }
+  s.scheduler_event_id = Number(eventId);
+  s.scheduler_pushed_at = null; s.scheduler_pushed_by = null; s.scheduler_stale = false;
+  s.activity.unshift(mkAct(ME, 'linked to the scheduler',
+    'staffing event #' + eventId + ' — ' + ev.name, 0, _demoHM(), true));
+  return { ok: true, show: s, event: ev };
+}
+function demoSchedulerUnlink(s) {
+  if (!s.scheduler_event_id) return { error: 'this show is not linked to a staffing event' };
+  var old = s.scheduler_event_id;
+  s.scheduler_event_id = null;
+  s.scheduler_pushed_at = null; s.scheduler_pushed_by = null; s.scheduler_stale = false;
+  s.activity.unshift(mkAct(ME, 'unlinked from the scheduler',
+    'staffing event #' + old + ' — nothing was deleted in the staffing app', 0, _demoHM(), true));
+  return { ok: true, show: s, unlinkedEventId: old };
+}
+/* The live push, simulated the way every other demo write is: it mutates the
+   local store and answers the server's shape. The activity line says which
+   mode ran, exactly like routes/core.js logs it. */
+function demoSchedulerPush(s, opts) {
+  opts = opts || {};
+  var dry = demoSchedulerDry(s);
+  if (!dry.ready) return { error: dry.problems[0] || 'the show is not ready for the scheduler' };
+  var created = !s.scheduler_event_id;
+  if (created) s.scheduler_event_id = ++_demoSchedEventSeq;
+  var mode = opts.mode === 'override' ? 'override' : 'keep';
+  s.scheduler_pushed_at = new Date().toISOString();
+  s.scheduler_pushed_by = ME;
+  s.scheduler_stale = false;
+  var pl = dry.payloads;
+  s.activity.unshift(mkAct(ME, 'pushed to the scheduler',
+    (created ? 'created' : 'updated') + ' staffing event #' + s.scheduler_event_id + ' — ' +
+    pl.bookings.length + ' bookings, ' + pl.travel.length + ' travel legs' +
+    (created ? '' : mode === 'override'
+      ? ' · mode override — replaced the event’s existing children'
+      : ' · mode keep — hand-entered staffing rows untouched'), 0, _demoHM(), true));
+  return {
+    ok: true, dryRun: false, schedulerEventId: s.scheduler_event_id, created: created,
+    mode: mode,
+    counts: { bookings: pl.bookings.length, venueContacts: pl.venueContacts.length,
+              clientContacts: pl.clientContacts.length, travel: pl.travel.length },
+    crewNames: pl.crewNames
+  };
+}
+
 /* ---- seed: header fields + schedule + crew for the three near-term shows --
    Everything else renders the empty state ("no schedule yet") on purpose. */
 (function seedSchedule() {

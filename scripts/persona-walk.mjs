@@ -622,6 +622,44 @@ async function main() {
   ok('a LIVE push with no scheduler configured refuses honestly (501), it does not pretend',
      live.status === 501, live.body);
 
+  /* ── push v2 — the create-vs-link choice (Tom, 2026-09-02) ────────────────
+     The push affordance is now a fork: create a new staffing event, or link
+     an existing one and push into it, with keep-vs-override chosen fresh at
+     every linked push. The full live behaviour (foreign-row invariant,
+     override, stale detection) is proven in scripts/smoke.js §12b against a
+     local fake scheduler; the walk's job here is the PRODUCT half — every
+     step of the modal flow reachable, and every server door honest while the
+     integration is unconfigured, which is this box's exact state tonight. */
+  reach('Push choice — create new event', { seam: 'pushToScheduler', action: 'pushChoiceNew' });
+  reach('Push choice — link existing event', { seam: 'listSchedulerEvents',
+                                               action: ['pushChoiceLink', 'pushPickEvent'] });
+  reach('Link binds the show', { seam: 'linkSchedulerEvent', action: 'pushPickEvent' });
+  reach('Override needs its own confirm', { action: 'pushOverrideGo' });
+  reach('Unlink from the scheduler', { seam: 'unlinkSchedulerEvent',
+                                       action: ['unlinkSched', 'unlinkGo'] });
+  reach('View in Scheduler (deep link)', { action: 'viewInScheduler' });
+  ok('the override confirm says exactly what is destroyed, before it fires',
+     /deletes rows Showrunner did not create/.test(APP_JS)
+     && /hand/.test(APP_JS) && /pushOverrideGo/.test(APP_JS));
+  ok('the unlink confirm promises nothing is deleted remotely — and means it',
+     /Nothing is deleted in the staffing app/.test(APP_JS));
+
+  const evList = await GET('/api/scheduler/events', { token: T.tom });
+  ok('GET /api/scheduler/events refuses honestly while unconfigured, naming the env var',
+     evList.status === 501 && /SCHEDULER_BASE_URL/.test(evList.body?.error || ''), evList.body);
+  const linkTry = await POST(`/api/shows/${SHOW}/scheduler-link`, { event_id: 1 }, { token: T.tom });
+  ok('POST /shows/:id/scheduler-link refuses honestly while unconfigured',
+     linkTry.status === 501, linkTry.body);
+  const unlinkTry = await DEL(`/api/shows/${SHOW}/scheduler-link`, { token: T.tom });
+  ok('unlinking an unlinked show is a 409 that explains itself, not a shrug',
+     unlinkTry.status === 409 && /not linked/i.test(unlinkTry.body?.error || ''), unlinkTry.body);
+  const showV2 = await GET(`/api/shows/${SHOW}`, { token: T.tom });
+  ok('the show carries the v2 push-state fields the header renders',
+     showV2.body.scheduler_stale === false && showV2.body.scheduler_pushed_at === null
+     && showV2.body.scheduler_deep_link === null,
+     { stale: showV2.body.scheduler_stale, at: showV2.body.scheduler_pushed_at,
+       link: showV2.body.scheduler_deep_link });
+
   // ══════════════════════════════════════════════════════════════════════════
   section('12 · storage tells the truth about an ephemeral disk');
   // ══════════════════════════════════════════════════════════════════════════

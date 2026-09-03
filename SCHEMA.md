@@ -136,6 +136,7 @@ still resolves by id, so a deep link and a search hit both still open.
 **F5 (the confirm fact):** `· confirmed_at · confirmed_by`
 **F2 (strike):** `· struck_at · struck_by`
 **F6 (closeout + archive):** `· closeout_complete_at · archived_at · archived_by` *(idx: `archived_at`, `closeout_complete_at`)*
+**Push v2 (the scheduler link):** `· pushed_child_ids JSONB · scheduler_pushed_at · scheduler_pushed_by` — plus two **derived** fields on every hydrated show: `scheduler_stale` (did the show / its steps / its crew change after the last push) and `scheduler_deep_link` (the staffing app opened at the linked event; `null` while unconfigured).
 Every one of these defaults to `NULL`, so an existing show simply has no scope
 line, no confirm datestamp and no archive state until someone creates one — **no
 row is rewritten and nothing renders differently until it is.**
@@ -796,7 +797,10 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | `flexGearLists(sid)` | `GET /api/shows/:id/flex/gear-lists` — one tree call; `type` comes back **null** because the tree cannot tell a pull sheet from a manifest |
 | `flexPullSheet(sid, listId)` | `GET /api/shows/:id/flex/pull-sheet?listId=` — header + row-data, normalized; `listId` is verified against the folder's tree first |
 | `listTemplates` / `getTemplate(type)` | `GET /api/templates` / `GET /api/templates/:type` |
-| `pushToScheduler(sid)` | `POST /api/shows/:id/push-to-scheduler` |
+| `pushToScheduler(sid, {live, force, mode})` | `POST /api/shows/:id/push-to-scheduler` |
+| `listSchedulerEvents()` | `GET /api/scheduler/events` |
+| `linkSchedulerEvent(sid, eventId)` | `POST /api/shows/:id/scheduler-link` |
+| `unlinkSchedulerEvent(sid)` | `DELETE /api/shows/:id/scheduler-link` |
 | `listBudgetLines(jid)` | `GET /api/jobs/:id/budget` |
 | `listExpenses(sid)` / `addExpense` | `GET /api/expenses?show_id=` / `POST /api/expenses` |
 | `getJobFinance` / `listFinanceFeed` / `listExceptions` / `getFinanceStats` / `getFinanceOverview` | `GET /api/jobs/:id/finance` · `/api/finance/feed` · `/exceptions` · `/stats` · `/overview` |
@@ -1057,6 +1061,50 @@ moment the event exists, so a retry updates instead of duplicating.
   names the missing variable**. That is the default posture, so nobody turns it
   on by accident.
 - **Idempotent:** an already-linked show returns `409` unless `{"force": true}`.
+
+### Push v2 — the create-vs-link choice, updates, and the two child modes
+
+Tom (2026-09-02): *"when we push to staffing we get the choice to start a new
+event or integrate into an already started one — and I want to be able to
+update things when we put new stuff in."*
+
+- **`GET /api/scheduler/events`** — the candidate list for the "Link to
+  existing event" picker: `{id, name, eventDate, setup, breakdown, location,
+  clientId, archived}` per event, proxied from staffing `GET /api/events` and
+  trimmed to picker fields. `pm`+; the honest 501 while unconfigured.
+- **`POST /api/shows/:id/scheduler-link`** `{event_id}` — binds
+  `shows.scheduler_event_id` to an event that already exists over there and
+  **sends nothing**. The push ledger is reset, so the first push into that
+  event has nothing to delete and every row already there survives by
+  construction. Verifies the id against the live list (400 if gone); `409` if
+  the show is already linked elsewhere — unlink first, on purpose.
+- **`DELETE /api/shows/:id/scheduler-link`** — clears the binding **locally
+  only**; the staffing event and every row on it are untouched, and the
+  activity line says so. Works unconfigured. The next push offers the choice
+  again.
+- **`mode` on the live push** (`keep` default · `override`, chosen **fresh at
+  every push**, never persisted — Tom, 2026-09-03): `keep` deletes only the
+  ids in `shows.pushed_child_ids`, so hand-entered staffing rows are never
+  modified or removed; `override` replaces the event's bookings / venue
+  contacts / client contacts **wholesale**, hand-entered rows included, behind
+  its own scary-honest confirm in the UI. Travel is in *neither* blast radius
+  — staffing exposes no `DELETE /api/travel`, so legs are only ever upserted
+  by key. The activity entry records which mode ran. Unknown mode = 400.
+- **Push provenance + staleness:** every successful push stamps
+  `scheduler_pushed_at` / `scheduler_pushed_by`; `scheduler_stale` (derived,
+  in SQL, on hydrate) flips when the show row, a step, or a crew line changes
+  after that stamp — `schedule_items` deliberately excluded, they never cross
+  the wire. `crew_assignments.updated_at` exists for exactly this comparison.
+  The show header renders "Pushed *2h ago* by *Tom* · event #N" plus a warn
+  dot, and "Push updates" re-runs the same scoped sync.
+
+All of it is proven in `scripts/smoke.js` **§12b** against a **local fake
+scheduler** (`scripts/fake-scheduler.js`, endpoint surface copied from
+`staffing/server.js`), including the foreign-row invariant under keep mode,
+the wholesale replace under override, both stale directions, and the restored
+501s once the env is cleared. The invariant and the stale derivation are
+**mutation-tested** — break the scoping and the suite counts a hand-entered
+row dead.
 
 ### Read-back (§4) — no staffing-side change was required
 
