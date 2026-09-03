@@ -194,6 +194,17 @@ app.get('/api/health', async (req, res) => {
                // be perfectly ready and still be about to lose everything.
                storageEphemeralRisk: !!si.ephemeralRisk,
                storageError: si.error || null,
+               // Same doctrine for the scheduler: PRESENCE booleans only, read
+               // from env, never a value — so "not configured" can be diagnosed
+               // from outside without a login or a guess at which variable the
+               // deploy actually failed to receive.
+               scheduler: {
+                 configured: !!process.env.SCHEDULER_BASE_URL,
+                 baseUrlSet: !!process.env.SCHEDULER_BASE_URL,
+                 userSet: !!process.env.SCHEDULER_USER,
+                 passSet: !!process.env.SCHEDULER_PASS,
+                 configuredMeans: 'env vars are present in this process. This is NOT a login test — the dry-run and a real push are what measure the account.'
+               },
                // The read-through byte cache. Reported as its OWN object with
                // `role` spelled out, and deliberately NOT folded into any of
                // the storage* keys above: a warm cache in front of a dead NAS
