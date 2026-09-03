@@ -1647,7 +1647,13 @@ router.post('/shows/:id/push-to-scheduler', requireRole('pm'), asyncH(async (req
   if (!canEditProject(req.session, project)) throw forbidden('Not allowed to push this show');
 
   const force = !!pick(req.body, 'force');
-  if (show.scheduler_event_id && !force) {
+  // v2 made scheduler_event_id mean LINKED, not pushed — link-to-existing
+  // binds the id with "nothing sent yet". So the double-push guard keys off
+  // the push LEDGER, and only for a LIVE send: a dry run writes nothing and
+  // must always build the preview. (Keying it off the link id guarded the
+  // dry run too, which locked every linked show out of its own confirm
+  // screen — found live, 9/3, on the first link-to-existing ever tried.)
+  if (pick(req.body, 'live') && show.scheduler_pushed_at && !force) {
     throw conflict('Show already pushed to scheduler', {
       schedulerEventId: show.scheduler_event_id,
       hint: 'Pass { "force": true } to re-push (updates the linked event).'

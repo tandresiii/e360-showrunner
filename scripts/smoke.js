@@ -1662,6 +1662,14 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('re-binding a linked show is a 409 pointing at unlink', relink.status === 409
      && /[Uu]nlink first/.test(JSON.stringify(relink.body)), relink.body);
 
+  // FOUND LIVE 9/3: the first link-to-existing ever tried could not reach its
+  // own confirm screen — the double-push guard keyed off scheduler_event_id,
+  // which the link had just SET, and fired on the dry run. Linked means
+  // linked; pushed is what the ledger says. The UI's exact call, no force:
+  const dryLinked = await POST(`/api/shows/${shB.id}/push-to-scheduler`, { live: false }, { token: A });
+  ok('a LINKED, never-pushed show still builds its dry run — no force needed',
+     dryLinked.status === 200 && dryLinked.body.dryRun === true, dryLinked.body);
+
   // THE INVARIANT (keep mode, the default): push INTO Brendon's event; his rows live.
   const pushB = await POST(`/api/shows/${shB.id}/push-to-scheduler`, { live: true, force: true },
     { token: A });
@@ -1673,6 +1681,13 @@ const DEL = (p, o) => call('DELETE', p, o);
      fake.state.events.map((e) => ({ id: e.id, event: e.event })));
   ok('THE INVARIANT: the hand-entered booking survived the push',
      fake.state.bookings.some((b) => b.id === fBooking.id), fake.state.bookings.map((b) => b.customLabel));
+  // ...and the guard still guards what it is FOR: a second live send with no
+  // force is a 409 (the ledger is stamped now), while the dry run stays open.
+  const rePushNoForce = await POST(`/api/shows/${shB.id}/push-to-scheduler`, { live: true }, { token: A });
+  ok('a PUSHED show refuses a second live send without force', rePushNoForce.status === 409, rePushNoForce.body);
+  const dryAfterPush = await POST(`/api/shows/${shB.id}/push-to-scheduler`, { live: false }, { token: A });
+  ok('...but its dry run always builds — a preview writes nothing',
+     dryAfterPush.status === 200 && dryAfterPush.body.dryRun === true, dryAfterPush.body);
   ok('THE INVARIANT: the hand-entered venue + client contacts survived',
      fake.state.venueContacts.some((v) => v.id === fVenue.id)
      && fake.state.clientContacts.some((c) => c.id === fClient.id),
