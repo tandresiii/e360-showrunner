@@ -1127,6 +1127,19 @@ router.put('/shows/:id/gear', requireRole('tech'), asyncH(async (req, res) => {
   const showId = idParam(req);
   const show = await loadShow(showId);
   if (!show) throw notFound('Show not found');
+  // H1's last stray. Every sibling write on this family pairs the rank check
+  // with the ownership gate; this one carried rank alone, so any tech could
+  // overwrite any show's Flex linkage and pulled state. The floor stays 'tech'
+  // because the person who builds the pull sheet IS the tech at the rack — but
+  // it is THIS show's tech: canEditProject, OR a tech with a crew line on the
+  // show. Same shape as canUpdateStepStatus (project edit OR the step's own
+  // tech), stated per entity rather than per route.
+  if (!canEditProject(req.session, await loadProject(show.project_id))) {
+    const onCrew = await pool.query(
+      `SELECT 1 FROM crew_assignments WHERE show_id=$1 AND LOWER(username)=LOWER($2) LIMIT 1`,
+      [showId, req.session.username]);
+    if (!onCrew.rows.length) throw forbidden('Not allowed to edit this show’s gear state');
+  }
   const b = req.body || {};
   const cur = (await pool.query('SELECT * FROM flex_state WHERE show_id=$1', [showId])).rows[0] || {};
   const r = await pool.query(

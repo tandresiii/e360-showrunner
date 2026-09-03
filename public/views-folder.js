@@ -13,9 +13,16 @@ function viewShow(show, opts) {
   var single = p.single;
   var title = single ? p.name : show.name;
 
+  /* 8/H7. The strip always rendered milestones; nothing wrote one. The pencil
+     opens the editor for whoever can edit the folder — same predicate as every
+     other write on this header. */
   var metas = (show.milestones || []).map(function (m, i) {
     return '<div class="m"><div class="k">' + esc(m.label) + '</div><div class="val ' + (i === 0 ? 'tick' : '') + '">' + esc(fmtDate(m.date)) + '</div></div>';
-  }).join('');
+  }).join('') +
+    (canEditFolderOf(show)
+      ? '<div class="m"><button class="lnk-btn" ' + act('editMilestones', show.id) + '>' + inlineIcon('pencil') +
+        ((show.milestones || []).length ? 'Milestones' : 'Add milestones') + '</button></div>'
+      : '');
 
   /* proofs tab for print/both when proof data exists; bookings tab otherwise */
   /* P3, corrected. Both of these tabs used to appear only once the entity they
@@ -156,6 +163,13 @@ function viewShow(show, opts) {
     schedBtns +
     confirmBtn +
     pushBtn +
+    /* the honest way out — deleteShowAct owns the typed confirm that names
+       the cascade, so the button itself stays quiet */
+    (canEditFolderOf(show)
+      ? '<button class="btn ghost" ' + act('deleteShow', show.id) +
+        ' title="Delete this show and everything on it — a typed confirm names exactly what goes">' +
+        icon('trash') + 'Delete</button>'
+      : '') +
     '</div></div>' +
     stageTimeline(show) +
     '<div class="ef-meta">' + metas + '</div>' +
@@ -576,7 +590,23 @@ function tabPipeline(show) {
   var bar = '<div class="sched-bar" style="margin-bottom:12px"><span style="flex:1"></span>' +
     (editable ? '<button class="btn sm primary" ' + act('addTask', show.id) + '>' + icon('plus') +
       'Add task</button>' : '') + '</div>';
-  return bar + '<div class="lanes">' + lanes + '</div>';
+  /* An EMPTY pipeline used to be a dead end with bad directions: the only
+     advice anywhere was a season-dashboard toast pointing at a per-show seed
+     control that did not exist. This is that control. The template seeds the
+     full T-minus lane set off the event date; Add task stays the one-at-a-time
+     alternative beside it. */
+  var seedBlock = '';
+  if (editable && !allSteps(show).length) {
+    seedBlock = '<div class="gear-empty" style="margin-bottom:14px">' + icon('layers') +
+      '<div style="font-weight:600;font-size:14px">No pipeline on this show yet</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:470px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+      'Seed the ' + esc(typeDef(show.type).label) + ' template — every lane’s T-minus steps, back-scheduled off ' +
+      (show.event_date ? 'the event date' : 'the event date once one is set') + ' — or add tasks one at a time.</div>' +
+      '<div style="display:flex;gap:9px;justify-content:center;margin-top:16px;flex-wrap:wrap">' +
+      '<button class="btn primary" ' + act('seedPipeline', show.id) + '>' + icon('bolt') + 'Seed pipeline</button>' +
+      '<button class="btn ghost" ' + act('addTask', show.id) + '>' + icon('plus') + 'Add task</button></div></div>';
+  }
+  return seedBlock + bar + '<div class="lanes">' + lanes + '</div>';
 }
 
 /* --------------------------------------------------- specs & chain tab ---- */
@@ -990,8 +1020,10 @@ var ACTION_LABELS = {
   'need.seed': 'seeded the needs list',
   'proof.add': 'added a proof', 'proof.update': 'changed a proof',
   'proof.round.add': 'opened a proof round', 'proof.delete': 'deleted a proof',
+  'milestone.create': 'added a milestone', 'milestone.update': 'changed a milestone',
   'milestone.delete': 'removed a milestone',
   'template.instantiate': 'seeded the pipeline',
+  'key.create': 'minted an API key', 'key.revoke': 'revoked an API key',
   'agent.proposal.confirm': 'confirmed an agent proposal',
   'agent.proposal.reject': 'rejected an agent proposal',
   'notification.sent': 'sent a notification'

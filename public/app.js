@@ -221,9 +221,12 @@ async function renderView(view, arg) {
        the demo store holds nothing to count. */
     var arch = CURRENT_USER.role === 'admin'
       ? await api.listArchivedProjects().catch(function () { return []; }) : [];
+    /* the API-keys card lists YOUR keys — asked for, never assumed, and an
+       empty answer renders an honest empty card rather than an error */
+    var myKeys = await api.listApiKeys().catch(function () { return []; });
     s.innerHTML = viewSettings({ fin: fov.stats, pur: pov.stats, jobs: fov.jobs,
                                  notifyPrefs: np && np.prefs, mail: ms,
-                                 archivedCount: arch.length });
+                                 archivedCount: arch.length, keys: myKeys });
     crumb([{ t: 'Settings' }]);
     applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark');
   }
@@ -4397,6 +4400,442 @@ function changesFilterAct(k) {
   return render('changes');
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   THE BLOCKER WAVE (editability audit, 2026-09-03)
+   ----------------------------------------------------------------------------
+   The audit's headline was the SEAM PASS's headline again, one layer up: an
+   expense that could not be corrected, a show and a folder that could not be
+   deleted, a season that could not gain its second show, a pipeline that could
+   only be seeded at birth, a second deal that could not be opened, milestones
+   with no editor, keys with no card, a note the author could not take back.
+   Every route below existed, gated and cascade-proven. This block is the way in.
+   ══════════════════════════════════════════════════════════════════════════ */
+var PENDING_EXPEDIT = null, PENDING_NEWSHOW = null, PENDING_NEWJOB = null,
+    PENDING_MS = null;
+
+/* ── C4 · CORRECT OR VOID A COST ─────────────────────────────────────────────
+   Backend and seam were finished for a week; nothing rendered a pencil, so a
+   wrong amount rode the burn bars forever and the activity vocabulary carried
+   'corrected a cost' for an act nobody could perform. */
+
+/* The client mirror of the DELETE route's floor: requireRole('manager').
+   Candice qualifies through her manager role — the finance FLAG alone does not
+   void costs, exactly as the server answers. */
+function canVoidExpense() {
+  return CURRENT_USER.role === 'admin' || CURRENT_USER.role === 'manager';
+}
+async function openExpense(expenseId) {
+  var e = EXPENSES_BY_ID[Number(expenseId)];
+  /* the pencil only renders on rows a view just loaded, so a miss here means
+     the record went away under us — say so, never render a blank editor */
+  if (!e) { toast('That cost is not loaded', 'Reopen the show or the job and try again'); return; }
+  var show = e.show_id ? SHOWS_BY_ID[e.show_id] : null;
+  var project = PROJECTS_BY_ID[(show && show.project_id) || e.project_id] || null;
+  PENDING_EXPEDIT = { id: e.id, showId: e.show_id || null };
+  var defaultJob = show ? show.default_job_id : null;
+  var jobs = ((project && project.jobs) || ALL_JOBS).filter(function (j) {
+    return !project || j.project_id === project.id;
+  });
+  var jobOpts = '<option value="">' + (defaultJob ? 'this show’s default job' : '— job unchanged —') + '</option>' +
+    jobs.map(function (j) {
+      return '<option value="' + Number(j.id) + '"' + (e.job_id === j.id ? ' selected' : '') + '>' +
+        esc(j.qb_job_number + ' · ' + j.client) + '</option>';
+    }).join('');
+  var catOpts = BUDGET_CAT_ORDER.map(function (c) {
+    return '<option value="' + esc(c) + '"' + (e.budget_line_category === c ? ' selected' : '') + '>' +
+      esc(BUDGET_CATS[c]) + '</option>';
+  }).join('');
+  openModal('Correct this cost · ' + esc(e.vendor || ''),
+    '<div class="hint" style="margin:0 0 12px">' + icon('scale') + '<span>Corrections are audited: the ' +
+    'activity trail gets a before→after on every field that moves, so a number that changed is never ' +
+    'mistaken for a number that was always wrong.</span></div>' +
+    '<div class="fin-inputs">' +
+    finLabelWrap('Vendor', '<input id="exeVendor" class="cell-in" value="' + esc(e.vendor || '') + '">') +
+    finLabelWrap('Amount $', '<input id="exeAmt" class="cell-in" type="number" min="0" step="0.01" value="' +
+      esc(e.amount == null ? '' : e.amount) + '">') +
+    finLabelWrap('Category', '<select id="exeCat" class="cell-in">' + catOpts + '</select>') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+    finLabelWrap('Date', '<input id="exeDate" class="cell-in" type="date" value="' + esc(e.txn_date || '') + '">') +
+    finLabelWrap('Bills to', '<select id="exeJob" class="cell-in">' + jobOpts + '</select>') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Memo', '<input id="exeMemo" class="cell-in" placeholder="what this was" value="' +
+      esc(e.memo || '') + '">') + '</div>' +
+    notifyRow() +
+    _foot(act('exCommit'), 'Save correction', 'check',
+      canVoidExpense()
+        ? '<button class="btn ghost" ' + act('exVoid', e.id) + '>' + icon('trash') + 'Void cost</button>'
+        : ''));
+}
+async function exCommit() {
+  if (!PENDING_EXPEDIT) return;
+  var p = PENDING_EXPEDIT;
+  var vendor = _v('exeVendor');
+  var amt = _n('exeAmt');
+  if (!vendor || amt == null || !(amt >= 0)) {
+    toast('Vendor + amount required', 'A cost keeps its vendor and a dollar figure'); return;
+  }
+  var patch = { vendor: vendor, amount: amt, category: _v('exeCat'),
+                memo: _v('exeMemo'), job_id: _n('exeJob') };
+  /* an emptied date field is "leave it", never "null the date" — the server
+     would take a null at its word */
+  if (_v('exeDate')) patch.txn_date = _v('exeDate');
+  stageNotifies();
+  try { await api.updateExpense(p.id, patch); }
+  catch (err) { toast('Not saved', String(err && err.message || err)); return; }
+  PENDING_EXPEDIT = null;
+  closeM();
+  var suffix = await sendNotifies('expense', p.id, 'corrected a cost — ' + vendor + ' —');
+  toast('Cost corrected', vendor + ' · ' + fmtMoney(amt) + suffix);
+  await updateFinCount();
+  if (CUR.view === 'show') return refreshShowTab(CUR.showId, 'financials');
+  return refreshFinanceUI();
+}
+async function exVoidAct(expenseId) {
+  var e = EXPENSES_BY_ID[Number(expenseId)] || {};
+  if (!askConfirm('Void this cost' + (e.vendor ? ' — ' + e.vendor : '') +
+      (e.amount != null ? ' · ' + fmtMoney(e.amount) : '') + '?\n\n' +
+      'It comes off the books and off every burn bar. Any PO line pointing at it is ' +
+      'unpicked, its notes go with it, and the void is logged with the amount it carried.')) return;
+  try { await api.deleteExpense(expenseId); }
+  catch (err) { toast('Not voided', String(err && err.message || err)); return; }
+  PENDING_EXPEDIT = null;
+  closeM();
+  toast('Cost voided', (e.vendor || 'The expense') + ' is off the books — the void is on the trail.');
+  await updateFinCount();
+  if (CUR.view === 'show') return refreshShowTab(CUR.showId, 'financials');
+  return refreshFinanceUI();
+}
+
+/* ── SHOW + FOLDER DELETE — the honest, typed kind ───────────────────────────
+   Both cascades are proven zero-orphan (smoke §6). What was missing was a door,
+   and a door this destructive gets the TYPED confirm: the person writes the
+   thing's name into the stock browser prompt. Same reasoning as askConfirm —
+   the dialog everyone knows beats a bespoke modal, and its absence (a test
+   shim) proceeds because the SERVER gate is the real one. */
+function askTyped(msg, expected) {
+  try {
+    if (typeof prompt === 'function') {
+      var typed = prompt(msg);
+      if (typed === null) return false;                       /* Cancel is no */
+      return String(typed).trim().toLowerCase() === String(expected).trim().toLowerCase();
+    }
+  } catch (_) { /* dialogs disabled — fall through */ }
+  return true;
+}
+async function deleteShowAct(showId) {
+  var show = await api.getShow(showId);
+  if (!show) return;
+  var nm = show.name || showLabel(show);
+  var projectId = show.project_id;
+  if (!askTyped('Delete the show ' + nm + '?\n\n' +
+      'Everything ON it goes with it: its pipeline, crew list, schedule, bookings, ' +
+      'expenses, milestones, file records, notes, reports and activity trail. Files on ' +
+      'the NAS are left where they are. The folder and its jobs stay.\n\n' +
+      'This cannot be undone. Type the show’s name to confirm:', nm)) {
+    toast('Nothing deleted', 'The name did not match — ' + nm + ' is untouched');
+    return;
+  }
+  try { await api.deleteShow(show.id); }
+  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  toast('Show deleted', nm + ' and everything on it is off the record.');
+  await updateMineCount();
+  await updateFinCount();
+  return openFolder(projectId);
+}
+async function deleteProjectAct(projectId) {
+  var p = await api.getProject(projectId);
+  if (!p) return;
+  var n = (p.shows || []).length;
+  if (!askTyped('Delete the folder ' + p.name + '?\n\n' +
+      'The whole record goes: ' + n + ' show' + (n === 1 ? '' : 's') + ' with everything on ' +
+      (n === 1 ? 'it' : 'them') + ', every job and its budget lines, its purchase orders, file ' +
+      'records, notes and activity. Files on the NAS are left where they are.\n\n' +
+      'If the season is merely OVER, archive it instead — nothing is lost that way. ' +
+      'This cannot be undone. Type the folder’s name to confirm:', p.name)) {
+    toast('Nothing deleted', 'The name did not match — ' + p.name + ' is untouched');
+    return;
+  }
+  try { await api.deleteProject(p.id); }
+  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  toast('Folder deleted', p.name + ' — ' + n + ' show' + (n === 1 ? '' : 's') + ', its jobs, budgets and records are gone.');
+  await updateFinCount();
+  return render('projects');
+}
+
+/* ── A SECOND SHOW IN AN EXISTING FOLDER ─────────────────────────────────────
+   "New Event" opens a folder; nothing added a show to one that existed, so a
+   season stayed frozen at whatever it was born with. The dialog reuses the New
+   Event show fieldset; the type template seeds the pipeline inside the create
+   transaction (template_id rides the POST), so no second call and no window
+   where a bare show exists. */
+async function openAddShow(projectId) {
+  var p = await api.getProject(projectId);
+  if (!p) return;
+  PENDING_NEWSHOW = { projectId: Number(projectId), type: p.type };
+  var t = typeDef(p.type);
+  var pocOpts = '<option value="">— nobody yet —</option>' + activeUsers().map(function (u) {
+    return '<option value="' + esc(u.username) + '">' + esc(u.name) + '</option>';
+  }).join('');
+  openModal('Add show · ' + esc(p.name),
+    '<div class="hint" style="margin:0 0 12px">' + icon(t.icon) + '<span>Adds a show to this folder. It ' +
+    'inherits the folder’s client and bills to its first job unless an item overrides; the ' +
+    esc(t.label) + ' template seeds its pipeline off the ' + esc(t.anchor.toLowerCase()) + '.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.6fr 1fr">' +
+    finLabelWrap('Show name', '<input id="nsName" class="cell-in" placeholder="e.g. LOVB Madison — Match 2">') +
+    finLabelWrap('On-site lead', '<select id="nsPoc" class="cell-in">' + pocOpts + '</select>') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.6fr 1fr">' +
+    finLabelWrap('Venue', '<input id="nsVenue" class="cell-in" placeholder="UW Field House — Madison, WI">') +
+    finLabelWrap('City', '<input id="nsCity" class="cell-in" placeholder="Madison, WI">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr">' +
+    finLabelWrap('Load-in', '<input id="nsLoadIn" class="cell-in" type="date">') +
+    finLabelWrap(t.anchor, '<input id="nsEvent" class="cell-in" type="date">') +
+    finLabelWrap('Strike', '<input id="nsStrike" class="cell-in" type="date">') +
+    '</div>' +
+    '<label class="pu-cap"><input type="checkbox" id="nsSeed" checked>' +
+    '<span><b>Seed the pipeline</b> — the ' + esc(t.label) + ' template’s T-minus steps, back-scheduled ' +
+    'off the ' + esc(t.anchor.toLowerCase()) + '.</span></label>' +
+    notifyRow() +
+    _foot(act('nsCommit'), 'Add show', 'plus'));
+}
+async function nsCommit() {
+  if (!PENDING_NEWSHOW) return;
+  var p = PENDING_NEWSHOW;
+  var name = _v('nsName');
+  if (!name) { toast('A show needs a name', 'Type what we call this one, or cancel'); return; }
+  var seed = _c('nsSeed');
+  var templateId = null;
+  if (seed) {
+    /* the type's template id, resolved the same way New Event resolves it —
+       first template for the type; none on this server = an honest note */
+    var tpl = await api.getTemplate(p.type).catch(function () { return null; });
+    templateId = tpl && tpl.meta ? tpl.meta.id : null;
+  }
+  stageNotifies();
+  var show;
+  try {
+    show = await api.createShow(p.projectId, {
+      name: name, venue: _v('nsVenue'), city: _v('nsCity'),
+      load_in_date: _v('nsLoadIn'), event_date: _v('nsEvent'), strike_date: _v('nsStrike'),
+      on_site_poc: _v('nsPoc'),
+      template_id: templateId, seed_template: seed
+    });
+  } catch (e) { toast('Not added', String(e && e.message || e)); return; }
+  PENDING_NEWSHOW = null;
+  closeM();
+  var suffix = await sendNotifies('show', show.id, 'added the show “' + name + '” —');
+  var seeded = show.instantiated_steps || 0;
+  toast('Show added', name + (seeded ? ' · +' + seeded + ' steps seeded' : (seed && apiMode() && !templateId
+    ? ' — no template for this type on the server, pipeline left empty' : '')) + suffix);
+  await updateMineCount();
+  return render('show', show.id);
+}
+
+/* ── SEED THE PIPELINE ON AN EXISTING SHOW ───────────────────────────────────
+   POST /shows/:id/instantiate-template had no caller, and the empty Pipeline
+   tab's only advice was a toast pointing at a season control that was itself a
+   toast. The primary button in the empty state now does the real thing. */
+async function seedPipelineAct(showId) {
+  var show = await api.getShow(showId);
+  if (!show) return;
+  var tpl = await api.getTemplate(show.type || 'led').catch(function () { return null; });
+  var templateId = tpl && tpl.meta ? tpl.meta.id : null;
+  if (apiMode() && !templateId) {
+    toast('No template for this event type',
+      'Templates seed from templates.json — this server has no ' + (show.type || 'led') + ' template to instantiate');
+    return;
+  }
+  var r;
+  try { r = await api.instantiateTemplate(showId, templateId); }
+  catch (e) { toast('Not seeded', String(e && e.message || e)); return; }
+  toast('Pipeline seeded', (r.instantiated_steps || 0) + ' steps landed' +
+    (show.event_date ? ', back-scheduled off ' + fmtDate(show.event_date) : ' — set an event date to back-schedule them'));
+  await updateMineCount();
+  return refreshShowTab(showId, 'pipeline');
+}
+
+/* ── C5 · A FOLDER'S SECOND DEAL ─────────────────────────────────────────────
+   The cut-down contract dialog: who is paying, what kind of deal, what it
+   bills. Opens on a TEMP number exactly like the first job did — a REAL
+   QuickBooks number is accounting's to write, and the server refuses it from
+   anyone else. */
+async function openAddJob(projectId) {
+  var p = await api.getProject(projectId);
+  if (!p) return;
+  PENDING_NEWJOB = { projectId: Number(projectId) };
+  var dealOpts = Object.keys(DEAL_TAGS).map(function (k) {
+    return '<option value="' + esc(k) + '"' + (k === 'rental' ? ' selected' : '') + '>' +
+      esc(DEAL_TAGS[k][1]) + '</option>';
+  }).join('');
+  openModal('Add job · ' + esc(p.name),
+    '<div class="hint" style="margin:0 0 12px">' + icon('scale') + '<span>One deal = one client = one ' +
+    'QuickBooks job = one budget. This is how one show bills across two deals: the league covers freight ' +
+    'on its job while a team buys print on its own. Every cost-bearing item can point here.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1.4fr">' +
+    finLabelWrap('Client', '<input id="njClient" class="cell-in" placeholder="who is paying" value="' +
+      esc(p.client || '') + '">') +
+    finLabelWrap('Deal type', '<select id="njDeal" class="cell-in">' + dealOpts + '</select>') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1.4fr">' +
+    finLabelWrap('Contract value', '<input id="njCv" class="cell-in" type="number" min="0" step="0.01" placeholder="0">',
+      'What this deal bills. Editable later by accounting only.') +
+    finLabelWrap('Temp job number', '<input id="njQb" class="cell-in" placeholder="blank mints TEMP-' +
+      esc(String(new Date().getFullYear() % 100)) + '-…">',
+      'Optional. A real QuickBooks number is accounting’s to write — Candice confirms it later.') + '</div>' +
+    _foot(act('njCommit'), 'Open job', 'plus'));
+}
+async function njCommit() {
+  if (!PENDING_NEWJOB) return;
+  var pid = PENDING_NEWJOB.projectId;
+  var client = _v('njClient');
+  if (!client) { toast('A deal needs a client', 'Who is paying for this one?'); return; }
+  var body = { client: client, deal_type: _v('njDeal'), contract_value: _n('njCv') || 0 };
+  if (_v('njQb')) body.qb_job_number = _v('njQb');
+  var j;
+  try { j = await api.createJob(pid, body); }
+  catch (e) { toast('Not opened', String(e && e.message || e)); return; }
+  PENDING_NEWJOB = null;
+  closeM();
+  toast('Job opened', j.qb_job_number + ' · ' + client +
+    (isTempJob(j) ? ' — temporary number until accounting confirms the QuickBooks one' : ''));
+  if (CUR.view === 'folder') return render('folder', pid);
+  return refreshFinanceUI();
+}
+
+/* ── 8/H7 · MILESTONES — the editor for the dates the Calendar reads ─────────
+   The header metas and the Calendar always rendered milestones; nothing wrote
+   one. Same modal shape as openBudget: the list with a pencil per row, the
+   form below, edit-in-place through msEdit. */
+async function openMilestones(showId, milestoneId) {
+  var show = await api.getShow(showId);
+  if (!show) return;
+  var list = show.milestones || [];
+  var m = milestoneId ? list.filter(function (x) { return x.id === Number(milestoneId); })[0] : null;
+  PENDING_MS = { showId: Number(showId), id: m ? m.id : null };
+  var rows = list.map(function (x) {
+    return '<div class="next-item"><div class="txt">' + esc(x.label) +
+      '<span>' + esc(x.date ? fmtDate(x.date) : 'no date') + '</span></div>' +
+      '<button class="iconbtn" title="Edit this milestone" ' + act('msEdit', x.id, String(show.id)) + '>' +
+      icon('pencil') + '</button>' +
+      '<button class="iconbtn" title="Remove this milestone" ' + act('msDelete', x.id) + '>' +
+      icon('trash') + '</button></div>';
+  }).join('') || '<div class="empty">No milestones yet — the header strip and the Calendar read these.</div>';
+  openModal((m ? 'Edit milestone' : 'Milestones') + ' · ' + showLabel(show),
+    '<div class="hint" style="margin:0 0 12px">' + icon('cal') + '<span>Content due, proof approved, ' +
+    'freight, target — the dates the header strip and the production Calendar are made of. Load-in, ' +
+    'event and strike come from the show itself (Edit event).</span></div>' +
+    '<div class="next-list" style="margin-bottom:12px">' + rows + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1.6fr 1fr">' +
+    finLabelWrap('Label', '<input id="msLabel" class="cell-in" placeholder="Content due · Freight · Target" value="' +
+      esc(m ? m.label : '') + '">') +
+    finLabelWrap('Date', '<input id="msDate" class="cell-in" type="date" value="' + esc(m ? m.date || '' : '') + '">') +
+    '</div>' +
+    _foot(act('msCommit'), m ? 'Save milestone' : 'Add milestone', m ? 'check' : 'plus'));
+}
+async function msCommit() {
+  if (!PENDING_MS) return;
+  var p = PENDING_MS;
+  var label = _v('msLabel');
+  if (!label) { toast('A milestone needs a label', 'What is this date?'); return; }
+  try {
+    if (p.id) await api.updateMilestone(p.id, { label: label, date: _v('msDate') });
+    else await api.addMilestone(p.showId, { label: label, date: _v('msDate') });
+  } catch (e) { toast('Not saved', String(e && e.message || e)); return; }
+  var showId = p.showId, wasEdit = !!p.id;
+  PENDING_MS = null;
+  closeM();
+  toast(wasEdit ? 'Milestone saved' : 'Milestone added', label + (_v('msDate') ? ' · ' + fmtDate(_v('msDate')) : ''));
+  /* the metas strip lives in the show HEADER, so the whole view re-renders */
+  return render('show', showId);
+}
+async function msDeleteAct(milestoneId) {
+  var showId = PENDING_MS ? PENDING_MS.showId : CUR.showId;
+  try { await api.deleteMilestone(milestoneId); }
+  catch (e) { toast('Not removed', String(e && e.message || e)); return; }
+  PENDING_MS = null;
+  closeM();
+  toast('Milestone removed', 'Off the header strip and the Calendar');
+  return render('show', showId);
+}
+
+/* ── AGENT_API §1 · API KEYS — the agent roadmap's front door ────────────────
+   Mint is the ONLY response that ever contains the key, so the reveal copies
+   the temp-password pattern exactly: held in TEMP_REVEAL for the Copy button,
+   dropped when the dialog closes, never shown again. Revoke, never delete —
+   a credential's history is part of the record. */
+function openKeyMint() {
+  if (api.isDemo()) {
+    toast('Demo mode', 'An API key is a real credential — sign in against the live server to mint one');
+    return;
+  }
+  /* the three scopes are AGENT_SCOPES (lib/enums.js); the server validates the
+     list on every mint, so an unknown scope cannot ride through this form */
+  openModal('Mint an API key',
+    '<div class="hint" style="margin:0 0 12px">' + icon('bolt') + '<span>The key <b>acts as you</b>: it ' +
+    'inherits your role live on every request, so a role change changes the key’s powers immediately and ' +
+    'a key can never escalate itself.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Label', '<input id="akLabel" class="cell-in" placeholder="my M365 agent — laptop">',
+      'What this key is for — it is how you will recognize it on the list.') + '</div>' +
+    '<label class="pu-cap"><input type="checkbox" id="akRead" checked>' +
+    '<span><b>agent:read</b> — read shows, jobs, files and activity.</span></label>' +
+    '<label class="pu-cap"><input type="checkbox" id="akFile">' +
+    '<span><b>agent:file</b> — file documents and photos into folders.</span></label>' +
+    '<label class="pu-cap"><input type="checkbox" id="akPropose">' +
+    '<span><b>agent:propose</b> — propose expenses and tasks for a human to confirm.</span></label>' +
+    _foot(act('keyMintCommit'), 'Mint key', 'plus'));
+}
+async function keyMintCommit() {
+  var scopes = [];
+  if (_c('akRead')) scopes.push('agent:read');
+  if (_c('akFile')) scopes.push('agent:file');
+  if (_c('akPropose')) scopes.push('agent:propose');
+  var r;
+  try { r = await api.createApiKey({ label: _v('akLabel'), scopes: scopes.length ? scopes : ['agent:read'] }); }
+  catch (e) { toast('Not minted', String(e && e.message || e)); return; }
+  /* the one-time reveal — same lifecycle as the temp password */
+  TEMP_REVEAL = { username: r.key_prefix, password: r.key };
+  openModal('API key minted · shown once',
+    '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px;line-height:1.6">Put this in the agent’s ' +
+    'config as <span class="mono">x-agent-key</span>. It is the only time the key is shown — the server ' +
+    'keeps a hash, never the key.</p>' +
+    '<div class="temp-pw"><div class="tp-k">' + esc(r.label || r.key_prefix) + '</div>' +
+    '<div class="tp-v mono" id="tempPwVal">' + esc(r.key) + '</div>' +
+    '<button class="btn sm" ' + act('copyTempPw') + '>' + icon('doc') + 'Copy</button></div>' +
+    '<div class="hint" style="margin-top:12px">' + inlineIcon('lock') + '<span><b>Shown once.</b> Lose it ' +
+    'and you revoke this one and mint another — that is the whole recovery story, on purpose.</span></div>' +
+    '<div style="display:flex;justify-content:flex-end;margin-top:14px">' +
+    '<button class="btn primary" ' + act('closeModal') + '>Done</button></div>');
+  /* refresh the card under the dialog so Done lands on a current list */
+  if (CUR.view === 'settings') await render('settings');
+}
+async function keyRevokeAct(keyId) {
+  if (!askConfirm('Revoke this key?\n\n' +
+      'Every request it makes fails from the next call. The row stays on the list as revoked — ' +
+      'keys are never deleted, because a credential’s history is part of the record.')) return;
+  try { await api.revokeApiKey(keyId); }
+  catch (e) { toast('Not revoked', String(e && e.message || e)); return; }
+  toast('Key revoked', 'It stops working immediately; the row stays for the record');
+  return render('settings');
+}
+
+/* ── 37 · DELETE A NOTE — author-or-admin, replies cascade ───────────────────
+   The author got Edit and nothing else, so a note posted on the wrong show
+   lived there forever. The server's rule travels: only the author or an admin,
+   and a deleted root takes its replies — a headless reply reads as noise. */
+async function noteDeleteAct(noteId) {
+  var n = NOTES_BY_ID[Number(noteId)];
+  if (!n) return;
+  var replies = ALL_NOTES.filter(function (x) { return x.parent_id === n.id; }).length;
+  if (!askConfirm('Delete this note?\n\n' +
+      (replies
+        ? 'Its ' + replies + (replies === 1 ? ' reply goes' : ' replies go') + ' with it — a headless reply reads as noise.'
+        : 'It comes off the thread everywhere it renders.'))) return;
+  try { await api.deleteNote(noteId); }
+  catch (e) { toast('Not deleted', String(e && e.message || e)); return; }
+  toast('Note deleted', replies ? 'Along with ' + replies + (replies === 1 ? ' reply' : ' replies') : 'Off the record');
+  return refreshFinanceUI();
+}
+
 var ACTIONS = {
   goProjects:    function () { return render('projects'); },
   goFiles:       function () { return render('files'); },
@@ -4628,6 +5067,32 @@ var ACTIONS = {
   changePwCommit: function () { return commitChangePassword(); },
   closeModal:    function () { closeM(); closeNotifyPop(); },
   toggleTheme:   function () { toggleTheme(); },
+  /* ── THE BLOCKER WAVE · editability audit 2026-09-03 ─────────────────── */
+  /* C4 expenses */
+  editExpense:   function (t, id) { return openExpense(id); },
+  exCommit:      function () { return exCommit(); },
+  exVoid:        function (t, id) { return exVoidAct(id); },
+  /* show + folder delete */
+  deleteShow:    function (t, id) { return deleteShowAct(id); },
+  deleteFolder:  function (t, id) { return deleteProjectAct(id); },
+  /* a season's second show + a frozen pipeline's seed */
+  addShow:       function (t, id) { return openAddShow(id); },
+  nsCommit:      function () { return nsCommit(); },
+  seedPipeline:  function (t, id) { return seedPipelineAct(id); },
+  /* C5 the second deal */
+  addJob:        function (t, id) { return openAddJob(id); },
+  njCommit:      function () { return njCommit(); },
+  /* 8/H7 milestones */
+  editMilestones: function (t, id) { return openMilestones(id, null); },
+  msEdit:        function (t, id, k) { return openMilestones(Number(k), id); },
+  msCommit:      function () { return msCommit(); },
+  msDelete:      function (t, id) { return msDeleteAct(id); },
+  /* AGENT_API §1 keys */
+  keyMint:       function () { return openKeyMint(); },
+  keyMintCommit: function () { return keyMintCommit(); },
+  keyRevoke:     function (t, id) { return keyRevokeAct(id); },
+  /* 37 note delete */
+  noteDelete:    function (t, id) { return noteDeleteAct(id); },
   /* notes + mentions (notes pass) */
   toggleBell:    function (t) { toggleBellPanel(t); },
   bellMarkAll:   function () { return bellMarkAllAct(); },

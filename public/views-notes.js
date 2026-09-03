@@ -60,6 +60,12 @@ function noteHTML(n, canReply) {
   var acts = [];
   if (canReply) acts.push('<button class="n-act" ' + act('noteReply', n.id) + '>' + inlineIcon('chat') + 'Reply</button>');
   if (n.author === ME) acts.push('<button class="n-act" ' + act('noteEdit', n.id) + '>' + inlineIcon('pencil') + 'Edit</button>');
+  /* 37's other half: the author (or an admin) can take a note back off the
+     record — the server's author-or-admin rule, mirrored. An agent-authored
+     note is only an admin's to remove: 'agent:x' is never ME. */
+  if (n.author === ME || CURRENT_USER.role === 'admin') {
+    acts.push('<button class="n-act" ' + act('noteDelete', n.id) + '>' + inlineIcon('trash') + 'Delete</button>');
+  }
   return '<div class="note' + (String(n.author).indexOf('agent:') === 0 ? ' agent' : '') + '" data-note-id="' + n.id + '">' +
     noteAvatar(n.author) +
     '<div class="nb"><div class="nh"><b>' + esc(actorName(n.author)) + '</b>' +

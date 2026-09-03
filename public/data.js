@@ -294,7 +294,8 @@ function hasScope(raw) { return scopeParts(raw).length > 0; }
 /* ============================================================================
    RECORD BUILDERS — allocate integer ids, keep authoring terse
    ========================================================================== */
-var _stepSeq = 0, _fileSeq = 0, _bookingSeq = 0, _actSeq = 0, _proofSeq = 0, _roundSeq = 0;
+var _stepSeq = 0, _fileSeq = 0, _bookingSeq = 0, _actSeq = 0, _proofSeq = 0, _roundSeq = 0,
+    _msSeq = 0;
 
 /* mkStep(lane, title, status, ownerUsername|null, dueOffsetDays, extras)
    extras: {risk, auto:'spec_gen'|'novaspec'|'powerspec'|'flex'|'travel',
@@ -356,7 +357,10 @@ function mkProof(code, name, status, client, rounds) {
   return { id: ++_proofSeq, show_id: 0, code: code, name: name, status: status, client: client,
            rounds: rounds.map(function (r) { return { id: ++_roundSeq, round: r[0], date: dayISO(r[1]), status: r[2], note: r[3] }; }) };
 }
-function mkMs(label, off) { return { label: label, date: dayISO(off) }; }
+/* a milestone now carries an id, because the milestone modal edits and deletes
+   BY id — the server's rows always had one, and a demo row the modal cannot
+   address teaches the wrong shape. show_id/project_id land in hydrate(). */
+function mkMs(label, off) { return { id: ++_msSeq, label: label, date: dayISO(off) }; }
 
 /* ============================================================================
    PORTFOLIO — 6 project folders / 11 shows / 8 jobs
@@ -1209,6 +1213,7 @@ function _chainNode(seed) {
 (function hydrate() {
   PROJECTS.forEach(function (p) {
     PROJECTS_BY_ID[p.id] = p;
+    (p.milestones || []).forEach(function (m) { m.project_id = p.id; m.show_id = null; });
     /* POLISH_LIST #5: a job number is CONFIRMED (it came from QuickBooks)
        unless the literal says otherwise — the server's mapper defaults the
        same way, so the demo store and the API agree without a per-job field. */
@@ -1221,6 +1226,7 @@ function _chainNode(seed) {
       /* type lives on the project (SCHEMA.md) — mirrored onto the show so the
          lane-agnostic render helpers never need a store lookup. */
       s.type = p.type;
+      (s.milestones || []).forEach(function (m) { m.show_id = s.id; m.project_id = null; });
       SHOWS_BY_ID[s.id] = s; ALL_SHOWS.push(s);
       var evt = new Date(s.event_date + 'T00:00:00');
       var byTitle = {};

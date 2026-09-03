@@ -481,6 +481,37 @@ router.post('/shows/:id/milestones', requireRole('pm'), asyncH(async (req, res) 
   const r = await pool.query(
     `INSERT INTO milestones (show_id, label, date, sort_order) VALUES ($1,$2,$3,$4) RETURNING *`,
     [showId, label, date, parseInt(pick(req.body, 'sort_order'), 10) || 0]);
+  // The delete next door always logged; the create never did, so a calendar
+  // that gained a date had no line saying who put it there. Same trail, both
+  // directions — the milestone modal made this reachable, so it gets its row.
+  await logActivity(pool, { projectId: s.project_id, showId, actor: req.actor,
+    action: 'milestone.create', detail: `${label}${date ? ' · ' + date : ''}` });
+  res.json(dbToMilestone(r.rows[0]));
+}));
+// H7's missing half. A milestone could be created and deleted but never
+// corrected, so a typo'd label or a slipped freight date meant delete +
+// recreate — two activity rows telling a story nobody enacted. Same gates as
+// the delete beside it: pm rank + ownership of the owning project, 404 for an
+// id that never existed, and a structured before→after on what moved.
+router.put('/milestones/:id', requireRole('pm'), asyncH(async (req, res) => {
+  const id = idParam(req);
+  const cur = (await pool.query('SELECT * FROM milestones WHERE id=$1', [id])).rows[0];
+  if (!cur) throw notFound(`milestone ${id} not found`);
+  const project = await projectForRow(cur);
+  if (!canEditProject(req.session, project)) throw forbidden('Not allowed to edit this milestone');
+  const b = req.body || {};
+  const label = has(b, 'label') ? String(pick(b, 'label') || '').trim() : cur.label;
+  if (!label) throw badRequest('label required');
+  const date = has(b, 'date') ? String(pick(b, 'date') || '') : (cur.date || '');
+  if (date && !isISODate(date)) throw badRequest('date must be YYYY-MM-DD');
+  const r = await pool.query(
+    `UPDATE milestones SET label=$1, date=$2, sort_order=$3 WHERE id=$4 RETURNING *`,
+    [label, date,
+     has(b, 'sort_order') ? (parseInt(pick(b, 'sort_order'), 10) || 0) : cur.sort_order, id]);
+  const changes = diffFields(cur, r.rows[0], { label: 'label', date: 'date' });
+  await logActivity(pool, { projectId: project ? project.id : null, showId: cur.show_id || null,
+    actor: req.actor, action: 'milestone.update',
+    detail: changeSummary(changes, r.rows[0].label), changes });
   res.json(dbToMilestone(r.rows[0]));
 }));
 // H1 + H3. This carried a rank check, no ownership check and no existence

@@ -190,16 +190,28 @@ function viewSeason(project) {
     '</div>' +
     '</div>' +
     '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
-    /* Both of these were toastAttrs fakes. A season-wide template apply and a
-       season-wide push are per-show fan-outs that are NOT built; saying so is
-       the honest version, and the per-show controls that ARE built are one
-       click away inside each show. */
+    /* A season could not gain a show: LOVB got one at create and the other
+       five could not exist. The primary act on a season dashboard is now the
+       one the entity actually needs. */
+    (canEditFolder(project)
+      ? '<button class="btn primary" ' + act('addShow', project.id) + '>' + icon('plus') + 'Add show</button>'
+      : '') +
+    /* The season-wide fan-outs stay honestly not-built — but the toast now
+       points at Seed pipeline, a control that exists (the old copy sent people
+       hunting for a per-show seed button that was never rendered). */
     '<button class="btn ghost" ' + toastAttrs('Not built yet',
-      'Applying a template across a season is a per-show fan-out — open a show and seed it there') + '>' +
+      'Applying a template across a season is a per-show fan-out — open a show and use Seed pipeline on its Pipeline tab, which is real') + '>' +
       icon('layers') + 'Apply to all shows</button>' +
     '<button class="btn ghost" ' + toastAttrs('Not built yet',
       'Pushing a whole season is a per-show fan-out — open a show and use Push to Scheduler, which is real') + '>' +
       icon('send') + 'Push season</button>' +
+    /* the honest, typed way out — deleteProjectAct owns the confirm that
+       names the cascade, so the button itself stays quiet */
+    (canEditFolder(project)
+      ? '<button class="btn ghost" ' + act('deleteFolder', project.id) +
+        ' title="Delete this folder and everything in it — a typed confirm names exactly what goes">' +
+        icon('trash') + 'Delete</button>'
+      : '') +
     '</div></div>' +
     '<div class="ef-meta">' + metas + '</div></div>';
 
@@ -264,10 +276,17 @@ function viewSeason(project) {
 
   var summary = project.summary || project.description || '';
 
+  /* C5. The second deal finally has a door — the LOVB league-vs-team-buy case
+     that three UI explainers describe. The server floor is pm + ownership. */
+  var addJobBtn = canEditFolder(project)
+    ? '<button class="btn sm ghost" style="margin-left:auto" ' + act('addJob', project.id) + '>' +
+      icon('plus') + 'Add job</button>'
+    : '';
+
   return head + stats + finSeasonStrip(project) +
     '<div class="ov" style="grid-template-columns:1.5fr 1fr">' +
     '<div style="display:flex;flex-direction:column;gap:16px">' + showTable +
-    '<div class="panel"><h3>Jobs on this folder · ' + (project.jobs || []).length + '</h3><div class="next-list">' + jobRows + '</div>' +
+    '<div class="panel"><h3 style="display:flex;align-items:center;gap:9px">Jobs on this folder · ' + (project.jobs || []).length + addJobBtn + '</h3><div class="next-list">' + jobRows + '</div>' +
     '<div class="perm-note">' + inlineIcon('scale') + ' A <b>job</b> is one commercial deal — one client, one QuickBooks job number, one budget. <b>rental</b> = league deal, E360 keeps the gear; <b>sale</b> = individual team agreement, hardware as cost-of-goods. Shows carry a default job; any cost-bearing item can override it, so one show can bill across two deals.</div></div>' +
     '</div>' +
     '<div style="display:flex;flex-direction:column;gap:16px">' +

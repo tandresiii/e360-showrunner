@@ -3821,6 +3821,230 @@ var api = (function () {
         { reason: String(reason || '') });
     },
 
+    /* ==================================================================== */
+    /* THE BLOCKER WAVE (2026-09-03) — the editability audit's finding was    */
+    /* the SEAM PASS's finding again, one layer up: routes that exist, are    */
+    /* gated and cascade-proven, and have no way in from the product.         */
+    /*                                                                        */
+    /*   C4   expenses      (above)      -> update/deleteExpense, now WIRED   */
+    /*   —    show · folder DELETE       -> deleteShow / deleteProject        */
+    /*   —    2nd show      POST         -> createShow (+ template, in-txn)   */
+    /*   —    seed pipeline POST         -> instantiateTemplate               */
+    /*   C5   2nd job       POST         -> createJob                         */
+    /*   8/H7 milestones    POST/PUT/DEL -> add/update/deleteMilestone        */
+    /*   §1   API keys      GET/POST/DEL -> list/create/revokeApiKey          */
+    /*   37   note delete   DELETE       -> deleteNote                        */
+    /* ==================================================================== */
+
+    /* ---- a SECOND show lands in an existing folder ----------------------- */
+    /* The season case: LOVB got one show at create and the other five could
+       not exist. The server instantiates the template INSIDE the create
+       transaction when template_id rides along, so a seeded second show is
+       one call in both modes — never a create that could orphan its seed. */
+    createShow: function (projectId, body) {
+      body = body || {};
+      var name = String(body.name || '').trim();
+      if (!name) return fail('a show needs a name');
+      if (!API()) {
+        var p = PROJECTS_BY_ID[Number(projectId)];
+        if (!p) return fail('folder ' + projectId + ' not found');
+        var sid = 1;
+        ALL_SHOWS.forEach(function (s) { if (s.id >= sid) sid = s.id + 1; });
+        var show = _mkLocalShow(p, body, sid);
+        p.shows.push(show);
+        ALL_SHOWS.push(show); SHOWS_BY_ID[sid] = show;
+        var seeded = body.seed_template === false ? 0 : _seedLocalPipeline(show, p.type);
+        show.activity.unshift(mkAct(ME, 'show.create',
+          name + (seeded ? ' (+' + seeded + ' steps)' : ''), 0, _nowHM(), true));
+        show.instantiated_steps = seeded;
+        return ok(show);
+      }
+      var b = {}; Object.keys(body).forEach(function (k) { b[k] = body[k]; });
+      b.project_id = Number(projectId);
+      return SR.post('/api/shows', b, { notifyOk: true }).then(A.show);
+    },
+
+    /* ---- seed the pipeline on a show that already exists ------------------ */
+    /* POST /shows/:id/instantiate-template predates the audit; nothing called
+       it, and the empty Pipeline tab's advice pointed at a season button that
+       was itself a toast. The demo twin seeds from the local template config —
+       it has no template rows, only shapes — which is the same honest stand-in
+       createEvent's twin takes. */
+    instantiateTemplate: function (showId, templateId) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        var n = _seedLocalPipeline(s, s.type || 'led');
+        if (n) s.activity.unshift(mkAct(ME, 'template.instantiate', n + ' steps seeded', 0, _nowHM(), true));
+        return ok({ ok: true, instantiated_steps: n });
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/instantiate-template',
+        { template_id: Number(templateId) });
+    },
+
+    /* ---- C5. a folder's SECOND deal -------------------------------------- */
+    /* "One show can bill across two deals" is explained in three places in the
+       UI, and the override mechanic is fully built on both sides — but the
+       second job could not be created, so there was nothing to override TO.
+       The job opens on a TEMP placeholder exactly like the first one did. */
+    createJob: function (projectId, body) {
+      body = body || {};
+      if (!API()) {
+        var p = PROJECTS_BY_ID[Number(projectId)];
+        if (!p) return fail('folder ' + projectId + ' not found');
+        var jid = 1;
+        ALL_JOBS.forEach(function (j) { if (j.id >= jid) jid = j.id + 1; });
+        var job = { id: jid, project_id: p.id, name: body.name || p.name,
+                    qb_job_number: body.qb_job_number || _mintLocalTempNumber(),
+                    qb_number_status: body.qb_job_number && !/^TEMP-/.test(body.qb_job_number) ? 'confirmed' : 'temp',
+                    client: body.client || p.client || '',
+                    deal_type: DEAL_TAGS[body.deal_type] ? body.deal_type : 'rental',
+                    description: body.description || '',
+                    contract_value: Number(body.contract_value) || 0, budget_total: 0 };
+        (p.jobs = p.jobs || []).push(job);
+        JOBS_BY_ID[jid] = job; ALL_JOBS.push(job);
+        return ok(job);
+      }
+      var jb = {}; Object.keys(body).forEach(function (k) { jb[k] = body[k]; });
+      jb.project_id = Number(projectId);
+      return SR.post('/api/jobs', jb, { notifyOk: true }).then(A.job);
+    },
+
+    /* ---- the two deletes — real cascades, behind typed confirms ----------- */
+    /* DELETE /shows/:id and /projects/:id have proven zero-orphan cascades
+       (smoke §6) and never had a caller. The UI half (deleteShowAct /
+       deleteProjectAct) owns the typed confirm; these just carry the call.
+       The demo twin removes what the views actually read, so the season
+       table, the calendar and the money views all agree the thing is gone. */
+    deleteShow: function (id) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(id)];
+        if (!s) return fail('show ' + id + ' not found');
+        _dropLocalShow(s);
+        return ok({ ok: true });
+      }
+      return SR.del('/api/shows/' + Number(id));
+    },
+    deleteProject: function (id) {
+      if (!API()) {
+        var p = PROJECTS_BY_ID[Number(id)];
+        if (!p) return fail('folder ' + id + ' not found');
+        (p.shows || []).slice().forEach(_dropLocalShow);
+        (p.jobs || []).forEach(function (j) {
+          delete JOBS_BY_ID[j.id];
+          for (var i = ALL_JOBS.length - 1; i >= 0; i--) if (ALL_JOBS[i].id === j.id) ALL_JOBS.splice(i, 1);
+        });
+        delete PROJECTS_BY_ID[p.id];
+        for (var k = PROJECTS.length - 1; k >= 0; k--) if (PROJECTS[k].id === p.id) PROJECTS.splice(k, 1);
+        return ok({ ok: true });
+      }
+      return SR.del('/api/projects/' + Number(id));
+    },
+
+    /* ---- 8/H7. milestones — the dates the calendar is made of ------------- */
+    listMilestones: function (showId) {
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        return s ? ok((s.milestones || []).slice()) : fail('show ' + showId + ' not found');
+      }
+      return SR.get('/api/shows/' + Number(showId) + '/milestones').then(function (rows) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (s) { s.milestones = rows || []; _sortMilestones(s.milestones); }
+        return rows || [];
+      });
+    },
+    addMilestone: function (showId, body) {
+      body = body || {};
+      var label = String(body.label || '').trim();
+      if (!label) return fail('a milestone needs a label');
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        var m = { id: ++_msSeq, show_id: s.id, project_id: null, label: label,
+                  date: body.date || '', sort_order: Number(body.sort_order) || 0 };
+        (s.milestones = s.milestones || []).push(m);
+        _sortMilestones(s.milestones);
+        s.activity.unshift(mkAct(ME, 'milestone.create', label + (m.date ? ' · ' + m.date : ''), 0, _nowHM()));
+        return ok(m);
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/milestones', body).then(_absorbMilestone);
+    },
+    updateMilestone: function (id, patch) {
+      if (!API()) {
+        var found = _localMilestone(id);
+        if (!found) return fail('milestone ' + id + ' not found');
+        Object.keys(patch || {}).forEach(function (k) { found.m[k] = patch[k]; });
+        _sortMilestones(found.show.milestones);
+        return ok(found.m);
+      }
+      return SR.put('/api/milestones/' + Number(id), patch || {}).then(_absorbMilestone);
+    },
+    deleteMilestone: function (id) {
+      if (!API()) {
+        var found = _localMilestone(id);
+        if (!found) return fail('milestone ' + id + ' not found');
+        found.show.milestones = found.show.milestones.filter(function (m) { return m.id !== found.m.id; });
+        found.show.activity.unshift(mkAct(ME, 'milestone.delete', found.m.label, 0, _nowHM()));
+        return ok({ ok: true });
+      }
+      return SR.del('/api/milestones/' + Number(id)).then(function (r) {
+        /* the read-through cache half: the row is gone server-side, so no map
+           may keep serving it to the header metas or the calendar */
+        ALL_SHOWS.forEach(function (s) {
+          if (s.milestones) s.milestones = s.milestones.filter(function (m) { return m.id !== Number(id); });
+        });
+        return r;
+      });
+    },
+
+    /* ---- AGENT_API §1. keys — the agent roadmap's front door -------------- */
+    /* Self-scoped on purpose: the card is "your keys", the way the session
+       card is "your session". The server's self-or-admin rule still lets an
+       admin mint for someone else through the API; the UI does not offer it.
+       A key is a REAL credential, so the demo refuses to pretend at one —
+       the same stand the flex writes take. */
+    listApiKeys: function () {
+      if (!API()) return ok([]);
+      return SR.get('/api/keys');
+    },
+    createApiKey: function (body) {
+      if (!API()) return fail('an API key is a real credential — minting one needs the live Showrunner server');
+      return SR.post('/api/keys', body || {});
+    },
+    revokeApiKey: function (id) {
+      if (!API()) return fail('an API key is a real credential — revoking one needs the live Showrunner server');
+      return SR.del('/api/keys/' + Number(id));
+    },
+
+    /* ---- 37. the note the author wants back ------------------------------- */
+    /* Author-or-admin, replies cascade — the server's rule, mirrored so the
+       demo teaches the same one. */
+    deleteNote: function (id) {
+      if (!API()) {
+        var n = NOTES_BY_ID[Number(id)];
+        if (!n) return fail('note ' + id + ' not found');
+        if (n.author !== ME && CURRENT_USER.role !== 'admin') {
+          return fail('only the author or an admin can delete a note');
+        }
+        for (var i = ALL_NOTES.length - 1; i >= 0; i--) {
+          if (ALL_NOTES[i].id === n.id || ALL_NOTES[i].parent_id === n.id) {
+            delete NOTES_BY_ID[ALL_NOTES[i].id];
+            ALL_NOTES.splice(i, 1);
+          }
+        }
+        return ok({ ok: true });
+      }
+      return SR.del('/api/notes/' + Number(id)).then(function (r) {
+        for (var j = ALL_NOTES.length - 1; j >= 0; j--) {
+          if (ALL_NOTES[j].id === Number(id) || ALL_NOTES[j].parent_id === Number(id)) {
+            delete NOTES_BY_ID[ALL_NOTES[j].id];
+            ALL_NOTES.splice(j, 1);
+          }
+        }
+        return r;
+      });
+    },
+
     /* ---- A8. the served feature flags, consumed at last ------------------ */
     /* GET /api/config reports features.schedulerPush and the README says the UI
        greys the button; the UI never read it. Demo has no server, so it answers
@@ -3842,6 +4066,113 @@ var api = (function () {
     list.push(line);
     A.budget(Number(jobId), list);
     return BUDGET_BY_ID[line.id] || line;
+  }
+
+  /* ---- the blocker wave's demo-twin helpers ----------------------------- */
+  /* One show record, in the exact shape the createEvent twin builds — pulled
+     out so "second show in a folder" cannot drift from "first show of a new
+     event" one collection at a time. */
+  function _mkLocalShow(proj, b, sid) {
+    var name = String(b.name || proj.name).trim();
+    var job = (proj.jobs && proj.jobs[0]) || null;
+    return {
+      id: sid, project_id: proj.id, slug: proj.slug, name: name,
+      venue: String(b.venue || ''), city: String(b.city || ''),
+      load_in_date: b.load_in_date || '', event_date: b.event_date || '',
+      strike_date: b.strike_date || '',
+      stage: 'lead', rag: 'idle', on_site_poc: b.on_site_poc || '', owner: proj.owner || ME,
+      default_job_id: b.default_job_id ? Number(b.default_job_id) : (job ? job.id : null),
+      scheduler_event_id: null, cabinets: Number(b.cabinets) || 0,
+      type: proj.type, milestones: [], summary: null, source: null,
+      steps: [], files: [], bookings: [], proofs: [], expenses: [], activity: [],
+      schedule_items: [], crew_assignments: [],
+      chain: { content: _chainNode([0]), cabling: _chainNode([0]),
+               power: _chainNode([0]), pull: _chainNode([0]) },
+      gear: { linked: false, pulled: false, elementId: null, kit: buildKit(Number(b.cabinets) || 72),
+              view: 'pull-sheet', gearListId: null, gearListType: 'pull-sheet', docNumber: '—' },
+      load_in_time: null, doors_time: null, event_time: null, strike_time: null,
+      venue_address: null, parking_notes: null, radio_channel: null, dress_code: null,
+      venue_poc: null, client_poc: null,
+      scope_kind: null, scope_linear_feet: null, scope_cabinet_count: null,
+      scope_cabinet_type: null, scope_pitch: null, scope_print_pieces: null,
+      scope_print_sqft: null, scope_source: 'manual', scope_verified_at: null,
+      scope_verified_by: null,
+      confirmed_at: null, confirmed_by: null, struck_at: null, struck_by: null,
+      closeout_complete_at: null, archived_at: null, archived_by: null
+    };
+  }
+  /* The event TYPE's template supplies the lane set + the T-minus pipeline —
+     the demo twin of instantiateTemplateOnShow, shared by createEvent,
+     createShow and instantiateTemplate so all three seed identically. */
+  function _seedLocalPipeline(show, type) {
+    var tpl = TEMPLATE_STEPS[type] || {};
+    var evt = show.event_date ? new Date(show.event_date + 'T00:00:00') : null;
+    var n = 0;
+    typeDef(type).lanes.forEach(function (lane) {
+      (tpl[lane.key] || []).forEach(function (t) {
+        var st = mkStep(lane.key, t.name, 'todo', null, -Math.abs(t.off));
+        st.show_id = show.id; st.sort_order = show.steps.length;
+        st.due_date = evt ? isoDate(addDays(evt, st.due_offset_days)) : '';
+        delete st._dep_title;
+        show.steps.push(st); STEPS_BY_ID[st.id] = st;
+        n++;
+      });
+    });
+    return n;
+  }
+  /* TEMP-{yy}-{seq}, off the local store — the demo twin of mintTempJobNumber */
+  function _mintLocalTempNumber() {
+    var yy = String(new Date().getFullYear() % 100);
+    var seq = 1;
+    ALL_JOBS.forEach(function (j) {
+      var m = /^TEMP-(\d{2})-(\d{3,})$/.exec(String(j.qb_job_number || ''));
+      if (m && m[1] === yy) seq = Math.max(seq, parseInt(m[2], 10) + 1);
+    });
+    return 'TEMP-' + yy + '-' + ('00' + seq).slice(-3);
+  }
+  /* the show delete's demo cascade — takes with it exactly what the views
+     read: steps, files, bookings, expenses, and the show's own three rows */
+  function _dropLocalShow(s) {
+    (s.steps || []).forEach(function (st) { delete STEPS_BY_ID[st.id]; });
+    (s.files || []).forEach(function (f) { delete FILES_BY_ID[f.id]; });
+    (s.bookings || []).forEach(function (b) { delete BOOKINGS_BY_ID[b.id]; });
+    (s.expenses || []).forEach(function (e) {
+      delete EXPENSES_BY_ID[e.id];
+      for (var i = ALL_EXPENSES.length - 1; i >= 0; i--) {
+        if (ALL_EXPENSES[i].id === e.id) ALL_EXPENSES.splice(i, 1);
+      }
+    });
+    var p = PROJECTS_BY_ID[s.project_id];
+    if (p && p.shows) p.shows = p.shows.filter(function (x) { return x.id !== s.id; });
+    delete SHOWS_BY_ID[s.id];
+    for (var k = ALL_SHOWS.length - 1; k >= 0; k--) if (ALL_SHOWS[k].id === s.id) ALL_SHOWS.splice(k, 1);
+  }
+  /* find a milestone by id across the local store — small data, honest scan */
+  function _localMilestone(id) {
+    for (var i = 0; i < ALL_SHOWS.length; i++) {
+      var s = ALL_SHOWS[i];
+      var m = (s.milestones || []).filter(function (x) { return x.id === Number(id); })[0];
+      if (m) return { show: s, m: m };
+    }
+    return null;
+  }
+  function _sortMilestones(list) {
+    list.sort(function (a, b) {
+      return String(a.date || '9999').localeCompare(String(b.date || '9999'))
+        || (a.sort_order || 0) - (b.sort_order || 0) || a.id - b.id;
+    });
+  }
+  /* milestones live ON their show record — absorb a server row back into it
+     so the header metas and the calendar re-render without a refetch */
+  function _absorbMilestone(m) {
+    if (!m) return m;
+    var s = SHOWS_BY_ID[m.show_id];
+    if (s) {
+      s.milestones = (s.milestones || []).filter(function (x) { return x.id !== m.id; });
+      s.milestones.push(m);
+      _sortMilestones(s.milestones);
+    }
+    return m;
   }
 
   /* ISO date + N days, as a string. The demo twin of lib/enums.js addDays(),

@@ -257,6 +257,57 @@ const DEL = (p, o) => call('DELETE', p, o);
   // milestones (8)
   const ms = await POST(`/api/shows/${S}/milestones`, { label: 'Content due', date: '2026-11-07' }, { token: A });
   ok('POST /api/shows/:id/milestones (punch 8)', ms.status === 200, ms.body);
+  const MS = ms.body.id;
+  // H7's missing half — the PUT beside the delete. Same gates as the delete
+  // (pm rank + ownership, 404 for a ghost), and the milestone modal is what
+  // finally calls all three.
+  ok('creating a milestone leaves its own activity row now',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM activity
+                        WHERE show_id=$1 AND action='milestone.create'`, [S])).rows[0].n === 1);
+  const msPm2 = await PUT(`/api/milestones/${MS}`, { label: 'hijack' }, { token: PM2T });
+  ok('PUT /api/milestones/:id checks OWNERSHIP, not just rank', msPm2.status === 403, msPm2.body);
+  const msFix = await PUT(`/api/milestones/${MS}`, { label: 'Content locked', date: '2026-11-08' },
+    { token: A });
+  ok('PUT /api/milestones/:id corrects label + date (H7)',
+     msFix.status === 200 && msFix.body.label === 'Content locked' && msFix.body.date === '2026-11-08',
+     msFix.body);
+  ok('...a non-ISO date is a 400',
+     (await PUT(`/api/milestones/${MS}`, { date: 'tomorrow' }, { token: A })).status === 400);
+  ok('...and an id that never existed is a 404, not {ok:true}',
+     (await PUT('/api/milestones/99999999', { label: 'x' }, { token: A })).status === 404);
+  const msAct = await pool.query(
+    `SELECT * FROM activity WHERE show_id=$1 AND action='milestone.update' ORDER BY id DESC`, [S]);
+  ok('...the correction leaves a structured before→after',
+     (msAct.rows[0]?.changes || []).some((c) => c.field === 'label' && c.to === 'Content locked'),
+     msAct.rows[0]?.changes);
+
+  // ── the gear-state gate (H1's last stray) ─────────────────────────────────
+  // PUT /shows/:id/gear carried requireRole('tech') and nothing else, so any
+  // tech could overwrite any show's Flex linkage and pulled state. The gate is
+  // now entity-shaped: canEditProject OR a tech with a crew line on THIS show
+  // — the tech at the rack building the pull sheet is the route's clientele.
+  // A dedicated show, so the crew line it needs cannot skew any later count.
+  const ggShow = await POST('/api/shows', { project_id: P, name: TAG + ' gear gate' }, { token: A });
+  const GG = ggShow.body.id;
+  const gearForeign = await PUT(`/api/shows/${GG}/gear`, { pulled: true }, { token: TECHT });
+  ok('a tech with NO crew line on the show is refused the gear write',
+     gearForeign.status === 403, gearForeign.body);
+  ok('...and so is a pm who owns nothing',
+     (await PUT(`/api/shows/${GG}/gear`, { pulled: true }, { token: PM2T })).status === 403);
+  await POST(`/api/shows/${GG}/crew`, { username: techUser, role_on_site: 'LED tech' }, { token: A });
+  const gearCrew = await PUT(`/api/shows/${GG}/gear`, { pulled: true }, { token: TECHT });
+  ok('...while the SAME tech, once on the crew, may build the pull sheet',
+     gearCrew.status === 200 && gearCrew.body.pulled === true, gearCrew.body);
+  ok('...and the folder-owning pm always could',
+     (await PUT(`/api/shows/${GG}/gear`, { pulled: false }, { token: PMT })).status === 200);
+  // The probe cleans up after itself — P must stay single-show for the
+  // auto-collapse assertion below — and the cleanup IS the blocker wave's new
+  // door: DELETE /shows/:id, its cascade taking the crew line with it.
+  const ggDel = await DEL(`/api/shows/${GG}`, { token: A });
+  ok('...and the probe show deletes cleanly, crew line and all (show delete door)',
+     ggDel.status === 200 &&
+     (await pool.query('SELECT COUNT(*)::int AS n FROM crew_assignments WHERE show_id=$1',
+       [GG])).rows[0].n === 0, ggDel.body);
 
   // files + financial doc (23, 29)
   const file = await POST('/api/files', {

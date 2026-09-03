@@ -1,5 +1,38 @@
 # Showrunner — product coherence review
 
+> ## STATUS — THE BLOCKER WAVE, 2026-09-03
+>
+> A read-only editability audit (2026-09-02) re-walked the seam pass's
+> "Closed" list against the rendered product and caught one claim that had
+> drifted: **C4 was not closed.** The backend and the seam were finished; no
+> view rendered an edit or void control, so a wrong amount was still permanent
+> — and the walk never reach()ed it, which is exactly how the claim survived.
+> C4 is **actually closed now**: a pencil on every expense row in the show
+> Financials tab and the job cost table, Void behind the DELETE route's
+> manager floor, and walk steps that fail if either affordance disappears.
+>
+> **Also shipped in this wave, all walk-gated (§20–25):** show + folder
+> DELETE behind typed confirms that name the cascade honestly (the routes'
+> zero-orphan cascades were already proven in smoke §6) · **Add show** on the
+> season dashboard (the template seeds inside the create transaction, so A1 is
+> closed without a second call) · **Seed pipeline** in an empty Pipeline tab —
+> the season toast that pointed at a control that did not exist now points at
+> this one, which does · **Add job** on the folder's jobs panel (C5 closed —
+> the second deal the fully-built override mechanic never had a target for) ·
+> the milestone add/edit/delete modal plus the missing `PUT /api/milestones/:id`
+> (A13/H7), and `viewCalendar` now folds each show's load-in / event / strike
+> dates so a production Calendar is never empty · an **API keys card** on
+> Settings over the existing routes (list · show-once mint on the temp-password
+> pattern · revoke-not-delete; A11's credential story) · **note delete** beside
+> the author's Edit, replies cascading · and the last H1 stray:
+> `PUT /shows/:id/gear` now pairs its tech floor with an ownership gate
+> (canEditProject OR a tech with a crew line on THIS show) — mutation-tested:
+> removing the gate turns the foreign-tech smoke assertion red.
+>
+> **Process note, banked:** the walk only protects what it reach()es — that is
+> how a "closed" claim drifted. Every fix in this wave landed with its own
+> reach() step in `scripts/persona-walk.mjs`.
+
 > ## STATUS — THE SEAM PASS, 2026-08-28
 >
 > This document was the workbook for a pass that closed the top ten. What

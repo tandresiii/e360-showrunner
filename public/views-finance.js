@@ -279,6 +279,10 @@ function viewJobFinance(jf) {
     (jf.capexCommitted ? '<div class="perm-note" style="padding:0 16px 12px;margin-top:0">' + inlineIcon('box') + ' Plus ' + esc(fmtMoney(jf.capexCommitted)) + ' on order routed to <b>E360 inventory</b> — capex under this deal, not a job cost.</div>' : '') + '</div>';
 
   /* expenses */
+  /* C4. The correction path, on the row it corrects. The server gate is pm
+     rank + ownership of the owning project; canEditFolder(p) is that gate's
+     client mirror, with its documented permissive fallback when p is thin. */
+  var canFix = canEditFolder(p);
   var expRows = jf.expenses.map(function (x) {
     var e = x.e;
     var doc = e.file_id
@@ -290,11 +294,15 @@ function viewJobFinance(jf) {
       (e.status === 'proposed' ? ' <span class="pill warn" style="padding:1px 8px;font-size:10px"><span class="dot"></span>Proposed</span>' : '') + '</td>' +
       '<td><span class="tag">' + esc(BUDGET_CATS[e.budget_line_category] || e.budget_line_category) + '</span></td>' +
       '<td>' + doc + '</td>' +
-      '<td class="money">' + esc(fmtMoney(e.amount)) + '</td></tr>';
+      '<td class="money">' + esc(fmtMoney(e.amount)) + '</td>' +
+      '<td>' + (canFix
+        ? '<button class="iconbtn" style="width:26px;height:26px" title="Correct this cost" ' +
+          act('editExpense', e.id) + '>' + icon('pencil') + '</button>'
+        : '') + '</td></tr>';
   }).join('');
   var expCard = '<div class="card"><div class="card-h"><h3>Expenses · ' + jf.expenses.length + '</h3><span class="pill idle">newest first</span></div>' +
     (jf.expenses.length
-      ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Show</th><th>Vendor</th><th>Category</th><th>Doc</th><th class="money">Amount</th></tr></thead><tbody>' + expRows + '</tbody></table></div>'
+      ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Show</th><th>Vendor</th><th>Category</th><th>Doc</th><th class="money">Amount</th><th></th></tr></thead><tbody>' + expRows + '</tbody></table></div>'
       : '<div class="empty">No costs have landed against this job yet.</div>') + '</div>';
 
   /* docs + shows covered */
@@ -450,6 +458,10 @@ function tabFinancials(show) {
     : '';
 
   /* ---- expenses table ----------------------------------------------------- */
+  /* C4. The pencil the audit's headline finding names: PUT /expenses/:id and
+     its seam sat finished for a week while this table stayed inert text. Gated
+     the same as the rest of the tab's writes — the folder's edit predicate. */
+  var canFix = canEditFolderOf(show);
   var expRows = exps.map(function (e) {
     var override = e.job_id && e.job_id !== show.default_job_id ? JOBS_BY_ID[e.job_id] : null;
     var doc = e.file_id
@@ -462,12 +474,16 @@ function tabFinancials(show) {
       '<td><span class="tag">' + esc(BUDGET_CATS[e.budget_line_category] || e.budget_line_category) + '</span></td>' +
       '<td>' + (override ? jobChip(override) : '<span class="mini" title="bills to the show’s default job">default</span>') + '</td>' +
       '<td>' + doc + '</td>' +
-      '<td class="money">' + esc(fmtMoney(e.amount)) + '</td></tr>';
+      '<td class="money">' + esc(fmtMoney(e.amount)) + '</td>' +
+      '<td>' + (canFix
+        ? '<button class="iconbtn" style="width:26px;height:26px" title="Correct this cost" ' +
+          act('editExpense', e.id) + '>' + icon('pencil') + '</button>'
+        : '') + '</td></tr>';
   }).join('');
   var expCard = '<div class="card"><div class="card-h"><h3>Expenses · ' + exps.length + '</h3>' +
     '<button class="btn sm primary" ' + act('openAddExpense', show.id) + '>' + icon('plus') + 'Add expense</button></div>' +
     (exps.length
-      ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Vendor</th><th>Category</th><th>Bills to</th><th>Doc</th><th class="money">Amount</th></tr></thead><tbody>' + expRows + '</tbody></table></div>'
+      ? '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Vendor</th><th>Category</th><th>Bills to</th><th>Doc</th><th class="money">Amount</th><th></th></tr></thead><tbody>' + expRows + '</tbody></table></div>'
       : '<div class="empty">No expenses recorded yet.</div>') + '</div>';
 
   /* ---- financial docs grid ------------------------------------------------ */

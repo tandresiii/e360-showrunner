@@ -67,7 +67,22 @@ function viewMyTasks(mine, owedReports) {
 function viewCalendar(shows) {
   var items = [];
   shows.forEach(function (s) {
-    (s.milestones || []).forEach(function (m) { items.push({ show: s, label: m.label, date: m.date }); });
+    var taken = {};
+    (s.milestones || []).forEach(function (m) {
+      if (m.date) taken[m.date] = 1;
+      items.push({ show: s, label: m.label, date: m.date });
+    });
+    /* The production dates live ON the show row, not in milestones — so a show
+       created through the product (which seeds no milestone rows) left the
+       Calendar empty while its load-in bore down. Fold them in. A milestone
+       already marking the same day wins: it is the richer row, and the demo
+       seeds "Load-in"/"Show" milestones on those exact dates. */
+    var anchor = typeDef(s.type).anchor || 'Event';
+    [['load_in_date', 'Load-in'], ['event_date', anchor], ['strike_date', 'Strike']]
+      .forEach(function (pair) {
+        var d = s[pair[0]];
+        if (d && !taken[d]) { taken[d] = 1; items.push({ show: s, label: pair[1], date: d }); }
+      });
   });
   items.sort(function (a, b) { return (a.date || '9999').localeCompare(b.date || '9999'); });
 
@@ -409,6 +424,40 @@ function viewSettings(ctx) {
         '<button class="btn sm ghost" ' + act('changePw') + '>' + icon('lock') + 'Change password</button>' +
         '<button class="btn sm ghost" ' + act('logout') + '>' + icon('lock') + 'Sign out</button>' +
         '</span></div>')) +
+    /* ══ AGENT_API §1 · API KEYS — the agent roadmap's front door ═══════════
+       The routes (self-or-admin list, show-once mint, revoke-not-delete) sat
+       finished with no card. Self-scoped like the session card: these are YOUR
+       keys, acting as you. */
+    card('bolt', 'API keys · your agent', (function () {
+      if (demo) {
+        return '<p>A key lets <b>your agent</b> — the M365 watcher, a script, an MCP server — act as you ' +
+          'against the live API. It inherits your role on every request and is shown exactly once at mint.</p>' +
+          row('Keys', '<span style="color:var(--warn)">demo — no credential store</span>') +
+          '<div class="perm-note" style="margin-top:10px">' + inlineIcon('lock') +
+          ' A key is a real credential, so the demo will not pretend at one. Sign in against the live ' +
+          'server to mint yours.</div>';
+      }
+      var keys = ctx.keys || [];
+      var rows2 = keys.map(function (k) {
+        var revoked = !!k.revoked_at;
+        return '<div class="set-row"><span class="k mono" style="text-transform:none;letter-spacing:0">' +
+          esc(k.key_prefix) + '…</span>' +
+          '<span class="v" style="display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">' +
+          (k.label ? '<span style="color:var(--text-2);font-size:12px">' + esc(k.label) + '</span>' : '') +
+          (revoked
+            ? '<span class="pill idle">revoked ' + esc(fmtDate(String(k.revoked_at).slice(0, 10))) + '</span>'
+            : '<span class="pill go"><span class="dot"></span>active</span>' +
+              '<button class="btn sm ghost" ' + act('keyRevoke', k.id) + '>' + icon('x') + 'Revoke</button>') +
+          '</span></div>';
+      }).join('') || '<div class="empty" style="padding:12px">No keys yet — mint one for your agent.</div>';
+      return '<p>A key lets <b>your agent</b> act as you: it inherits your role live on every request, so a ' +
+        'role change changes its powers immediately, and it can never escalate itself.</p>' + rows2 +
+        '<div class="set-row"><span class="k">Mint</span><span class="v">' +
+        '<button class="btn sm ghost" ' + act('keyMint') + '>' + icon('plus') + 'New key</button></span></div>' +
+        '<div class="perm-note" style="margin-top:10px">' + inlineIcon('lock') +
+        ' Shown <b>once</b> at mint; the server keeps a hash. Keys are <b>revoked, never deleted</b> — a ' +
+        'credential’s history is part of the record.</div>';
+    })()) +
     card('gear', 'Workspace', '<p>e360 Sport control-room workspace.</p>' + row('Organization', 'E360 Sport') + row('Members', activeUsers().length) + row('Event types', Object.keys(EVENT_TYPES).length) +
       '<div class="set-row"><span class="k">Theme</span><span class="switch' + (isLight ? '' : ' on') + '" id="setTheme" ' + act('toggleTheme') + '><i></i></span></div>') +
     card('server', 'E360 NAS', '<p>Source files + heavy binaries. The DB stores a path + cached render; byte-serving is a deferred infra dependency.</p>' + row('Mount', '\\\\e360-nas\\showrunner') + row('Status', '<span style="color:var(--go)">reachable</span>') + row('Convention', 'P{id}-{slug}\\S{id}-{slug}\\{kind}')) +

@@ -1108,6 +1108,150 @@ async function main() {
   ok('the proofs tab no longer hardcodes an approval flow with invented people',
      !/{ k: 'Internal QC'/.test(SRC['views-folder.js']));
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('20 · the editability wave — a cost is corrected ON THE ROW it lives on');
+  // ══════════════════════════════════════════════════════════════════════════
+  // The audit's headline: C4's backend and seam sat finished for a week while
+  // the expenses table stayed inert text — a "closed" claim that drifted
+  // precisely because no walk step reach()ed it. Now one does.
+  reach('Correct a cost (pencil on the expense row)',
+    { seam: 'updateExpense', action: ['editExpense', 'exCommit'] });
+  reach('Void a cost', { seam: 'deleteExpense', action: 'exVoid' });
+  const wexp = await POST('/api/expenses',
+    { show_id: SHOW, vendor: 'Hertz', amount: 480, category: 'travel' }, { token: T.brenden });
+  ok('a cost lands', wexp.status === 200, wexp.body);
+  const wfix = await PUT(`/api/expenses/${wexp.body.id}`, { amount: 512, memo: 'tolls added' },
+    { token: T.brenden });
+  ok('the pencil’s PUT corrects it', wfix.status === 200 && Number(wfix.body.amount) === 512, wfix.body);
+  ok('the void floor holds — the pm who filed it is refused',
+     (await DEL(`/api/expenses/${wexp.body.id}`, { token: T.brenden })).status === 403);
+  ok('…and a manager voids it',
+     (await DEL(`/api/expenses/${wexp.body.id}`, { token: T.morgan })).status === 200);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('21 · milestones get their editor, and the Calendar stops being empty');
+  // ══════════════════════════════════════════════════════════════════════════
+  reach('Milestones modal (header strip pencil)',
+    { seam: ['addMilestone', 'updateMilestone', 'deleteMilestone'],
+      action: ['editMilestones', 'msCommit', 'msEdit', 'msDelete'] });
+  const wms = await POST(`/api/shows/${SHOW}/milestones`, { label: 'Freight', date: plus(30) },
+    { token: T.brenden });
+  ok('a milestone is added through the modal’s route', wms.status === 200, wms.body);
+  ok('H1 · editing it checks ownership',
+     (await PUT(`/api/milestones/${wms.body.id}`, { label: 'hijack' }, { token: T.pat })).status === 403);
+  const wmsFix = await PUT(`/api/milestones/${wms.body.id}`,
+    { label: 'Freight departs', date: plus(29) }, { token: T.brenden });
+  ok('H7 · the PUT that never existed corrects label + date',
+     wmsFix.status === 200 && wmsFix.body.label === 'Freight departs', wmsFix.body);
+  ok('…and the delete still works',
+     (await DEL(`/api/milestones/${wms.body.id}`, { token: T.brenden })).status === 200);
+  // the Calendar's other half: a show created through the product seeds no
+  // milestone rows, so the view now folds the show's own three dates in —
+  // asserted over the source, the way the toast/placeholder checks are.
+  const calSrc = SRC['views-global.js'].slice(SRC['views-global.js'].indexOf('function viewCalendar'));
+  ok('viewCalendar folds the show’s own load-in / event / strike dates',
+     /load_in_date/.test(calSrc.slice(0, 2000)) && /strike_date/.test(calSrc.slice(0, 2000)));
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('22 · the folder’s second deal, and its second show');
+  // ══════════════════════════════════════════════════════════════════════════
+  reach('Add job (folder Financials card)', { seam: 'createJob', action: ['addJob', 'njCommit'] });
+  const wjob = await POST('/api/jobs',
+    { project_id: PROJ, client: 'AVCA — print add-on', deal_type: 'sale' }, { token: T.brenden });
+  ok('C5 · the second deal opens on a TEMP number — the override finally has a target',
+     wjob.status === 200 && /^TEMP-/.test(wjob.body.qb_job_number), wjob.body);
+  ok('…a pm who owns nothing cannot open one here',
+     (await POST('/api/jobs', { project_id: PROJ, client: 'sneak' }, { token: T.pat })).status === 403);
+
+  reach('Add show (season dashboard)', { seam: 'createShow', action: ['addShow', 'nsCommit'] });
+  reach('Seed pipeline (empty Pipeline tab)', { seam: 'instantiateTemplate', action: 'seedPipeline' });
+  const wshow = await POST('/api/shows',
+    { project_id: PROJ, name: 'AVCA Second Serve', venue: 'UW Field House', event_date: plus(90) },
+    { token: T.brenden });
+  ok('the folder gains its second show', wshow.status === 200, wshow.body);
+  const WS2 = wshow.body.id;
+  ok('…born with an EMPTY pipeline (no template asked for)',
+     (wshow.body.steps || []).length === 0, (wshow.body.steps || []).length);
+  ok('…and it inherited the folder’s first job',
+     wshow.body.default_job_id === JOB, wshow.body.default_job_id);
+  const tplLed = await GET('/api/templates/led', { token: T.brenden });
+  ok('the led template is there to seed from', tplLed.status === 200 && !!tplLed.body.id, tplLed.body);
+  const wseed = await POST(`/api/shows/${WS2}/instantiate-template`,
+    { template_id: tplLed.body.id }, { token: T.brenden });
+  ok('Seed pipeline fills it', wseed.status === 200 && wseed.body.instantiated_steps > 0, wseed.body);
+  ok('…back-scheduled off the NEW show’s own event date',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM steps
+                        WHERE show_id=$1 AND due_date <> ''`, [WS2])).rows[0].n > 0);
+  ok('the season toast no longer points at a control that does not exist',
+     !/open a show and seed it there/.test(SRC['views-dashboard.js']));
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('23 · a note taken back, a key minted once');
+  // ══════════════════════════════════════════════════════════════════════════
+  reach('Delete a note (beside the author’s Edit)', { seam: 'deleteNote', action: 'noteDelete' });
+  const wnote = await POST('/api/notes',
+    { anchor_type: 'show', anchor_id: SHOW, body: 'wrong show, my bad' }, { token: T.omar });
+  ok('omar posts a note', wnote.status === 200, wnote.body);
+  ok('…brenden replies', (await POST('/api/notes',
+    { anchor_type: 'show', anchor_id: SHOW, body: 'happens', parent_id: wnote.body.id },
+    { token: T.brenden })).status === 200);
+  ok('…somebody else cannot delete it',
+     (await DEL(`/api/notes/${wnote.body.id}`, { token: T.pat })).status === 403);
+  ok('…the author can', (await DEL(`/api/notes/${wnote.body.id}`, { token: T.omar })).status === 200);
+  ok('…and the reply went with it — a headless reply reads as noise',
+     (await pool.query('SELECT COUNT(*)::int AS n FROM notes WHERE id=$1 OR parent_id=$1',
+       [wnote.body.id])).rows[0].n === 0);
+
+  reach('API keys card (Settings)', { seam: ['listApiKeys', 'createApiKey', 'revokeApiKey'],
+                                      action: ['keyMint', 'keyMintCommit', 'keyRevoke'] });
+  const wkey = await POST('/api/keys', { label: 'walk agent', scopes: ['agent:read'] },
+    { token: T.omar });
+  ok('anyone mints a key for THEMSELVES — the agent acts as its person',
+     wkey.status === 200 && !!wkey.body.key, { prefix: wkey.body?.key_prefix });
+  const wlist = await GET('/api/keys', { token: T.omar });
+  ok('…the list never carries the key again',
+     wlist.status === 200 && wlist.body.length === 1
+     && !('key' in wlist.body[0]) && !!wlist.body[0].key_prefix, wlist.body?.[0]);
+  ok('…revoke, never delete', (await DEL(`/api/keys/${wkey.body.id}`, { token: T.omar })).status === 200);
+  const wlist2 = await GET('/api/keys', { token: T.omar });
+  ok('…the row STAYS, marked revoked — a credential’s history is part of the record',
+     wlist2.body.length === 1 && !!wlist2.body[0].revoked_at, wlist2.body?.[0]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('24 · the last stray gate — gear state is this show’s, not every tech’s');
+  // ══════════════════════════════════════════════════════════════════════════
+  reach('Gear state write (Flex pull)', { seam: 'updateGear', action: 'flexPull' });
+  ok('H1 · a pm who owns nothing is refused the gear write',
+     (await PUT(`/api/shows/${SHOW}/gear`, { pulled: true }, { token: T.pat })).status === 403);
+  const gearOmar = await PUT(`/api/shows/${SHOW}/gear`, { pulled: false }, { token: T.omar });
+  ok('…while omar — the tech ON this crew — may write it', gearOmar.status === 200, gearOmar.body);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('25 · the two deletes — typed confirms in front, real cascades behind');
+  // ══════════════════════════════════════════════════════════════════════════
+  reach('Delete show (header)', { seam: 'deleteShow', action: 'deleteShow' });
+  reach('Delete folder (header)', { seam: 'deleteProject', action: 'deleteFolder' });
+  ok('the typed confirm names what goes and asks for the name back',
+     /Type the show’s name to confirm/.test(APP_JS) && /Type the folder’s name to confirm/.test(APP_JS));
+  ok('a pm who owns nothing cannot delete the show',
+     (await DEL(`/api/shows/${WS2}`, { token: T.pat })).status === 403);
+  ok('the owner deletes the second show', (await DEL(`/api/shows/${WS2}`, { token: T.brenden })).status === 200);
+  ok('…and it is really gone, steps and all',
+     (await GET(`/api/shows/${WS2}`, { token: T.brenden })).status === 404 &&
+     (await pool.query('SELECT COUNT(*)::int AS n FROM steps WHERE show_id=$1', [WS2])).rows[0].n === 0);
+  const scratch = await POST('/api/events', { name: 'walk scratch folder', type: 'led' },
+    { token: T.tom });
+  ok('a scratch folder to delete', scratch.status === 200, scratch.body?.project?.id);
+  const SPID = scratch.body.project.id;
+  ok('…a pm who owns nothing cannot delete it',
+     (await DEL(`/api/projects/${SPID}`, { token: T.pat })).status === 403);
+  ok('…its owner can, cascade and all',
+     (await DEL(`/api/projects/${SPID}`, { token: T.tom })).status === 200);
+  ok('…zero rows left behind — shows and jobs both',
+     parseInt((await pool.query(
+       `SELECT (SELECT COUNT(*) FROM shows WHERE project_id=$1)
+             + (SELECT COUNT(*) FROM jobs WHERE project_id=$1) AS n`, [SPID])).rows[0].n, 10) === 0);
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);
