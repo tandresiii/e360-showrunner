@@ -1027,6 +1027,16 @@ function sheetHTML(show, f, gear) {
         (c === 'proof' ? 'CLIENT PROOF' : c === 'image' ? 'ARTWORK' : 'DOCUMENT'),
       c === 'proof' ? 'Client proof' : c === 'image' ? 'Artwork' : 'Document');
   }
+  /* The fourth sheet nobody had walked. moneySheet() draws a letterhead, a
+     FILED stamp and grey placeholder body lines from the row's metadata — a
+     convincing fake receipt (Tom mistook one for Brendon's upload, 9/3).
+     Against a real server the uploaded document renders for real; the synth
+     card is the .e360 failure in a green jacket. */
+  if (live && c === 'money') {
+    return boundDocSheet(show, f,
+      '.' + String(f.ext || 'file').toUpperCase() + ' · FINANCIAL DOC',
+      'Financial document');
+  }
   if (c === 'e360') return show.type === 'print' ? printSpecSheet(show, f) : ledSpecSheet(show, f);
   if (c === 'nsf') return nsfSpecSheet(show, f);
   if (c === 'pcfg') return pcfgSpecSheet(show, f);

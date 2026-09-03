@@ -860,6 +860,32 @@ async function main() {
      (await activityFor(SHOW, 'booking.delete')).length === 1,
      (await activityFor(SHOW, 'booking.delete')).length);
 
+  // ── the synth-sheet line, held MECHANICALLY ───────────────────────────────
+  // sheetFor() draws convincing fabrications for demo mode: letterheads,
+  // FILED/APPROVED stamps, grey placeholder body text. Each class got its
+  // live-mode gate one incident at a time — specs (8/27), pull sheets,
+  // proofs/artwork/docs ("the three sheets nobody had walked yet"), and
+  // finally money (9/3: Tom asked whether a moneySheet was a real receipt
+  // Brendon uploaded). This scan ends the one-at-a-time pattern: every class
+  // sheetFor dispatches to a synth renderer must be intercepted by a
+  // `live &&` guard EARLIER in the function, so a new sheet class cannot
+  // ship without its production gate.
+  {
+    const m = SRC['components.js'].match(/function sheetHTML\([\s\S]*?\n\}/);
+    ok('sheetHTML() is where the scan expects it', !!m, 'components.js');
+    const body = m ? m[0] : '';
+    const synthClasses = [...body.matchAll(/if \(c === '(\w+)'\) return [^;\n]*Sheet\(/g)]
+      .map((x) => x[1]).filter((c2) => c2 !== 'photo'); /* photoSheet renders real thumbs */
+    ok('the scan sees the synth dispatch table (>= 7 classes)', synthClasses.length >= 7, synthClasses);
+    const unguarded = synthClasses.filter((c2) => {
+      const guardIdx = body.search(new RegExp(`if \\(live && [^)]*'${c2}'`));
+      const dispatchIdx = body.search(new RegExp(`if \\(c === '${c2}'\\) return [^;\\n]*Sheet\\(`));
+      return guardIdx === -1 || guardIdx > dispatchIdx;
+    });
+    ok('EVERY synth sheet class is live-guarded before its dispatch — money included',
+       unguarded.length === 0, unguarded);
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   section('13 · strike — and the report obligation finally has fuel  (F2)');
   // ══════════════════════════════════════════════════════════════════════════
