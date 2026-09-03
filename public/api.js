@@ -577,10 +577,24 @@ var SR = (function () {
        configured" (fail closed) rather than a retry storm. */
     serverConfig: function () {
       if (st.serverConfig) return Promise.resolve(st.serverConfig);
+      return SR.refreshServerConfig();
+    },
+
+    /* "Cannot change under a running page" was disproven the night a deploy
+       picked up SCHEDULER_* while an open tab kept gating the push button off
+       its boot-time copy. Gates that decide what a CLICK may do refetch
+       through this; a failure keeps whatever the page already knew, because a
+       network blip during a click must not zero a working config. Only a
+       response that parses replaces the cache — the boot path above still
+       fails closed to {} via the rejection branch here when nothing was ever
+       loaded. */
+    refreshServerConfig: function () {
       return req('GET', '/api/config', undefined, { quiet: true }).then(function (c) {
-        st.serverConfig = (c && typeof c === 'object') ? c : {};
-        return st.serverConfig;
-      }, function () { st.serverConfig = {}; return st.serverConfig; });
+        if (c && typeof c === 'object') st.serverConfig = c;
+        return st.serverConfig || (st.serverConfig = {});
+      }, function () {
+        return st.serverConfig || (st.serverConfig = {});
+      });
     },
 
     /* tools origins for the ?bind-spec=1 popup (D4/D5) — env-driven, cached.
@@ -4682,8 +4696,11 @@ var api = (function () {
     features: function () {
       if (!API()) return ok({ schedulerPush: false, flex: false, specBind: false,
                               mail: false, fileUpload: false, storageDriver: 'none' });
-      var cfg = SR.serverConfig();
-      return ok((cfg && cfg.features) || {});
+      /* Live read, not the boot-time cache — the flags gate user actions, and
+         the server's env can change under an open tab (see refreshServerConfig). */
+      return SR.refreshServerConfig().then(function (cfg) {
+        return (cfg && cfg.features) || {};
+      });
     }
   };
 

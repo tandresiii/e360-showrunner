@@ -116,6 +116,9 @@ app.get('/api/version', (req, res) => res.json({ version: APP_VERSION }));
 // vocabularies the UI would otherwise duplicate. No secrets, no counts, no
 // hostnames of internal services — anyone who can load the SPA can read this.
 app.get('/api/config', (req, res) => {
+  // Feature flags gate live clicks; a browser-cached copy from an older
+  // deploy must never answer for the current one.
+  res.set('Cache-Control', 'no-store');
   res.json({
     app: 'e360-showrunner',
     version: APP_VERSION,
@@ -163,6 +166,7 @@ app.get('/api/config', (req, res) => {
   });
 });
 app.get('/api/health', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
   try {
     const r = await pool.query('SELECT 1 AS ok');
     // The storage block is the first thing wiring day reads (WIRING_DAY.md §6).
