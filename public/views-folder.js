@@ -1275,6 +1275,10 @@ var ACTION_LABELS = {
   'content.status': 'moved a content piece', 'content.delete': 'deleted a content piece',
   'content.version': 'filed a content version', 'content.send': 'sent a content round',
   'content.feedback': 'recorded content feedback', 'content.seed': 'seeded pieces from the spec',
+  'dropbox.link': 'linked a Dropbox folder', 'dropbox.unlink': 'unlinked a Dropbox folder',
+  'dropbox.request': 'created a Dropbox file request',
+  'dropbox.track': 'tracked a Dropbox arrival', 'dropbox.ingest': 'ingested a copy from Dropbox',
+  'dropbox.deposit': 'deposited a file to Dropbox',
   'milestone.create': 'added a milestone', 'milestone.update': 'changed a milestone',
   'milestone.delete': 'removed a milestone',
   'template.instantiate': 'seeded the pipeline',
@@ -1575,6 +1579,14 @@ function cpVersionRow(v, p, editable) {
   var sup = v.status === 'superseded';
   var acts = '';
   if (f) acts += '<button class="btn sm ghost" ' + act('openViewer', f.id) + '>' + icon('eye') + 'View</button>';
+  /* a TRACKED round's bytes live in Dropbox (the remote third state) — say
+     where, and open the real home in a click. fileBytelessFlag speaks all
+     three byte-location truths from one place (components.js). */
+  if (f && fileIsRemote(f) && f.external_url && !f.external_missing_at) {
+    acts += '<a class="btn sm ghost" href="' + esc(f.external_url) + '" target="_blank" rel="noopener"' +
+      ' title="' + esc('Open ' + (f.external_path || 'this file') + ' in the Dropbox web UI') + '">' +
+      icon('expand') + 'Open in Dropbox</a>';
+  }
   if (editable && !v.sent_at) {
     acts += '<button class="btn sm ghost" ' + act('cpSend', v.id) +
       ' title="Records that this round went to the client — the send itself happens in your own mail">' +
@@ -1589,6 +1601,7 @@ function cpVersionRow(v, p, editable) {
     '<div class="rnote"' + (sup ? ' style="text-decoration:line-through;color:var(--muted)"' : '') + '>' +
     (f ? esc(f.name) : '<span style="color:var(--muted)">file removed — the round stands as history</span>') +
     ' <span class="mono" style="font-size:10.5px;color:var(--muted)">' + esc(measured) + '</span>' +
+    (f ? fileBytelessFlag(f) : '') +
     (sup ? ' <span class="mini">superseded — kept, never deleted</span>' : '') + '</div>' +
     (v.feedback ? '<div class="rnote" style="color:var(--text-2)">' + inlineIcon('chat') + ' ' + esc(v.feedback) +
       (v.feedback_by ? ' <span class="mini">' + esc(firstName(v.feedback_by)) + '</span>' : '') + '</div>' : '') +
@@ -1671,7 +1684,8 @@ function tabContent(show) {
       : '') + '</div></div>';
 
   if (!all.length) {
-    return head + '<div class="gear-empty">' + icon('palette') +
+    return head + dropboxPanel(show, editable) +
+      '<div class="gear-empty">' + icon('palette') +
       '<div style="font-weight:600;font-size:14px">No content pieces on this show yet</div>' +
       '<div style="font-size:12.5px;margin-top:7px;max-width:500px;margin-left:auto;margin-right:auto;line-height:1.5">' +
       'Every show owes a set of content pieces — “Sponsor loop — ribbon — 11520×90 — :30”, ' +
@@ -1710,11 +1724,171 @@ function tabContent(show) {
       '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
   }).join('');
 
-  return head + contentChasePanel(show) + bar + groups +
+  return head + dropboxPanel(show, editable) + contentChasePanel(show) + bar + groups +
     '<div class="hint">' + icon('bolt') + '<span>Every uploaded round is a real file, <b>measured</b> in the ' +
     'browser on the way up — the chip compares measured pixels to the spec and a difference is a ' +
     '<b>question</b> (stacked zones change pixel maps), never a silent accept or a hard reject. New versions ' +
     '<b>supersede</b> old ones — kept, never deleted — and “sent” is a record, not a send.</span></div>';
+}
+
+/* ============================================================ dropbox strip --
+   DROPBOX FOLDERS — where the content bytes actually live (Tom, 2026-09-10).
+   "i dont necessarily want to upload all these files to showrunner. just keep
+   track of them." So the strip TRACKS: linked folders as cards with role
+   badges (a folder may carry several — Tom's flexibility rule), a live
+   listing with a NEW badge diffed against a deliberately-reset baseline,
+   pixel specs / codec measured from the files' own bytes (probe) or reported
+   by Dropbox (media info) — never guessed — and per-entry TRACK as the
+   primary bridge into the piece ladder. Renders from DBX_UI, which
+   dbxEnsure() (app.js) hydrates; feature-flagged off features.dropbox.
+   ========================================================================== */
+var DBX_ROLE_BADGE = { incoming: 'info', to_client: 'go', to_operator: 'warn' };
+function dbxRoleBadges(link) {
+  return (link.roles || []).map(function (r) {
+    return '<span class="pill ' + esc(DBX_ROLE_BADGE[r] || 'idle') + '" title="' +
+      esc(r === 'incoming' ? 'Files arrive here — from clients or third parties'
+        : r === 'to_client' ? 'Deliverables to the client land here'
+        : 'Deliverables to the person running the show land here') +
+      '"><span class="dot"></span>' + esc(DBX_ROLE_LABEL[r] || r) + '</span>';
+  }).join(' ');
+}
+/* one entry: name · size · date · NEW · the spec line (measured or reported,
+   the title says which — parsed-from-bytes beats reported) · Track / Probe */
+function dbxEntryRow(entry, link, editable) {
+  var spec = entry.spec;
+  var specLine = '';
+  if (spec) {
+    var bits = [];
+    if (spec.w && spec.h) bits.push(spec.w + ' × ' + spec.h + 'px');
+    if (spec.duration_s) bits.push(spec.duration_s + 's');
+    if (spec.codec) bits.push(spec.codec);
+    if (spec.fps) bits.push(spec.fps + ' fps');
+    specLine = '<span class="mono" style="font-size:10.5px;color:var(--text-2)" title="' +
+      esc(spec.source === 'probe'
+        ? 'Measured from the file’s own bytes (container probe) — never guessed.'
+        : 'Reported by Dropbox’s media info — its measurement, not ours.') + '">' +
+      esc(bits.join(' · ')) + '</span>';
+  } else if (entry.spec_unreadable) {
+    specLine = '<span class="mini dep" title="' +
+      esc('The probe read this file’s header ranges and could not parse the container — only what the ' +
+          'bytes themselves say is ever shown, so it shows nothing rather than a guess.') +
+      '">container unreadable</span>';
+  }
+  var match = entry.match_piece
+    ? ' <span class="fresh-chip" title="' +
+      esc('Measured ' + entry.spec.w + ' × ' + entry.spec.h + 'px equals “' + entry.match_piece.name +
+          '”’s spec — a suggestion the Track dialog pre-selects, never an auto-file.') + '">matches ' +
+      esc(entry.match_piece.name) + '</span>'
+    : '';
+  var acts = '';
+  if (link.roles.indexOf('incoming') >= 0) {
+    acts += '<button class="btn sm ghost" ' + act('dbxTrack', link.id, entry.path) +
+      ' title="Track this arrival — it stays in Dropbox; linking it to a piece files it as the next version by reference">' +
+      icon('link') + 'Track</button> ';
+  }
+  if (!spec && !entry.spec_unreadable) {
+    acts += '<button class="btn sm ghost" ' + act('dbxProbe', link.id, entry.path) +
+      ' title="Read the container headers (bounded range reads) for pixel size, duration and codec">' +
+      icon('search') + 'Probe</button>';
+  }
+  return '<div class="next-item"><div class="txt">' + esc(entry.name) +
+    (entry.is_new ? ' <span class="pill warn" style="margin-left:4px"><span class="dot"></span>NEW</span>' : '') +
+    '<span>' + esc(fmtSize(entry.size)) +
+    (entry.server_modified ? ' · ' + esc(fmtDate(String(entry.server_modified).slice(0, 10))) : '') +
+    '</span>' + specLine + match + '</div>' +
+    '<span style="display:inline-flex;gap:6px">' + acts + '</span></div>';
+}
+function dbxLinkCard(link, editable) {
+  var open = !!DBX_UI.open[link.id];
+  var entries = link.entries;
+  var canDeposit = link.roles.indexOf('to_client') >= 0 || link.roles.indexOf('to_operator') >= 0;
+  var newBadge = link.new_count
+    ? ' <span class="pill warn" title="New since the last mark-seen"><span class="dot"></span>' +
+      link.new_count + ' NEW</span>'
+    : '';
+  var count = entries ? entries.length + ' file' + (entries.length === 1 ? '' : 's') : '';
+  var chips =
+    '<button class="btn sm ghost" ' + act('dbxOpen', link.id) + '>' +
+      icon(open ? 'chevD' : 'chevR') + (count || 'Listing') + '</button> ' +
+    (link.file_request_url
+      ? '<button class="btn sm ghost" ' + act('dbxCopyUrl', link.id) +
+        ' title="Copy the file-request URL — send it to whoever owes the files">' +
+        icon('link') + 'Copy request URL</button> '
+      : '') +
+    '<a class="btn sm ghost" href="' + esc(link.external_url) + '" target="_blank" rel="noopener"' +
+      ' title="Open this folder in the Dropbox web UI">' + icon('expand') + 'Open in Dropbox</a> ' +
+    (editable && canDeposit
+      ? '<button class="btn sm ghost" ' + act('dbxDeposit', link.id) +
+        ' title="Upload one of this show’s stored files into this folder">' +
+        icon('upload') + 'Send a file here</button> '
+      : '') +
+    (editable
+      ? '<button class="iconbtn" title="Unlink — removes the link only; nothing in Dropbox is touched" ' +
+        act('dbxUnlink', link.id) + '>' + icon('x') + '</button>'
+      : '');
+  var body = '';
+  if (open) {
+    if (entries === null) {
+      body = '<div class="hint" style="margin:8px 0 0">' + icon('alert') + '<span>' +
+        esc(link.error || 'Could not list this folder.') +
+        '</span></div>';
+    } else if (!entries.length) {
+      body = '<div class="empty" style="padding:10px">' +
+        esc(link.note || 'Nothing in this folder yet.') + '</div>';
+    } else {
+      body = '<div class="next-list" style="margin-top:8px">' +
+        entries.map(function (e) { return dbxEntryRow(e, link, editable); }).join('') + '</div>' +
+        (editable
+          ? '<div style="margin-top:8px"><button class="btn sm ghost" ' + act('dbxSeen', link.id) +
+            ' title="Reset the NEW badge — new-since-last-look measures from this moment">' +
+            icon('eye') + 'Mark seen</button></div>'
+          : '');
+    }
+  }
+  return '<div class="panel" style="margin-bottom:10px;padding:12px 14px">' +
+    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+    '<b style="font-weight:600">' + esc(link.label || link.path) + '</b>' +
+    dbxRoleBadges(link) + newBadge +
+    '<span class="mono" style="font-size:10.5px;color:var(--muted)">' + esc(link.path) + '</span>' +
+    '<span style="margin-left:auto;display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap">' +
+    chips + '</span></div>' + body + '</div>';
+}
+function dropboxPanel(show, editable) {
+  var st = DBX_UI.byShow[show.id];
+  if (!st) {
+    dbxEnsure(show.id);
+    return '<div class="hint" style="margin-bottom:14px">' + icon('folder') +
+      '<span>Checking linked Dropbox folders…</span></div>';
+  }
+  if (st.off) return '';
+  if (st.error) {
+    return '<div class="hint" style="margin-bottom:14px">' + icon('alert') + '<span>' +
+      esc('Dropbox: ' + st.error) + ' </span>' +
+      '<button class="btn sm ghost" ' + act('dbxRefresh', show.id) + '>' + icon('refresh') +
+      'Retry</button></div>';
+  }
+  var links = st.links || [];
+  var headBtns = editable
+    ? '<button class="btn sm ghost" ' + act('dbxLink', show.id) + '>' + icon('folder') + 'Link a folder</button> ' +
+      '<button class="btn sm ghost" ' + act('dbxLinkRequest', show.id) + '>' + icon('link') + 'Link a file request</button> ' +
+      '<button class="btn sm ghost" ' + act('dbxNewRequest', show.id) + '>' + icon('plus') + 'New file request</button> '
+    : '';
+  var head2 = '<div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:2px 0 8px">' +
+    '<h3 style="margin:0;font-size:13px">Dropbox folders' +
+    (links.length ? ' · ' + links.length : '') + '</h3>' +
+    '<span style="margin-left:auto;display:inline-flex;gap:6px;flex-wrap:wrap">' + headBtns +
+    '<button class="iconbtn" title="Refresh the folder listings" ' + act('dbxRefresh', show.id) + '>' +
+    icon('refresh') + '</button></span></div>';
+  if (!links.length) {
+    return '<div style="margin-bottom:14px">' + head2 +
+      (editable
+        ? '<div class="hint">' + icon('folder') + '<span>Dropbox is where the content bytes live; ' +
+          'Showrunner tracks them. Link the client’s incoming folder (or a file request), the ' +
+          'deliverables folder, the operator’s folder — a folder can be one, the other, or both.</span></div>'
+        : '') + '</div>';
+  }
+  return '<div style="margin-bottom:14px">' + head2 +
+    links.map(function (l) { return dbxLinkCard(l, editable); }).join('') + '</div>';
 }
 
 /* ---- season row chip: content 7/12, the photo-chip device ----------------- */

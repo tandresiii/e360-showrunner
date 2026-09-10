@@ -123,7 +123,7 @@ Adding "Motion Graphics" with three new lanes is two rows, not a deploy.
 
 ---
 
-## Tables (41)
+## Tables (42)
 
 ### Core hierarchy
 
@@ -207,11 +207,26 @@ template in place instead of duplicating it. Human-authored templates have
 
 **`files`** — metadata only; bytes live behind `lib/storage.js`
 *(idx: `project_id`, `show_id`, `kind`, `status`, `job_id`, `source_ref`)*
-`id · project_id · show_id · name · ext · kind · spec_type · artifact · ver · dim · meta · chain_key · nas_path · size BIGINT · uploaded_by · amount NUMERIC(12,2) · vendor · doc_date · job_id · attached_to · status · provenance JSONB · source_ref · taken_at · width · height · caption · tags TEXT[] · shot_by · recap_pick BOOL · thumb_path · created_at`
+`id · project_id · show_id · name · ext · kind · spec_type · artifact · ver · dim · meta · chain_key · nas_path · size BIGINT · uploaded_by · amount NUMERIC(12,2) · vendor · doc_date · job_id · attached_to · status · provenance JSONB · source_ref · taken_at · width · height · caption · tags TEXT[] · shot_by · recap_pick BOOL · thumb_path · duration_s · external_store · external_path · external_rev · external_missing_at · created_at`
 
 A **photo** is a `files` row with `kind='photo'`. A **financial doc** is a
 `files` row with `amount`/`vendor`/`doc_date`/`job_id` set. One table, one
 lifecycle, one set of guardrails.
+
+A **remote locator** (Dropbox pass, 2026-09-10) is a `files` row with
+`external_store='dropbox'`: the record lives here, the bytes live at
+`external_path` (pinned by `external_rev`) and are **never copied** — Tom: "i
+dont necessarily want to upload all these files to showrunner. just keep track
+of them." `size` is Dropbox's own reported count; `width`/`height`/`duration_s`
+land only from the media probe / Dropbox media info (measured, the §12b rule
+server-side). `GET /files/:id/content` **proxies** a remote row's bytes through
+the server (a window, not a copy); the byte PUT refuses it (409 — Showrunner
+never overwrites the Dropbox copy). This is a **third honest byte-state**,
+distinct from the 9/3 "no document — metadata only" flag: remote-by-design is
+not missing bytes, and `public/components.js fileBytelessFlag` speaks all three
+truths from one place. `external_missing_at` is the honest degradation — set
+when a live Dropbox look finds the path gone (the answer names where the bytes
+*were*: "moved or deleted in Dropbox"), cleared when it answers again.
 
 **NAS path convention** (`lib/storage.js buildNasPath`):
 ```
@@ -406,6 +421,28 @@ which is what the finance feed reads for budget events.
 > columns onto a shared table and teaching every proofs surface about
 > piece-anchored rounds — the same forced marriage `tech_reports` refused with
 > `deliverables.kind`. A clean own-table won.
+
+**`show_dropbox_links`** *(idx: `show_id`)*
+`id · show_id (NOT NULL) · project_id · path (NOT NULL) · label · roles TEXT[] · file_request_id · file_request_url · last_checked_at · snapshot JSONB · stamps`
+
+> One row per Dropbox folder a show tracks (Tom, 2026-09-10): "incoming files
+> from clients, deliverables to clients, and lastly deliverables to person
+> running the show — which might be one, the other, or both." Hence `roles`
+> is a **set** — subset of `DROPBOX_ROLES` (`incoming`/`to_client`/
+> `to_operator`), at least one, several allowed — and multiple links per show.
+> The roles are load-bearing: track/ingest read only from an `incoming`
+> folder, deposit writes only to a `to_client`/`to_operator` one.
+> `file_request_id`/`file_request_url` are set when the link IS a file
+> request's destination — the URL also accepts a **hand-paste** on a plain
+> folder link, so copy-to-clipboard never depends on the `file_requests.*`
+> scopes. `snapshot` is `{ seen: {pathLower → {size, server_modified}},
+> probes: {pathLower@rev → media spec} }`: `seen` is the NEW-badge baseline
+> (new-since-last-look, reset by "mark seen"), `probes` caches the bounded
+> range-read container probe (`lib/mediaprobe.js`) per file **revision** —
+> measured or an honest `unreadable`, never a guess, once per rev ever.
+> A link is a **pointer**: unlink and both cascades delete the row and touch
+> **nothing in Dropbox** — the route holds no Dropbox client call at all,
+> which the fake's zero-deletes counter and a mutation test stand guard over.
 
 ### Conversation
 
@@ -750,7 +787,7 @@ deletes it, and asserts **zero orphans** in all 28.
 
 ---
 
-## API surface (209 routes)
+## API surface (220 routes)
 
 Human routes return **snake_case** records matching `public/data.js`; agent
 routes speak **camelCase** per `AGENT_API.md`. Request bodies accept **both**
@@ -821,6 +858,35 @@ Content     GET /api/shows/:id/content · GET /api/content?project_id=&show_id=&
              zones, stack-aware; no spec / no zones answers honestly)
             POST /api/shows/:id/content-seed  (picks = zone INDEXES; the server
              re-derives every pixel number — a size never arrives client-typed)
+Dropbox     GET /api/dropbox/browse?path= (folder picker) · GET /api/dropbox/file-requests
+            GET /api/shows/:id/dropbox-links   (links + per-link LIVE listing:
+             entries with is_new vs the seen-snapshot, media specs, match_piece
+             suggestions; per-link errors degrade alone; runs the missing-file
+             sweep over tracked remote rows)
+            POST /api/shows/:id/dropbox-links  ({path, roles[], label?,
+             file_request_url?} — path verified, roles whitelisted loud — or
+             {file_request_id} resolving destination+url)
+            POST /api/shows/:id/dropbox-links/create-file-request  ({title} —
+             mints the request in Dropbox, links its destination as incoming,
+             returns the URL)
+            DELETE /api/shows/:id/dropbox-links/:linkId  (LOCAL ONLY — holds no
+             Dropbox call; works even unconfigured; mutation-tested)
+            POST /api/dropbox-links/:id/seen   (rewrite the NEW-badge baseline)
+            POST /api/dropbox-links/:id/probe  ({entry_path} — bounded
+             range-read container probe; signed-in: measuring is reading;
+             cached per rev in the link snapshot)
+            POST /api/dropbox-links/:id/track  ({entry_path, content_piece_id}
+             — THE PRIMARY BRIDGE: a version whose files row is a remote
+             locator, zero bytes copied; gate = canWorkPiece, the step-owner
+             rule, same as filing a version by hand)
+            POST /api/dropbox-links/:id/ingest ({entry_path, content_piece_id?}
+             — the EXPLICIT archival copy through the real storage write)
+            POST /api/dropbox-links/:id/deposit ({file_id} — NAS bytes out to a
+             to_client/to_operator folder; byteless rows honestly 404)
+            (writes are pm+ AND canEditProject except track's step-owner gate;
+             every Dropbox-talking route answers 501 while DROPBOX_* is unset,
+             and a scope the team admin has not granted answers a NAMED 501
+             from Dropbox's own missing_scope error — dynamic, self-healing)
 Jobs        GET /api/jobs[/:id] · POST /api/jobs · PUT/DELETE /api/jobs/:id
 Budget      GET/POST /api/jobs/:id/budget · PUT/DELETE /api/budget-lines/:id
 Expenses    GET /api/expenses · POST /api/expenses · PUT/DELETE /api/expenses/:id
@@ -1454,6 +1520,7 @@ surfaces the one real operator edit (field width 225 vs 222).
 > Dev and CI are unaffected — `scripts/smoke.js`, `scripts/storage-test.js` and
 > the scratchpad harnesses all set it explicitly.
 | `SHOWRUNNER_NAS_ROOT` | `\\E360-NAS\Showrunner` | the logical root every `nas_path` is expressed against. A **label**, not a route — operators read it out of the UI and paste it into Explorer; nothing dials it |
+<<<<<<< HEAD
 | `BACKUP_ENABLED` | *(unset = on)* | `0` disables the **scheduled** nightly dump; the manual `POST /api/admin/backup` still works |
 | `BACKUP_HOUR_UTC` | `8` | when the nightly fires. 08:00 UTC ≈ 3am Central; being a UTC anchor it drifts an hour across DST, deliberately |
 | `BACKUP_KEEP` | `14` | retention: the newest N daily dumps kept on the NAS |
@@ -1484,6 +1551,12 @@ database being backed up on purpose: it is operational telemetry, it rides
 inside every dump, and the NAS listing is the recovery-time source of truth.
 Hangs off no project/show — deliberately **not** in the delete cascades.
 Trimmed to the newest 500 rows.
+=======
+| `DROPBOX_APP_KEY` / `DROPBOX_APP_SECRET` | *(unset)* | the server-side Dropbox app credentials. All three unset ⇒ `features.dropbox` false and every Dropbox route is an honest 501 naming them |
+| `DROPBOX_REFRESH_TOKEN` | *(unset)* | the offline refresh token; exchanged at `/oauth2/token` for ~4 h access tokens, cached in-process (their TTL − 5 min) with one retry on 401. **Scopes are the team admin's grant and are handled DYNAMICALLY** — a capability the token lacks answers a named 501 built from Dropbox's own `missing_scope` error, and starts working on re-authorize with no deploy |
+| `DROPBOX_TIMEOUT_MS` / `DROPBOX_CONTENT_TIMEOUT_MS` | `20000` / `120000` | per-request budgets, RPC vs byte-moving |
+| `DROPBOX_API_BASE` / `DROPBOX_CONTENT_BASE` | *(the real hosts)* | **tests only** — point `lib/dropbox.js` at `scripts/fake-dropbox.js`. Production never sets them |
+>>>>>>> 10a2b29 (Dropbox folders on a show: track in place, file requests, the media probe)
 
 ### Storage — the NAS byte layer (`lib/storage.js`)
 

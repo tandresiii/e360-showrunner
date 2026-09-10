@@ -1143,7 +1143,7 @@ function drawViewer(show) {
     /* the byteless truth, ABOVE the metadata it qualifies — this panel is the
        screen that finally told Brendon, and now it says so before the rows
        instead of leaving a download error to break the news */
-    (fileIsByteless(f) ? '<div style="margin:2px 0 10px">' + fileBytelessFlag(f) + '</div>' : '') +
+    ((fileIsByteless(f) || fileIsRemote(f)) ? '<div style="margin:2px 0 10px">' + fileBytelessFlag(f) + '</div>' : '') +
     metaRow('Type', fileTypeLabel(f, show)) +
     finRows +
     metaRow('Version', f.ver) + metaRow('Size', fmtSize(f.size)) + metaRow('Dimensions', f.dim) +
@@ -1253,7 +1253,7 @@ function drawPhotoMeta(show, f, title, hasBytes) {
         : 'The original lives on the NAS; the record here is metadata + a thumbnail.');
   $('#vMeta').innerHTML = '<div class="mh"><b>Photo details</b></div>' +
     '<div class="bound"><div class="bi">' + icon('cam') + '</div><div class="bt"><span>Tagged to</span><b>' + esc(title) + '</b></div></div>' +
-    (fileIsByteless(f) ? '<div style="margin:2px 0 10px">' + fileBytelessFlag(f) + '</div>' : '') +
+    ((fileIsByteless(f) || fileIsRemote(f)) ? '<div style="margin:2px 0 10px">' + fileBytelessFlag(f) + '</div>' : '') +
     capBlock + tagRow + rows +
     '<div class="ph-nas">' + icon('server') + '<span>' + esc(f.nas_path || '') + '</span></div>' +
     '<div class="acts">' + acts.join('') + '</div>' +

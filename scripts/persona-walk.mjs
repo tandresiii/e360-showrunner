@@ -183,6 +183,14 @@ async function main() {
   delete process.env.STORAGE_ROOT;
   delete process.env.STORAGE_DRIVER;
   delete process.env.SCHEDULER_BASE_URL;
+  // §42 begins UNCONFIGURED on purpose, and a developer machine may carry
+  // real Dropbox credentials this walk must never touch. The fake's land
+  // mid-walk.
+  delete process.env.DROPBOX_APP_KEY;
+  delete process.env.DROPBOX_APP_SECRET;
+  delete process.env.DROPBOX_REFRESH_TOKEN;
+  delete process.env.DROPBOX_API_BASE;
+  delete process.env.DROPBOX_CONTENT_BASE;
   process.env.ADMIN_PASSWORD = 'walk-admin-pw';
 
   const srv = require(path.join(APP, 'server.js'));
@@ -2416,6 +2424,241 @@ async function main() {
   const bkStale = (await GET('/api/health')).body.backup;
   ok('a failing-only ledger while DISABLED stays stale:false — stale is an ENABLED-system alarm',
      bkStale.stale === false && bkStale.lastRun && bkStale.lastRun.status === 'failed', bkStale);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('43 · dropbox folders — the content bytes\' real home  (Tom, 2026-09-10)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "Will need the deliverables to be able to connect file request folders to
+  // shows, as well as regular ones … incoming files from clients,
+  // deliverables to clients, and lastly deliverables to person running the
+  // show — which might be one, the other, or both." And the correction that
+  // shaped the whole build: "i dont necessarily want to upload all these
+  // files to showrunner. just keep track of them."
+  //
+  // So the PRIMARY path walked here is TRACK IN PLACE: an arrival is seen in
+  // the live listing, measured where it lies (Dropbox media info + the
+  // bounded range probe), linked to an owed piece as a version BY REFERENCE,
+  // walked to approved — and the whole flow runs on THIS server, which has
+  // NO STORAGE AT ALL (§12): tracking needs none, which is exactly Tom's
+  // point. The fake's download log is the other half of the proof: probe
+  // RANGE reads only, never a full copy. Ingest-a-copy and deposit — the two
+  // verbs that genuinely move bytes — ride §34's child-server device.
+
+  // ── every affordance reachable: data-act → ACTIONS → seam ────────────────
+  reach('The Folders strip (link a folder via the browse picker)', {
+    seam: ['dropboxEnabled', 'dropboxBrowse', 'listDropboxLinks', 'addDropboxLink'],
+    action: ['dbxLink', 'dbxBrowseTo', 'dbxLinkCommit', 'dbxRefresh'] });
+  reach('Link / mint a file request · copy its URL', {
+    seam: ['dropboxFileRequests', 'createDropboxFileRequest'],
+    action: ['dbxLinkRequest', 'dbxRequestPick', 'dbxNewRequest', 'dbxNewRequestCommit', 'dbxCopyUrl'] });
+  reach('The listing: expand, mark seen, probe specs', {
+    seam: ['dropboxMarkSeen', 'dropboxProbe'],
+    action: ['dbxOpen', 'dbxSeen', 'dbxProbe'] });
+  reach('Track in place (primary) / ingest a copy (explicit)', {
+    seam: ['dropboxTrack', 'dropboxIngest'],
+    action: ['dbxTrack', 'dbxTrackCommit', 'dbxIngestCommit'] });
+  reach('Deposit a file · unlink', {
+    seam: ['dropboxDeposit', 'deleteDropboxLink'],
+    action: ['dbxDeposit', 'dbxDepositCommit', 'dbxUnlink'] });
+
+  // ── the mechanical half: the copy that keeps the promises ────────────────
+  ok('the unlink confirm says LOCAL-ONLY in words — nothing in Dropbox is touched',
+     /removes the LINK only — nothing in Dropbox is touched, deleted or moved/.test(APP_JS));
+  ok('the track modal says the file STAYS in Dropbox — no copy made',
+     /stays in Dropbox<\/b>/.test(APP_JS) && /no copy made/.test(APP_JS));
+  ok('the strip is feature-flagged: the seam consumes features.dropbox and fails closed',
+     /features\.dropbox/.test(API_JS));
+  ok('role badges render per role — a folder wears every hat it holds',
+     /function dbxRoleBadges/.test(SRC['views-folder.js']) &&
+     /dbxRoleBadges\(link\)/.test(SRC['views-folder.js']));
+  ok('the NEW badge and Copy-request-URL affordances render on the card',
+     /NEW<\/span>/.test(SRC['views-folder.js']) && /Copy request URL/.test(SRC['views-folder.js']));
+  ok('spec provenance is on the chip\'s face — measured-from-bytes vs reported-by-Dropbox',
+     /Measured from the file’s own bytes/.test(SRC['views-folder.js']) &&
+     /Reported by Dropbox’s media info/.test(SRC['views-folder.js']));
+  // the THIRD byte-location state — remote-by-design must never read as
+  // missing bytes, and the missing-bytes flag must never claim a remote row
+  ok('components.js: fileIsByteless EXCLUDES remote rows — the two states cannot conflate',
+     /function fileIsByteless\([\s\S]{0,200}!fileIsRemote\(f\)/.test(SRC['components.js']));
+  ok('…and the flag speaks all three truths: in-Dropbox, was-in-Dropbox-now-gone, metadata-only',
+     /in Dropbox · /.test(SRC['components.js']) &&
+     /was in Dropbox — no longer found/.test(SRC['components.js']) &&
+     /no document — metadata only/.test(SRC['components.js']));
+  ok('the version ladder marks a tracked round and deep-links its real home',
+     /Open in Dropbox/.test(SRC['views-folder.js']) &&
+     /fileBytelessFlag\(f\)/.test(SRC['views-folder.js']));
+
+  // ── production shape FIRST: unconfigured is a flag off + honest 501s ─────
+  const wCfg0 = await GET('/api/config');
+  ok('with no DROPBOX_* env the feature flag is OFF — the strip renders as nothing',
+     wCfg0.body.features.dropbox === false);
+  ok('…and the routes answer the honest 501 naming the env vars',
+     (await GET('/api/dropbox/browse?path=/', { token: T.brenden })).status === 501 &&
+     (await GET(`/api/shows/${SHOW}/dropbox-links`, { token: T.omar })).status === 501);
+
+  // ── wire the fake — in-process, same trick as the fake scheduler ─────────
+  const { startFakeDropbox } = require(path.join(APP, 'scripts', 'fake-dropbox.js'));
+  const wDbx = await startFakeDropbox();
+  process.env.DROPBOX_APP_KEY = 'fake-key';
+  process.env.DROPBOX_APP_SECRET = 'fake-secret';
+  process.env.DROPBOX_REFRESH_TOKEN = 'fake-refresh';
+  process.env.DROPBOX_API_BASE = wDbx.url;
+  process.env.DROPBOX_CONTENT_BASE = wDbx.url;
+  require(path.join(APP, 'lib', 'dropbox.js')).dropboxResetToken();
+  ok('the flag flips with the env — no restart, no cache lie',
+     (await GET('/api/config')).body.features.dropbox === true);
+
+  // the client's shared folder: two arrivals, one of them sized EXACTLY like
+  // the North-stack piece the spec seeded in §41 (512×256)
+  wDbx.seed.folder('/Clients/AVCA/Incoming');
+  wDbx.seed.folder('/Clients/AVCA/Deliverables');
+  const wPng = wDbx.seed.png(512, 256);
+  wDbx.seed.file('/Clients/AVCA/Incoming/north_stack_v1.png', wPng);
+  wDbx.seed.file('/Clients/AVCA/Incoming/notes.pdf', Buffer.alloc(2048, 7));
+
+  // ── Brenden links the folders — one incoming, one dual-role delivery ─────
+  ok('Pat (owns nothing) cannot link a folder',
+     (await POST(`/api/shows/${SHOW}/dropbox-links`,
+       { path: '/Clients/AVCA/Incoming', roles: ['incoming'] }, { token: T.pat })).status === 403);
+  const wLkIn = await POST(`/api/shows/${SHOW}/dropbox-links`,
+    { path: '/Clients/AVCA/Incoming', roles: ['incoming'], label: 'AVCA uploads' },
+    { token: T.brenden });
+  ok('Brenden links the incoming folder', wLkIn.status === 200, wLkIn.body);
+  const wLkOut = await POST(`/api/shows/${SHOW}/dropbox-links`,
+    { path: '/Clients/AVCA/Deliverables', roles: ['to_client', 'to_operator'] },
+    { token: T.brenden });
+  ok('…and the delivery folder wears BOTH hats — "one, the other, or both", literally',
+     wLkOut.status === 200 && wLkOut.body.roles.join(',') === 'to_client,to_operator');
+
+  // ── the listing renders, the diff flips after mark-seen ──────────────────
+  const wLs1 = await GET(`/api/shows/${SHOW}/dropbox-links`, { token: T.omar });
+  const wIn1 = wLs1.body.links.find((l) => l.id === wLkIn.body.id);
+  ok('Omar sees the live listing — both arrivals NEW before any baseline',
+     wLs1.status === 200 && wIn1.entries.length === 2 && wIn1.new_count === 2, wIn1 && wIn1.new_count);
+  await POST(`/api/dropbox-links/${wLkIn.body.id}/seen`, {}, { token: T.brenden });
+  wDbx.seed.file('/Clients/AVCA/Incoming/late.png', wDbx.seed.png(64, 64));
+  const wLs2 = await GET(`/api/shows/${SHOW}/dropbox-links`, { token: T.omar });
+  const wIn2 = wLs2.body.links.find((l) => l.id === wLkIn.body.id);
+  ok('mark seen, a fresh drop lands — ONLY it is NEW: new-since-last-look, not unread-counts',
+     wIn2.new_count === 1 && wIn2.entries.find((e) => e.name === 'late.png').is_new
+     && !wIn2.entries.find((e) => e.name === 'notes.pdf').is_new, wIn2.new_count);
+
+  // ── a file request, minted and linked, URL in hand ───────────────────────
+  const wMint = await POST(`/api/shows/${SHOW}/dropbox-links/create-file-request`,
+    { title: 'AVCA content drop' }, { token: T.brenden });
+  ok('Brenden mints a file request — created over in Dropbox, linked as incoming, URL surfaced',
+     wMint.status === 200 && /^https:/.test(wMint.body.url)
+     && wMint.body.link.roles.join(',') === 'incoming'
+     && wDbx.state.fileRequests.some((r) => r.title === 'AVCA content drop'), wMint.body);
+
+  // ── the probe measures where the file LIES — range reads only ────────────
+  const wProbe = await POST(`/api/dropbox-links/${wLkIn.body.id}/probe`,
+    { entry_path: '/Clients/AVCA/Incoming/north_stack_v1.png' }, { token: T.omar });
+  ok('the probe reads the PNG\'s own IHDR — 512×256, measured, never guessed',
+     wProbe.status === 200 && wProbe.body.w === 512 && wProbe.body.h === 256, wProbe.body);
+  ok('…by RANGE reads only — no full copy of anything has moved anywhere',
+     wDbx.state.downloads.length > 0 && wDbx.state.downloads.every((d) => d.ranged),
+     wDbx.state.downloads.map((d) => [d.path, d.ranged]));
+  const wLs3 = await GET(`/api/shows/${SHOW}/dropbox-links`, { token: T.brenden });
+  const wNs = wLs3.body.links.find((l) => l.id === wLkIn.body.id)
+    .entries.find((e) => e.name === 'north_stack_v1.png');
+  const northPiece = (await GET(`/api/shows/${SHOW}/content`, { token: T.brenden }))
+    .body.pieces.find((p) => p.name === 'North stack');
+  ok('the measured 512×256 MATCHES the spec-seeded North-stack piece — suggested by name, a human confirms',
+     !!northPiece && wNs.match_piece && wNs.match_piece.id === northPiece.id, wNs.match_piece);
+
+  // ── TRACK IN PLACE — the primary path, on a server with NO storage ───────
+  const wTrk = await POST(`/api/dropbox-links/${wLkIn.body.id}/track`,
+    { entry_path: '/Clients/AVCA/Incoming/north_stack_v1.png', content_piece_id: northPiece.id },
+    { token: T.brenden });
+  ok('the arrival becomes the piece\'s v1 BY REFERENCE — bytes stay in Dropbox',
+     wTrk.status === 200 && wTrk.body.version.version_n === 1
+     && wTrk.body.file.external_store === 'dropbox'
+     && wTrk.body.file.external_path === '/Clients/AVCA/Incoming/north_stack_v1.png'
+     && !wTrk.body.file.nas_path, wTrk.body.file);
+  ok('…with the PROBED dims on the row — 512×256 really measured, and Dropbox\'s own size',
+     wTrk.body.file.width === 512 && wTrk.body.file.height === 256
+     && Number(wTrk.body.file.size) === wPng.length, wTrk.body.file);
+  ok('…and it earns the ✓ against the piece\'s spec — measured agreement, no question',
+     ((await GET(`/api/shows/${SHOW}/content`, { token: T.omar })).body.pieces
+       .find((p) => p.id === northPiece.id) || {}).match === true);
+  ok('ZERO NAS WRITES: this server has no storage AND the fake served only the probe\'s ranges',
+     wDbx.state.downloads.every((d) => d.ranged) && wDbx.state.uploads.length === 0);
+  const wApproved = await PUT(`/api/content/${northPiece.id}/status`,
+    { status: 'approved' }, { token: T.brenden });
+  ok('Brenden walks the tracked piece to approved — the pipeline closes over a file Showrunner never held',
+     wApproved.status === 200 && wApproved.body.status === 'approved');
+
+  // ── ingest + deposit — the byte-moving verbs, on §34's child server ──────
+  // ASYNC spawn, not spawnSync, and the difference is load-bearing: the fake
+  // Dropbox lives in THIS process's event loop, and the child's ingest must
+  // reach it — a spawnSync would block the loop and deadlock the child
+  // against a fake that can never answer. §34's binds could stay sync
+  // because that child needed nothing from its parent but the database.
+  const wByteVerbs = await (() => {
+    const script =
+      `(async () => {
+        const srv = require(${JSON.stringify(path.join(APP, 'server.js').replace(/\\/g, '/'))});
+        const server = await srv.boot();
+        const base = 'http://127.0.0.1:' + server.address().port;
+        const login = await fetch(base + '/api/auth/login', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: 'brenden', password: ${JSON.stringify(PW)} }) });
+        const tok = (await login.json()).token;
+        const H = { 'Content-Type': 'application/json', 'x-auth-token': tok };
+        const ingest = await (await fetch(base + '/api/dropbox-links/' + ${Number(wLkIn.body.id)} + '/ingest', {
+          method: 'POST', headers: H,
+          body: JSON.stringify({ entry_path: '/Clients/AVCA/Incoming/north_stack_v1.png' }) })).json();
+        const deposit = await (await fetch(base + '/api/dropbox-links/' + ${Number(wLkOut.body.id)} + '/deposit', {
+          method: 'POST', headers: H,
+          body: JSON.stringify({ file_id: ingest.file && ingest.file.id }) })).json();
+        console.log('WALKDBX ' + JSON.stringify({ ingest, deposit }));
+        server.close();
+        process.exit(0);
+      })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });`;
+    return new Promise((resolve) => {
+      const { spawn } = require('node:child_process');
+      const child = spawn(process.execPath, ['-e', script], {
+        env: { ...process.env, PORT: '0', SWEEP_ON_BOOT: '0',
+               STORAGE_ROOT: path.join(os.tmpdir(), 'sr-walk-dbx-storage') }
+      });
+      let out = '';
+      let errOut = '';
+      child.stdout.on('data', (c) => { out += c; });
+      child.stderr.on('data', (c) => { errOut += c; });
+      child.on('exit', () => {
+        const m = out.match(/WALKDBX (.*)/);
+        if (!m) console.error('  (dbx child failed)', errOut.slice(0, 400));
+        resolve(m ? JSON.parse(m[1]) : { ingest: {}, deposit: {} });
+      });
+    });
+  })();
+  ok('INGEST A COPY (child server with storage): real bytes land — size IS the stored byte count',
+     wByteVerbs.ingest && wByteVerbs.ingest.file
+     && Number(wByteVerbs.ingest.file.size) === wPng.length
+     && !!wByteVerbs.ingest.file.nas_path, wByteVerbs.ingest && wByteVerbs.ingest.file);
+  ok('DEPOSIT: the copy goes out to the dual-role delivery folder — the fake counted the bytes',
+     wByteVerbs.deposit && wByteVerbs.deposit.ok === true
+     && wByteVerbs.deposit.size === wPng.length
+     && wDbx.state.uploads.some((u) => u.size === wPng.length), wByteVerbs.deposit);
+
+  // ── unlink leaves Dropbox untouched — the invariant, witnessed ───────────
+  ok('Pat cannot unlink either',
+     (await DEL(`/api/shows/${SHOW}/dropbox-links/${wLkOut.body.id}`, { token: T.pat })).status === 403);
+  const wUnl = await DEL(`/api/shows/${SHOW}/dropbox-links/${wLkOut.body.id}`, { token: T.brenden });
+  ok('Brenden unlinks the delivery folder — the answer SAYS it touched nothing',
+     wUnl.status === 200 && wUnl.body.touched_dropbox === false, wUnl.body);
+  ok('THE INVARIANT: the fake counted ZERO remote deletes across the entire walk — ' +
+     'the folder, the deposit and every arrival still exist in Dropbox',
+     wDbx.state.deletes === 0 && wDbx.state.entries.has('/clients/avca/deliverables'),
+     wDbx.state.deletes);
+
+  await wDbx.close();
+  delete process.env.DROPBOX_APP_KEY;
+  delete process.env.DROPBOX_APP_SECRET;
+  delete process.env.DROPBOX_REFRESH_TOKEN;
+  delete process.env.DROPBOX_API_BASE;
+  delete process.env.DROPBOX_CONTENT_BASE;
 
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);

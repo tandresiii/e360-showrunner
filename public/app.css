@@ -222,6 +222,12 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
   font-family:var(--font-mono); font-size:9.5px; font-weight:600; letter-spacing:.04em; text-transform:uppercase;
   color:var(--warn)}
 .file-nobytes svg{width:11px; height:11px; flex:none}
+/* the THIRD byte-location state (Dropbox pass): remote by design — an info
+   accent, deliberately NOT the missing-bytes warn, because nothing is wrong */
+.file-remote{display:inline-flex; align-items:center; gap:4px; margin-top:5px;
+  font-size:10.5px; color:var(--info, var(--accent)); max-width:100%; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap}
+.file-remote svg{width:11px; height:11px; flex:none}
 /* The recovery chip — takes the Download chip's spot (a byteless row has no
    Download) and wears warn at rest, because it marks a row that needs a
    person, not a row that is fine. */

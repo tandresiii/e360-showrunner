@@ -3138,6 +3138,256 @@ var api = (function () {
         });
     },
 
+    /* ================= DROPBOX FOLDERS ==================================
+       Where the content bytes actually live (Tom, 2026-09-10). Dropbox is
+       the home; Showrunner TRACKS — the primary bridge is track-in-place (a
+       version referencing the Dropbox file, zero bytes copied) and
+       ingest-a-copy is the explicit archival exception.
+       GET  /api/dropbox/browse?path=            -> dropboxBrowse(path)
+       GET  /api/dropbox/file-requests           -> dropboxFileRequests()
+       GET  /api/shows/:id/dropbox-links         -> listDropboxLinks(showId)
+       POST /api/shows/:id/dropbox-links         -> addDropboxLink(showId, body)
+       POST /api/shows/:id/dropbox-links/create-file-request
+                                                 -> createDropboxFileRequest(showId, title)
+       DELETE /api/shows/:id/dropbox-links/:lid  -> deleteDropboxLink(showId, linkId)
+                                                    [LOCAL only — Dropbox untouched]
+       POST /api/dropbox-links/:id/seen          -> dropboxMarkSeen(linkId)
+       POST /api/dropbox-links/:id/probe         -> dropboxProbe(linkId, entryPath)
+       POST /api/dropbox-links/:id/track         -> dropboxTrack(linkId, entryPath, pieceId)
+       POST /api/dropbox-links/:id/ingest        -> dropboxIngest(linkId, entryPath, pieceId?)
+       POST /api/dropbox-links/:id/deposit       -> dropboxDeposit(linkId, fileId)
+       ==================================================================== */
+    /* Is the integration wired on this server? Env-driven, fetched with the
+       config, fails CLOSED — an unreachable config endpoint means "no
+       Dropbox", the honest answer. Demo mode says yes: the twins render. */
+    dropboxEnabled: function () {
+      if (!API()) return ok(true);
+      return SR.serverConfig().then(function (c) {
+        return !!(c && c.features && c.features.dropbox);
+      }, function () { return false; });
+    },
+    dropboxBrowse: function (path) {
+      if (!API()) {
+        var node = DBX_DEMO_BROWSE[path || '/'];
+        return node ? ok(node) : ok({ path: path || '/', folders: [], file_count: 0 });
+      }
+      return SR.get('/api/dropbox/browse' + SR.qs({ path: path || '' }));
+    },
+    dropboxFileRequests: function () {
+      if (!API()) return ok(DBX_DEMO_FILE_REQUESTS.slice());
+      return SR.get('/api/dropbox/file-requests');
+    },
+    listDropboxLinks: function (showId) {
+      if (!API()) return ok({ links: dbxLinksForShow(showId) });
+      return SR.get('/api/shows/' + Number(showId) + '/dropbox-links');
+    },
+    addDropboxLink: function (showId, body) {
+      var b = body || {};
+      if (!b.file_request_id) {
+        if (!String(b.path || '').trim()) return fail('path required — pick a folder in the browse picker');
+        var roles = Array.isArray(b.roles) ? b.roles : [];
+        if (!roles.length) return fail('roles required — at least one of ' + DBX_ROLES.join(', '));
+        for (var i = 0; i < roles.length; i++) {
+          if (DBX_ROLES.indexOf(roles[i]) < 0) {
+            return fail('role ‘' + roles[i] + '’ is not one of ' + DBX_ROLES.join(', '));
+          }
+        }
+      }
+      if (!API()) {
+        var show = SHOWS_BY_ID[Number(showId)];
+        if (!show) return fail('show ' + showId + ' not found');
+        if (!canEditFolderOf(show)) return fail('linking a folder is the show-runner’s call');
+        if (b.file_request_id) {
+          var fr = null;
+          for (var j = 0; j < DBX_DEMO_FILE_REQUESTS.length; j++) {
+            if (DBX_DEMO_FILE_REQUESTS[j].id === b.file_request_id) fr = DBX_DEMO_FILE_REQUESTS[j];
+          }
+          if (!fr) return fail('file request ' + b.file_request_id + ' not found');
+          return ok(mkDbxLink({ show: show.id, path: fr.destination, label: fr.title,
+            roles: ['incoming'], request_id: fr.id, request_url: fr.url, off: 0, by: ME }));
+        }
+        return ok(mkDbxLink({ show: show.id, path: b.path, label: b.label || '',
+          roles: b.roles.slice(), request_url: b.file_request_url || '', off: 0, by: ME }));
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/dropbox-links', b, { noNotify: true });
+    },
+    createDropboxFileRequest: function (showId, title) {
+      if (!String(title || '').trim()) return fail('title required — what should the client see?');
+      if (!API()) {
+        var show2 = SHOWS_BY_ID[Number(showId)];
+        if (!show2) return fail('show ' + showId + ' not found');
+        if (!canEditFolderOf(show2)) return fail('minting a file request is the show-runner’s call');
+        var url = 'https://www.dropbox.com/request/DEMO' + Date.now().toString(36);
+        var dest = '/File requests/' + String(title).trim();
+        DBX_DEMO_FILE_REQUESTS.push({ id: 'FRDEMO' + Date.now().toString(36), title: String(title).trim(),
+          destination: dest, url: url, file_count: 0 });
+        var link = mkDbxLink({ show: show2.id, path: dest, label: String(title).trim(),
+          roles: ['incoming'], request_url: url, off: 0, by: ME,
+          note: 'This folder does not exist in Dropbox yet — a file request’s destination appears when the first upload lands.' });
+        return ok({ link: link, url: url });
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/dropbox-links/create-file-request',
+        { title: String(title).trim() }, { noNotify: true });
+    },
+    /* LOCAL only, both modes: unlinking removes the pointer and can never
+       reach the folder — the server route holds no Dropbox call at all. */
+    deleteDropboxLink: function (showId, linkId) {
+      if (!API()) {
+        var l = DBX_LINKS_BY_ID[Number(linkId)];
+        if (!l) return fail('link ' + linkId + ' not found');
+        var show3 = SHOWS_BY_ID[l.show_id];
+        if (!canEditFolderOf(show3)) return fail('unlinking is the show-runner’s call');
+        delete DBX_LINKS_BY_ID[l.id];
+        var idx = ALL_DBX_LINKS.indexOf(l);
+        if (idx >= 0) ALL_DBX_LINKS.splice(idx, 1);
+        return ok({ ok: true, touched_dropbox: false });
+      }
+      return SR.del('/api/shows/' + Number(showId) + '/dropbox-links/' + Number(linkId),
+        null, { noNotify: true });
+    },
+    /* "mark seen" — reset the NEW-badge baseline to what the folder holds now */
+    dropboxMarkSeen: function (linkId) {
+      if (!API()) {
+        var l2 = DBX_LINKS_BY_ID[Number(linkId)];
+        if (!l2) return fail('link ' + linkId + ' not found');
+        var show4 = SHOWS_BY_ID[l2.show_id];
+        if (!canEditFolderOf(show4)) return fail('marking seen is the show-runner’s call');
+        l2.entries.forEach(function (e) { e.is_new = false; });
+        l2.new_count = 0;
+        l2.last_checked_at = TODAY_ISO + 'T' + _nowHM();
+        return ok(l2);
+      }
+      return SR.post('/api/dropbox-links/' + Number(linkId) + '/seen', {}, { noNotify: true });
+    },
+    /* measure the file where it lies — range reads, bounded, cached per rev
+       server-side. Demo answers the entry's own modeled spec. */
+    dropboxProbe: function (linkId, entryPath) {
+      if (!API()) {
+        var l3 = DBX_LINKS_BY_ID[Number(linkId)];
+        var e3 = l3 ? l3.entries.filter(function (x) { return x.path === entryPath; })[0] : null;
+        if (!e3) return fail('entry not found');
+        if (e3.spec_unreadable || !e3.spec) {
+          return ok({ path: entryPath, unreadable: true,
+            note: 'Couldn’t read the container — only what the bytes themselves say is ever shown.' });
+        }
+        var out3 = { path: entryPath, cached: true };
+        Object.keys(e3.spec).forEach(function (k) { out3[k] = e3.spec[k]; });
+        return ok(out3);
+      }
+      return SR.post('/api/dropbox-links/' + Number(linkId) + '/probe',
+        { entry_path: entryPath }, { noNotify: true });
+    },
+    /* TRACK IN PLACE — the primary bridge. The version's file is a remote
+       locator: bytes stay in Dropbox, specs are measured-or-absent. */
+    dropboxTrack: function (linkId, entryPath, pieceId) {
+      if (!pieceId) return fail('pick the piece this arrival answers — track links an arrival TO a piece');
+      if (!API()) {
+        var l4 = DBX_LINKS_BY_ID[Number(linkId)];
+        var e4 = l4 ? l4.entries.filter(function (x) { return x.path === entryPath; })[0] : null;
+        if (!e4) return fail('entry not found');
+        var p4 = CONTENT_BY_ID[Number(pieceId)];
+        if (!p4) return fail('content piece ' + pieceId + ' not found');
+        var show5 = SHOWS_BY_ID[p4.show_id];
+        var owns = p4.owner && p4.owner === ME;
+        if (!owns && !canEditFolderOf(show5)) {
+          return fail('filing a version is for the folder’s editors — or the piece’s own owner');
+        }
+        var dot = e4.name.lastIndexOf('.');
+        var f4 = mkFile({ name: dot > 0 ? e4.name.slice(0, dot) : e4.name,
+          ext: dot > 0 ? e4.name.slice(dot + 1) : '', kind: 'proof',
+          size: e4.size, dim: e4.spec && e4.spec.w ? e4.spec.w + ' x ' + e4.spec.h : null,
+          by: ME, off: 0, meta: 'lives in Dropbox — tracked in place, no copy made' });
+        f4.show_id = p4.show_id; f4.project_id = null;
+        f4.width = e4.spec ? e4.spec.w || null : null;
+        f4.height = e4.spec ? e4.spec.h || null : null;
+        f4.duration_s = e4.spec ? e4.spec.duration_s || null : null;
+        f4.external_store = 'dropbox';
+        f4.external_path = e4.path;
+        f4.external_rev = e4.rev;
+        f4.external_url = dbxHomeUrl(e4.path, true);
+        FILES_BY_ID[f4.id] = f4;
+        if (show5 && show5.files) show5.files.push(f4);
+        (p4.versions || []).forEach(function (v) { if (v.status === 'current') v.status = 'superseded'; });
+        var v4 = mkContentVersion(p4, { file: f4, status: 'current', off: 0, by: ME });
+        return ok({ file: f4, version: v4 });
+      }
+      return SR.post('/api/dropbox-links/' + Number(linkId) + '/track',
+        { entry_path: entryPath, content_piece_id: Number(pieceId) }, { noNotify: true })
+        .then(function (r) {
+          if (r && r.file) A.file(r.file);
+          if (r && r.version) {
+            var rec = A.contentVersion(r.version);
+            var p = CONTENT_BY_ID[rec.piece_id];
+            if (p) {
+              (p.versions || []).forEach(function (old) {
+                if (old.id !== rec.id && old.status === 'current') old.status = 'superseded';
+              });
+              if ((p.versions || []).indexOf(rec) < 0) (p.versions = p.versions || []).push(rec);
+            }
+          }
+          return r;
+        });
+    },
+    /* INGEST A COPY — the explicit archival exception: bytes really move,
+       through the same server-side storage write every upload uses. */
+    dropboxIngest: function (linkId, entryPath, pieceId) {
+      if (!API()) {
+        var l5 = DBX_LINKS_BY_ID[Number(linkId)];
+        var e5 = l5 ? l5.entries.filter(function (x) { return x.path === entryPath; })[0] : null;
+        if (!e5) return fail('entry not found');
+        var show6 = SHOWS_BY_ID[l5.show_id];
+        if (!canEditFolderOf(show6)) return fail('ingesting a copy is the show-runner’s call');
+        var dot5 = e5.name.lastIndexOf('.');
+        /* a modeled row — demo mode has no bytes anywhere, and says so */
+        var f5 = mkFile({ name: dot5 > 0 ? e5.name.slice(0, dot5) : e5.name,
+          ext: dot5 > 0 ? e5.name.slice(dot5 + 1) : '', kind: 'proof',
+          size: e5.size, by: ME, off: 0, meta: 'ingested copy from Dropbox (modeled)' });
+        f5.show_id = show6.id; f5.project_id = null;
+        FILES_BY_ID[f5.id] = f5;
+        if (show6.files) show6.files.push(f5);
+        var v5 = null;
+        if (pieceId && CONTENT_BY_ID[Number(pieceId)]) {
+          var p5 = CONTENT_BY_ID[Number(pieceId)];
+          (p5.versions || []).forEach(function (v) { if (v.status === 'current') v.status = 'superseded'; });
+          v5 = mkContentVersion(p5, { file: f5, status: 'current', off: 0, by: ME });
+        }
+        return ok({ file: f5, version: v5 });
+      }
+      return SR.post('/api/dropbox-links/' + Number(linkId) + '/ingest',
+        { entry_path: entryPath, content_piece_id: pieceId ? Number(pieceId) : null },
+        { noNotify: true })
+        .then(function (r) {
+          if (r && r.file) A.file(r.file);
+          if (r && r.version) A.contentVersion(r.version);
+          return r;
+        });
+    },
+    /* DEPOSIT — an existing show file's real bytes, out to a delivery
+       folder. A byteless row is refused by the server (the 9/3 rule) and by
+       this mirror. */
+    dropboxDeposit: function (linkId, fileId) {
+      if (!fileId) return fail('file_id required — which of this show’s files goes out?');
+      if (!API()) {
+        var l6 = DBX_LINKS_BY_ID[Number(linkId)];
+        if (!l6) return fail('link ' + linkId + ' not found');
+        var show7 = SHOWS_BY_ID[l6.show_id];
+        if (!canEditFolderOf(show7)) return fail('depositing is the show-runner’s call');
+        var f6 = FILES_BY_ID[Number(fileId)];
+        if (!f6) return fail('file ' + fileId + ' not found');
+        if (f6.external_store === 'dropbox') {
+          return fail('that file already lives in Dropbox (' + f6.external_path + ') — share that path instead');
+        }
+        if (!Number(f6.size)) {
+          return fail('“' + f6.name + '” has no bytes — the row is metadata only, so there is nothing to send');
+        }
+        var nm = f6.name + (f6.ext ? '.' + f6.ext : '');
+        l6.entries.push(mkDbxEntry({ dir: l6.path, name: nm, size: f6.size, off: 0 }));
+        return ok({ ok: true, path: l6.path + '/' + nm, size: f6.size });
+      }
+      return SR.post('/api/dropbox-links/' + Number(linkId) + '/deposit',
+        { file_id: Number(fileId) }, { noNotify: true });
+    },
+
     /* ================= NOTES + @MENTIONS ================================
        GET  /api/notes?anchor_type=&anchor_id= -> listNotes(type, id)
        POST /api/notes               -> addNote(body)   [mentions parsed

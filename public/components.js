@@ -557,7 +557,21 @@ function uploaderName(f) {
        which is why the loader below reports the failure verbatim instead of
        pretending the file is missing. */
 function fileExtLower(f) { return String((f && f.ext) || '').replace(/^\./, '').toLowerCase(); }
+/* THE THIRD STATE (Dropbox pass, 2026-09-10). A remote-locator row's bytes
+   live in Dropbox BY DESIGN — Tom: "i dont necessarily want to upload all
+   these files to showrunner. just keep track of them." That is not the same
+   thing as the 9/3 missing-bytes state and the two must never be conflated:
+   remote-by-design gets an info label naming where the bytes live; missing
+   bytes keeps its warn flag. Every predicate below branches on this first. */
+function fileIsRemote(f) { return !!(f && f.external_store === 'dropbox'); }
 function fileHasBytes(f) {
+  if (fileIsRemote(f)) {
+    /* the server PROXIES a remote row's bytes through GET /files/:id/content
+       (a window, not a copy) — so download/preview work, unless Dropbox has
+       reported the path gone */
+    return !!(typeof SR !== 'undefined' && SR.isApi() &&
+              Number(f.id) > 0 && Number(f.size) > 0 && !f.external_missing_at);
+  }
   return !!(f && typeof SR !== 'undefined' && SR.isApi() &&
             Number(f.id) > 0 && f.nas_path && Number(f.size) > 0);
 }
@@ -585,12 +599,29 @@ function filePreviewKind(f) {
    /files/:id/content replaces size with the true count and this reads false —
    that is how the flag clears, with no second bookkeeping bit to drift. */
 function fileIsByteless(f) {
-  return !!(f && typeof SR !== 'undefined' && SR.isApi() &&
+  return !!(f && !fileIsRemote(f) && typeof SR !== 'undefined' && SR.isApi() &&
             Number(f.id) > 0 && !(Number(f.size) > 0));
 }
-/* The flag itself — honest words, warn accent, rendered wherever a file row
-   or card draws. A <span>, so it nests legally inside the card's <button>. */
+/* The flag itself — honest words, rendered wherever a file row or card
+   draws. A <span>, so it nests legally inside the card's <button>. It speaks
+   all three byte-location truths from one place, so no call site can render
+   a remote row as a broken one:
+     · remote, answering    "in Dropbox · <path>" — info accent, by design
+     · remote, gone         "was in Dropbox — no longer found" — warn, honest
+     · local, no bytes      the 9/3 metadata-only warn flag, unchanged       */
 function fileBytelessFlag(f) {
+  if (fileIsRemote(f)) {
+    if (f.external_missing_at) {
+      return '<span class="file-nobytes" title="' +
+        esc('This record tracked ' + (f.external_path || 'a Dropbox file') + ' — the path no longer ' +
+            'answers (moved or deleted in Dropbox). The record and its history stay.') + '">' +
+        icon('alert') + 'was in Dropbox — no longer found</span>';
+    }
+    return '<span class="file-remote" title="' +
+      esc('The bytes live in Dropbox at ' + (f.external_path || '') + ' — tracked in place, no copy in ' +
+          'Showrunner storage. Open streams a window through the server; Ingest a copy is the archival door.') +
+      '">' + icon('link') + 'in Dropbox · ' + esc(f.external_path || '') + '</span>';
+  }
   if (!fileIsByteless(f)) return '';
   return '<span class="file-nobytes" title="The record was filed but the bytes never landed on the NAS — ' +
     'there is nothing to download or preview yet.">' + icon('alert') + 'no document — metadata only</span>';

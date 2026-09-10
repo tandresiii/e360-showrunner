@@ -431,6 +431,15 @@ router.put('/files/:id/content',
     if (!canEditProject(req.session, project) && cur.uploaded_by !== req.session.username) {
       throw forbidden('Not allowed to upload to this file');
     }
+    // Dropbox pass: a remote-locator row's bytes LIVE in Dropbox and are the
+    // client's (or the designer's) working copy — Showrunner never overwrites
+    // the Dropbox original, and it never silently turns a tracked row into a
+    // NAS row. Want a local copy? That is the explicit Ingest-a-copy door.
+    if (cur.external_store === 'dropbox') {
+      throw conflict(`This row tracks a file that lives in Dropbox (${cur.external_path}) — ` +
+        'Showrunner does not overwrite the Dropbox copy. Use "Ingest a copy" if you want ' +
+        'an archival copy in Showrunner storage.');
+    }
     if (!Buffer.isBuffer(req.body) || !req.body.length) throw badRequest('Empty body');
     if (!cur.nas_path) throw badRequest('This file row has no nas_path — re-create it');
 
@@ -482,6 +491,38 @@ router.put('/files/:id/content',
 router.get('/files/:id/content', asyncH(async (req, res) => {
   const cur = (await pool.query('SELECT * FROM files WHERE id=$1', [idParam(req)])).rows[0];
   if (!cur) throw notFound();
+
+  // ── the remote-locator branch (Dropbox pass) ─────────────────────────────
+  // A tracked row's bytes live in Dropbox; opening it streams a PROXIED copy
+  // through the server on the session the person already has (files.content
+  // .read) — the same argument as the NAS: the viewer must work from a truck.
+  // Nothing lands on the NAS and nothing is cached: this is a window, not a
+  // copy. When Dropbox says the path is gone, the row records the fact
+  // (external_missing_at) and the answer names where the bytes WERE — moved
+  // or deleted over there, never a generic 502.
+  if (cur.external_store === 'dropbox') {
+    const dbx = require('../lib/dropbox');
+    let remote;
+    try {
+      remote = await dbx.downloadStream(cur.external_path);
+    } catch (e) {
+      if (dbx.isPathNotFound(e)) {
+        await pool.query(
+          `UPDATE files SET external_missing_at = COALESCE(external_missing_at, NOW()) WHERE id=$1`,
+          [cur.id]);
+        throw notFound(`This file was at ${cur.external_path} in Dropbox — ` +
+          'no longer found there (moved or deleted in Dropbox). The record stays; the bytes moved.');
+      }
+      throw e;
+    }
+    // it answered — if a previous look had flagged it missing, that is over
+    if (cur.external_missing_at) {
+      await pool.query(`UPDATE files SET external_missing_at=NULL WHERE id=$1`, [cur.id]);
+    }
+    sendBytes(req, res, cur, remote.stream, remote.size == null ? cur.size : remote.size, 'dropbox');
+    return;
+  }
+
   if (!cur.nas_path) throw notFound('This file row has no nas_path');
 
   // ── the warm copy ────────────────────────────────────────────────────────

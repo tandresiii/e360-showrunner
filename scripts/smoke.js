@@ -40,6 +40,14 @@ process.env.STORAGE_ROOT = process.env.STORAGE_ROOT ||
 // and only here: the production ceiling is untouched, and nothing below asserts
 // anything about throttling.
 process.env.LOGIN_RATE_LIMIT = process.env.LOGIN_RATE_LIMIT || '400';
+// §15e begins UNCONFIGURED on purpose (the 501-honesty half), and a developer
+// machine may carry real Dropbox credentials — which this suite must never
+// touch. Cleared before anything reads them; the fake's are set mid-run.
+delete process.env.DROPBOX_APP_KEY;
+delete process.env.DROPBOX_APP_SECRET;
+delete process.env.DROPBOX_REFRESH_TOKEN;
+delete process.env.DROPBOX_API_BASE;
+delete process.env.DROPBOX_CONTENT_BASE;
 
 const assert = require('assert');
 const { pool } = require('../lib/db');
@@ -3676,6 +3684,431 @@ const DEL = (p, o) => call('DELETE', p, o);
     { show_id: S, name: TAG + ' cascade-rider-v1', ext: 'mp4', kind: 'proof' }, { token: PMT });
   await POST(`/api/content/${cpKeep.body.id}/versions`, { file_id: keepFile.body.id }, { token: PMT });
 
+  section('15e. dropbox — folders, requests, track/ingest/deposit, the probe');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom (2026-09-10): folders link to shows with a SET of roles (incoming /
+  // to_client / to_operator — "one, the other, or both"), file requests link
+  // or mint, the listing is live with a NEW diff, pixel specs + codec come
+  // from Dropbox media info and a BOUNDED range-read probe of real encoder
+  // bytes, and the content bridge is TRACK IN PLACE (no copy) with ingest as
+  // the explicit archival door. All against scripts/fake-dropbox.js — the
+  // real API is off the table by hard rule.
+
+  // ── 501 honesty while unconfigured (env cleared at the top of this file) ──
+  const cfg0 = await GET('/api/config');
+  ok('15e: features.dropbox is FALSE while the env is unset', cfg0.body.features.dropbox === false);
+  const h0 = await GET('/api/health');
+  ok('15e: /api/health carries the presence booleans, all false',
+     h0.body.dropbox && h0.body.dropbox.configured === false && h0.body.dropbox.appKeySet === false
+     && h0.body.dropbox.refreshTokenSet === false, h0.body.dropbox);
+  const b501 = await GET('/api/dropbox/browse?path=/', { token: PMT });
+  ok('15e 501: browse is honest while unconfigured — naming the env vars',
+     b501.status === 501 && /DROPBOX_APP_KEY/.test(b501.body.error), b501.body);
+  ok('15e 501: file-requests too',
+     (await GET('/api/dropbox/file-requests', { token: PMT })).status === 501);
+  ok('15e 501: listing links too',
+     (await GET(`/api/shows/${S}/dropbox-links`, { token: PMT })).status === 501);
+  ok('15e 501: linking too',
+     (await POST(`/api/shows/${S}/dropbox-links`,
+       { path: '/x', roles: ['incoming'] }, { token: PMT })).status === 501);
+  ok('15e 501: minting a file request too',
+     (await POST(`/api/shows/${S}/dropbox-links/create-file-request`,
+       { title: 'x' }, { token: PMT })).status === 501);
+
+  // ── wire the fake ─────────────────────────────────────────────────────────
+  const { startFakeDropbox } = require('./fake-dropbox');
+  const dbxFake = await startFakeDropbox();
+  process.env.DROPBOX_APP_KEY = 'fake-key';
+  process.env.DROPBOX_APP_SECRET = 'fake-secret';
+  process.env.DROPBOX_REFRESH_TOKEN = 'fake-refresh';
+  process.env.DROPBOX_API_BASE = dbxFake.url;
+  process.env.DROPBOX_CONTENT_BASE = dbxFake.url;
+  require('../lib/dropbox').dropboxResetToken();
+  ok('15e: features.dropbox flips TRUE with the env present',
+     (await GET('/api/config')).body.features.dropbox === true);
+  ok('15e: ...and the health booleans agree',
+     (await GET('/api/health')).body.dropbox.configured === true);
+
+  // seeds: an incoming folder holding real encoder fixtures, a delivery
+  // folder, a dual-role folder, and an open file request
+  dbxFake.seed.folder('/Clients/Smoke/Incoming');
+  dbxFake.seed.folder('/Clients/Smoke/Out');
+  dbxFake.seed.folder('/Clients/Smoke/Both');
+  const fxTail = dbxFake.seed.tailmoovMp4();
+  const fxFast = dbxFake.seed.faststartMp4();
+  const fxPng = dbxFake.seed.png(1920, 1080);
+  dbxFake.seed.file('/Clients/Smoke/Incoming/drop1.mp4', fxTail);
+  dbxFake.seed.file('/Clients/Smoke/Incoming/intro.mp4', fxFast);
+  dbxFake.seed.file('/Clients/Smoke/Incoming/art.png', fxPng);
+  dbxFake.seed.file('/Clients/Smoke/Incoming/bad.mov', dbxFake.seed.garbage());
+  dbxFake.seed.file('/Clients/Smoke/Incoming/reported.mov', Buffer.alloc(64),
+    { media: { kind: 'video', w: 512, h: 256, durMs: 30000 } });
+  dbxFake.seed.file('/Clients/Smoke/Incoming/pending.mov', Buffer.alloc(64), { mediaPending: true });
+  const seededFr = dbxFake.seed.fileRequest({ title: 'Smoke art drop',
+    destination: '/File requests/Smoke art' });
+
+  // ── floors + the role whitelist, both halves ──────────────────────────────
+  ok('15e FLOOR: a tech may not link a folder (rank)',
+     (await POST(`/api/shows/${S}/dropbox-links`,
+       { path: '/Clients/Smoke/Incoming', roles: ['incoming'] }, { token: TECHT })).status === 403);
+  ok('15e FLOOR: a pm who owns nothing may not either (ownership)',
+     (await POST(`/api/shows/${S}/dropbox-links`,
+       { path: '/Clients/Smoke/Incoming', roles: ['incoming'] }, { token: PM2T })).status === 403);
+  ok('15e: ...and the refusals wrote nothing',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM show_dropbox_links WHERE show_id=$1`, [S]))
+       .rows[0].n === 0);
+  const roleBad = await POST(`/api/shows/${S}/dropbox-links`,
+    { path: '/Clients/Smoke/Incoming', roles: ['vendor'] }, { token: PMT });
+  ok('15e: an unknown role is a 400 NAMING the whitelist',
+     roleBad.status === 400 && /to_operator/.test(roleBad.body.error), roleBad.body);
+  ok('15e: no roles at all is a 400 too',
+     (await POST(`/api/shows/${S}/dropbox-links`,
+       { path: '/Clients/Smoke/Incoming', roles: [] }, { token: PMT })).status === 400);
+
+  // ── browse + linking ──────────────────────────────────────────────────────
+  const brws = await GET('/api/dropbox/browse?path=' + encodeURIComponent('/Clients/Smoke'), { token: TECHT });
+  ok('15e: browse lists folders (any signed-in reader)',
+     brws.status === 200 && brws.body.folders.some((f) => f.path === '/Clients/Smoke/Incoming')
+     && brws.body.folders.some((f) => f.path === '/Clients/Smoke/Both'), brws.body);
+  const lkIn = await POST(`/api/shows/${S}/dropbox-links`,
+    { path: '/Clients/Smoke/Incoming', roles: ['incoming'], label: 'Client uploads' }, { token: PMT });
+  ok('15e: the owning pm links the incoming folder', lkIn.status === 200
+     && lkIn.body.roles.length === 1 && lkIn.body.roles[0] === 'incoming', lkIn.body);
+  const LKIN = lkIn.body.id;
+  ok('15e: double-linking the same path is a 409',
+     (await POST(`/api/shows/${S}/dropbox-links`,
+       { path: '/clients/smoke/incoming', roles: ['to_client'] }, { token: PMT })).status === 409);
+  const lkTypo = await POST(`/api/shows/${S}/dropbox-links`,
+    { path: '/Clients/Smoke/Nowhere', roles: ['incoming'] }, { token: PMT });
+  ok('15e: a typo\'d path is a 400 in plain words, not a linked error generator',
+     lkTypo.status === 400 && /names nothing in Dropbox/.test(lkTypo.body.error), lkTypo.body);
+  ok('15e: linking a FILE is refused by name',
+     (await POST(`/api/shows/${S}/dropbox-links`,
+       { path: '/Clients/Smoke/Incoming/art.png', roles: ['incoming'] }, { token: PMT })).status === 400);
+  const lkOut = await POST(`/api/shows/${S}/dropbox-links`,
+    { path: '/Clients/Smoke/Out', roles: ['to_client', 'to_operator'], label: 'Deliveries' }, { token: PMT });
+  ok('15e MULTI-ROLE: one folder carries BOTH delivery roles — Tom\'s flexibility rule',
+     lkOut.status === 200 && lkOut.body.roles.join(',') === 'to_client,to_operator', lkOut.body);
+  const LKOUT = lkOut.body.id;
+  ok('15e: a pasted non-https file_request_url is refused',
+     (await POST(`/api/shows/${S}/dropbox-links`,
+       { path: '/Clients/Smoke/Both', roles: ['incoming'], file_request_url: 'http://nope' },
+       { token: PMT })).status === 400);
+  const lkBoth = await POST(`/api/shows/${S}/dropbox-links`,
+    { path: '/Clients/Smoke/Both', roles: ['incoming', 'to_client'],
+      file_request_url: 'https://www.dropbox.com/request/PASTED' }, { token: PMT });
+  ok('15e: a plain folder link carries a HAND-PASTED request URL — the scope-free path',
+     lkBoth.status === 200 && lkBoth.body.file_request_url === 'https://www.dropbox.com/request/PASTED'
+     && lkBoth.body.roles.join(',') === 'incoming,to_client', lkBoth.body);
+  const LKBOTH = lkBoth.body.id;
+
+  // ── file requests: list, link-by-id, mint ─────────────────────────────────
+  const frList = await GET('/api/dropbox/file-requests', { token: TECHT });
+  ok('15e: open file requests list (id, title, destination, url)',
+     frList.status === 200 && frList.body.some((r) => r.id === seededFr.id
+       && r.destination === '/File requests/Smoke art' && /^https:/.test(r.url)), frList.body);
+  const lkFr = await POST(`/api/shows/${S}/dropbox-links`,
+    { file_request_id: seededFr.id }, { token: PMT });
+  ok('15e: linking a file request resolves its destination + url, as incoming',
+     lkFr.status === 200 && lkFr.body.path === '/File requests/Smoke art'
+     && lkFr.body.file_request_id === seededFr.id && /^https:/.test(lkFr.body.file_request_url)
+     && lkFr.body.roles.join(',') === 'incoming', lkFr.body);
+  const mint = await POST(`/api/shows/${S}/dropbox-links/create-file-request`,
+    { title: 'Smoke sponsor loop drop' }, { token: PMT });
+  ok('15e: minting a request creates it OVER THERE and links its destination',
+     mint.status === 200 && /^https:/.test(mint.body.url)
+     && dbxFake.state.fileRequests.some((r) => r.title === 'Smoke sponsor loop drop')
+     && mint.body.link.roles.join(',') === 'incoming', mint.body);
+  ok('15e: ...on the audit trail',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM activity
+                        WHERE action='dropbox.request' AND show_id=$1`, [S])).rows[0].n === 1);
+
+  // ── the live listing + the NEW diff ───────────────────────────────────────
+  const ls1 = await GET(`/api/shows/${S}/dropbox-links`, { token: TECHT });
+  const inLink1 = ls1.body.links.find((l) => l.id === LKIN);
+  ok('15e: the listing is LIVE — six files, every one NEW before any snapshot',
+     ls1.status === 200 && inLink1.entries.length === 6
+     && inLink1.new_count === 6 && inLink1.entries.every((e) => e.is_new), inLink1 && inLink1.new_count);
+  const repOn1 = inLink1.entries.find((e) => e.name === 'reported.mov');
+  ok('15e FREE LAYER: Dropbox media info rides the entry — 512×256, :30, provenance says dropbox',
+     repOn1 && repOn1.spec && repOn1.spec.source === 'dropbox' && repOn1.spec.w === 512
+     && repOn1.spec.h === 256 && repOn1.spec.duration_s === 30, repOn1 && repOn1.spec);
+  ok('15e FREE LAYER: pending media info renders NOTHING — a real state, not a placeholder',
+     inLink1.entries.find((e) => e.name === 'pending.mov').spec === null);
+  const frLink1 = ls1.body.links.find((l) => l.path === '/File requests/Smoke art');
+  ok('15e: a request destination Dropbox has not created yet says so, honestly',
+     frLink1 && frLink1.entries.length === 0 && /first upload lands/.test(frLink1.note || ''), frLink1);
+  ok('15e FLOOR: mark-seen is a pm-with-ownership act',
+     (await POST(`/api/dropbox-links/${LKIN}/seen`, {}, { token: TECHT })).status === 403);
+  ok('15e: mark seen', (await POST(`/api/dropbox-links/${LKIN}/seen`, {}, { token: PMT })).status === 200);
+  const ls2 = await GET(`/api/shows/${S}/dropbox-links`, { token: PMT });
+  ok('15e DIFF: after mark-seen nothing is NEW',
+     ls2.body.links.find((l) => l.id === LKIN).new_count === 0);
+  dbxFake.seed.file('/Clients/Smoke/Incoming/late-arrival.png', dbxFake.seed.png(640, 480));
+  const ls3 = await GET(`/api/shows/${S}/dropbox-links`, { token: PMT });
+  const in3 = ls3.body.links.find((l) => l.id === LKIN);
+  ok('15e DIFF: a fresh drop flips ONLY ITSELF to NEW — new-since-last-look, mechanically',
+     in3.new_count === 1 && in3.entries.find((e) => e.name === 'late-arrival.png').is_new
+     && !in3.entries.find((e) => e.name === 'drop1.mp4').is_new, in3.new_count);
+
+  // ── the probe: codec + pixels from REAL encoder bytes, bounded ────────────
+  const { PROBE_MAX_BYTES } = require('../lib/mediaprobe');
+  const dlBefore = dbxFake.state.downloads.length;
+  const pb1 = await POST(`/api/dropbox-links/${LKIN}/probe`,
+    { entry_path: '/Clients/Smoke/Incoming/drop1.mp4' }, { token: TECHT });
+  ok('15e PROBE: a tail-moov MP4 (real ffmpeg output, mdat > the head window) parses — 320×180 H.264, 2s, 30fps',
+     pb1.status === 200 && pb1.body.w === 320 && pb1.body.h === 180 && pb1.body.codec === 'H.264'
+     && pb1.body.duration_s === 2 && pb1.body.fps === 30, pb1.body);
+  const pb1Reads = dbxFake.state.downloads.slice(dlBefore)
+    .filter((d) => d.path === '/Clients/Smoke/Incoming/drop1.mp4');
+  ok('15e PROBE: every read was a RANGE read — it hopped the mdat instead of downloading it',
+     pb1Reads.length >= 2 && pb1Reads.every((d) => d.ranged)
+     && pb1Reads.reduce((a, d) => a + d.bytes, 0) < fxTail.length, pb1Reads.map((d) => d.bytes));
+  const pb2 = await POST(`/api/dropbox-links/${LKIN}/probe`,
+    { entry_path: '/Clients/Smoke/Incoming/intro.mp4' }, { token: PMT });
+  ok('15e PROBE: the faststart twin parses too — 128×96, audio track noted',
+     pb2.status === 200 && pb2.body.w === 128 && pb2.body.h === 96 && pb2.body.audio === true, pb2.body);
+  const pbBad = await POST(`/api/dropbox-links/${LKIN}/probe`,
+    { entry_path: '/Clients/Smoke/Incoming/bad.mov' }, { token: PMT });
+  ok('15e PROBE: garbage bytes are an HONEST couldn\'t-read — never a guess',
+     pbBad.status === 200 && pbBad.body.unreadable === true
+     && /read the container/i.test(pbBad.body.note), pbBad.body);
+  const dlBeforeCache = dbxFake.state.downloads.length;
+  const pb1b = await POST(`/api/dropbox-links/${LKIN}/probe`,
+    { entry_path: '/Clients/Smoke/Incoming/drop1.mp4' }, { token: PMT });
+  ok('15e PROBE CACHE: the second probe of the same rev is served from the snapshot — zero new reads',
+     pb1b.status === 200 && pb1b.body.cached === true
+     && dbxFake.state.downloads.length === dlBeforeCache, pb1b.body.cached);
+  const pbPng = await POST(`/api/dropbox-links/${LKIN}/probe`,
+    { entry_path: '/Clients/Smoke/Incoming/art.png' }, { token: PMT });
+  ok('15e PROBE: PNG IHDR — 1920×1080', pbPng.body.w === 1920 && pbPng.body.h === 1080
+     && pbPng.body.codec === 'PNG', pbPng.body);
+  // the byte budget, mechanically: a header that DECLARES a 50 MB moov
+  dbxFake.seed.file('/Clients/Smoke/Incoming/huge.mp4', dbxFake.seed.hugeMoovHeader(),
+    { size: 50 * 1024 * 1024 + 16 });
+  const pbHuge = await POST(`/api/dropbox-links/${LKIN}/probe`,
+    { entry_path: '/Clients/Smoke/Incoming/huge.mp4' }, { token: PMT });
+  ok('15e BUDGET: a moov bigger than the cap is an honest refusal inside the budget',
+     pbHuge.status === 200 && pbHuge.body.unreadable === true
+     && /budget/i.test(pbHuge.body.note), pbHuge.body);
+  ok('15e BUDGET GATE: no content request EVER exceeded the probe cap — the mutation stands here',
+     dbxFake.state.downloads.every((d) => d.bytes <= PROBE_MAX_BYTES),
+     dbxFake.state.downloads.filter((d) => d.bytes > PROBE_MAX_BYTES).map((d) => [d.path, d.bytes]));
+  const lsSpec = await GET(`/api/shows/${S}/dropbox-links`, { token: TECHT });
+  const specd = lsSpec.body.links.find((l) => l.id === LKIN).entries.find((e) => e.name === 'drop1.mp4');
+  ok('15e: the listing now serves the probed spec — provenance says probe, codec rides along',
+     specd.spec && specd.spec.source === 'probe' && specd.spec.codec === 'H.264'
+     && specd.spec.w === 320, specd.spec);
+
+  // ── the MATCH suggestion, against an open owed piece ──────────────────────
+  const smokePiece = await POST(`/api/shows/${S}/content`, {
+    name: TAG + ' Smoke intro sting', kind: 'video', spec_w: 1920, spec_h: 1080,
+    source: 'e360', owner: techUser
+  }, { token: PMT });
+  const SPIECE = smokePiece.body.id;
+  const lsMatch = await GET(`/api/shows/${S}/dropbox-links`, { token: PMT });
+  const artE = lsMatch.body.links.find((l) => l.id === LKIN).entries.find((e) => e.name === 'art.png');
+  ok('15e MATCH: probed 1920×1080 equals the open piece\'s spec — suggested by name, never auto-filed',
+     artE.match_piece && artE.match_piece.id === SPIECE
+     && /Smoke intro sting/.test(artE.match_piece.name), artE.match_piece);
+
+  // ── TRACK IN PLACE — the primary bridge, zero bytes copied ────────────────
+  ok('15e GATE: a pm who owns nothing may not track into a piece',
+     (await POST(`/api/dropbox-links/${LKIN}/track`,
+       { entry_path: '/Clients/Smoke/Incoming/drop1.mp4', content_piece_id: SPIECE },
+       { token: PM2T })).status === 403);
+  const trkRole = await POST(`/api/dropbox-links/${LKOUT}/track`,
+    { entry_path: '/Clients/Smoke/Out/x.mp4', content_piece_id: SPIECE }, { token: PMT });
+  ok('15e ROLES: tracking from a delivery-only folder is a 400 naming the roles',
+     trkRole.status === 400 && /incoming/.test(trkRole.body.error), trkRole.body);
+  ok('15e: an entry OUTSIDE the linked folder is refused',
+     (await POST(`/api/dropbox-links/${LKIN}/track`,
+       { entry_path: '/Clients/Smoke/Out/esc.mp4', content_piece_id: SPIECE },
+       { token: PMT })).status === 400);
+  ok('15e: track without a piece is a 400 — track links an arrival TO a piece',
+     (await POST(`/api/dropbox-links/${LKIN}/track`,
+       { entry_path: '/Clients/Smoke/Incoming/drop1.mp4' }, { token: PMT })).status === 400);
+  const dlBeforeTrack = dbxFake.state.downloads.length;
+  const trk = await POST(`/api/dropbox-links/${LKIN}/track`,
+    { entry_path: '/Clients/Smoke/Incoming/drop1.mp4', content_piece_id: SPIECE }, { token: TECHT });
+  ok('15e TRACK: the piece\'s OWNER (a tech) tracks the arrival — the step-owner rule, same as filing by hand',
+     trk.status === 200 && trk.body.version.version_n === 1 && trk.body.version.status === 'current',
+     trk.body);
+  ok('15e TRACK: the file is a REMOTE LOCATOR — bytes stay in Dropbox, size is Dropbox\'s own count',
+     trk.body.file.external_store === 'dropbox'
+     && trk.body.file.external_path === '/Clients/Smoke/Incoming/drop1.mp4'
+     && Number(trk.body.file.size) === fxTail.length
+     && !trk.body.file.nas_path, trk.body.file);
+  ok('15e TRACK: dims came from the PROBE CACHE — measured 320×180, never stamped',
+     trk.body.file.width === 320 && trk.body.file.height === 180
+     && Number(trk.body.file.duration_s) === 2, trk.body.file);
+  ok('15e TRACK: a deep link into the Dropbox web UI rides the row',
+     /^https:\/\/www\.dropbox\.com\/home\//.test(trk.body.file.external_url || ''), trk.body.file.external_url);
+  ok('15e TRACK IS TRACK: zero downloads happened — nothing was copied anywhere',
+     dbxFake.state.downloads.length === dlBeforeTrack, dbxFake.state.downloads.length - dlBeforeTrack);
+  const TRKFILE = trk.body.file.id;
+  ok('15e: overwriting a remote row\'s bytes is refused — Showrunner never clobbers the Dropbox copy',
+     (await call('PUT', `/api/files/${TRKFILE}/content`, { token: PMT, raw: Buffer.from('x') })).status === 409);
+  const proxied = await call('GET', `/api/files/${TRKFILE}/content`, { token: TECHT, wantBytes: true });
+  ok('15e PROXY: opening the tracked file streams the REAL Dropbox bytes through the server',
+     proxied.status === 200 && proxied.bytes.length === fxTail.length
+     && proxied.bytes.equals(fxTail) && proxied.headers.get('x-byte-source') === 'dropbox');
+
+  // the honest degradation: the client moves the file in Dropbox
+  dbxFake.seed.remove('/Clients/Smoke/Incoming/drop1.mp4');
+  const lsGone = await GET(`/api/shows/${S}/dropbox-links`, { token: PMT });
+  ok('15e GONE: the listing sweep flags the tracked row — moved or deleted over there',
+     lsGone.status === 200 &&
+     (await pool.query(`SELECT external_missing_at FROM files WHERE id=$1`, [TRKFILE]))
+       .rows[0].external_missing_at !== null);
+  const goneRead = await GET(`/api/files/${TRKFILE}/content`, { token: PMT });
+  ok('15e GONE: opening it is a 404 that NAMES where the bytes were — never a generic 502',
+     goneRead.status === 404 && /no longer found/.test(goneRead.body.error)
+     && /drop1\.mp4/.test(goneRead.body.error), goneRead.body);
+  dbxFake.seed.file('/Clients/Smoke/Incoming/drop1.mp4', fxTail, { rev: 'r-back' });
+  await GET(`/api/shows/${S}/dropbox-links`, { token: PMT });
+  ok('15e GONE: ...and the flag CLEARS when the path answers again',
+     (await pool.query(`SELECT external_missing_at FROM files WHERE id=$1`, [TRKFILE]))
+       .rows[0].external_missing_at === null);
+
+  // ── INGEST A COPY — the explicit archival door, real bytes measured ───────
+  ok('15e FLOOR: ingest is pm-with-ownership (a tech may not copy bytes in)',
+     (await POST(`/api/dropbox-links/${LKIN}/ingest`,
+       { entry_path: '/Clients/Smoke/Incoming/art.png' }, { token: TECHT })).status === 403);
+  const ing = await POST(`/api/dropbox-links/${LKIN}/ingest`,
+    { entry_path: '/Clients/Smoke/Incoming/art.png', content_piece_id: SPIECE }, { token: PMT });
+  ok('15e INGEST: the copy lands through the real storage write — size IS the byte count on disk',
+     ing.status === 200 && Number(ing.body.file.size) === fxPng.length
+     && ing.body.file.nas_path, ing.body.file && ing.body.file.size);
+  ok('15e INGEST: v2 supersedes the tracked v1 — same writer as every hand-filed round',
+     ing.body.version.version_n === 2 &&
+     (await pool.query(`SELECT status FROM content_versions WHERE piece_id=$1 ORDER BY version_n`,
+       [SPIECE])).rows.map((r) => r.status).join(',') === 'superseded,current');
+  ok('15e INGEST: dims measured from the very buffer that was stored — 1920×1080',
+     ing.body.file.width === 1920 && ing.body.file.height === 1080, ing.body.file);
+  const ingBytes = await call('GET', `/api/files/${ing.body.file.id}/content`,
+    { token: PMT, wantBytes: true });
+  ok('15e INGEST: the round trip is byte-identical',
+     ingBytes.status === 200 && ingBytes.bytes.equals(fxPng));
+
+  // ── DEPOSIT — bytes out to a delivery folder ──────────────────────────────
+  ok('15e FLOOR: deposit is pm-with-ownership',
+     (await POST(`/api/dropbox-links/${LKOUT}/deposit`,
+       { file_id: ing.body.file.id }, { token: TECHT })).status === 403);
+  const depRole = await POST(`/api/dropbox-links/${LKIN}/deposit`,
+    { file_id: ing.body.file.id }, { token: PMT });
+  ok('15e ROLES: depositing into an incoming-only folder is a 400 naming the roles',
+     depRole.status === 400 && /to_client/.test(depRole.body.error), depRole.body);
+  const byteless = await POST('/api/files',
+    { show_id: S, name: TAG + ' empty-handed', ext: 'pdf', kind: 'other' }, { token: PMT });
+  const depEmpty = await POST(`/api/dropbox-links/${LKOUT}/deposit`,
+    { file_id: byteless.body.id }, { token: PMT });
+  ok('15e HONESTY: a byteless row is a 404 that says so — nothing to send, nothing pretended',
+     depEmpty.status === 404 && /no bytes/.test(depEmpty.body.error), depEmpty.body);
+  ok('15e: depositing a REMOTE row is refused — it already lives there',
+     (await POST(`/api/dropbox-links/${LKOUT}/deposit`,
+       { file_id: TRKFILE }, { token: PMT })).status === 400);
+  const dbxDep = await POST(`/api/dropbox-links/${LKOUT}/deposit`,
+    { file_id: ing.body.file.id }, { token: PMT });
+  ok('15e DEPOSIT: the real bytes land in the folder — the fake counted every one of them',
+     dbxDep.status === 200 && dbxDep.body.size === fxPng.length
+     && dbxFake.state.uploads.some((u) => u.path === dbxDep.body.path && u.size === fxPng.length),
+     dbxDep.body);
+  const dbxDep2 = await POST(`/api/dropbox-links/${LKOUT}/deposit`,
+    { file_id: ing.body.file.id }, { token: PMT });
+  ok('15e DEPOSIT: a name collision AUTORENAMES — a deposit can never eat a file',
+     dbxDep2.status === 200 && dbxDep2.body.path !== dbxDep.body.path && / \(1\)/.test(dbxDep2.body.path),
+     dbxDep2.body);
+  ok('15e MULTI-ROLE: the dual-role folder takes BOTH verbs — track-shaped reads AND deposits',
+     (await POST(`/api/dropbox-links/${LKBOTH}/deposit`,
+       { file_id: ing.body.file.id }, { token: PMT })).status === 200);
+
+  // ── text error bodies + dynamic scope degradation ─────────────────────────
+  dbxFake.seed.failOnce('/2/files/list_folder',
+    { status: 400, body: 'Error in call to API function "files/list_folder": bad header' });
+  const lsText = await GET(`/api/shows/${S}/dropbox-links`, { token: PMT });
+  const errLink = lsText.body.links.find((l) => l.error);
+  ok('15e TEXT BODY: a plain-text Dropbox error SURFACES on its link — no crash, neighbours still render',
+     lsText.status === 200 && errLink && /bad header/.test(errLink.error)
+     && lsText.body.links.some((l) => Array.isArray(l.entries) && l.entries.length), errLink && errLink.error);
+  dbxFake.seed.failOnce('/2/files/list_folder', { status: 409, body: 'total nonsense, not json' });
+  const brwsText = await GET('/api/dropbox/browse?path=' + encodeURIComponent('/Clients/Smoke'), { token: PMT });
+  ok('15e TEXT BODY: browse relays the text inside a clean JSON 502',
+     brwsText.status === 502 && /total nonsense/.test(brwsText.body.error), brwsText.body);
+  dbxFake.seed.missingScopes(['files.content.write', 'file_requests.write', 'file_requests.read']);
+  const scDep = await POST(`/api/dropbox-links/${LKOUT}/deposit`,
+    { file_id: ing.body.file.id }, { token: PMT });
+  ok('15e SCOPE: a missing files.content.write is a NAMED 501 — the capability and the fix, in words',
+     scDep.status === 501 && /doesn't include files\.content\.write/.test(scDep.body.error)
+     && /re-authorize/.test(scDep.body.error), scDep.body);
+  ok('15e SCOPE: minting a request names file_requests.write',
+     /file_requests\.write/.test((await POST(`/api/shows/${S}/dropbox-links/create-file-request`,
+       { title: 'x' }, { token: PMT })).body.error || ''));
+  ok('15e SCOPE: listing requests names file_requests.read',
+     /file_requests\.read/.test((await GET('/api/dropbox/file-requests', { token: PMT })).body.error || ''));
+  ok('15e SCOPE: the READ side stays fully alive while write scopes are missing — dynamic, never assumed',
+     (await GET(`/api/shows/${S}/dropbox-links`, { token: PMT })).status === 200);
+  dbxFake.seed.missingScopes([]);
+  ok('15e SCOPE: ...and the same call WORKS the moment the scope exists — self-healing, no restart',
+     (await POST(`/api/dropbox-links/${LKOUT}/deposit`,
+       { file_id: ing.body.file.id }, { token: PMT })).status === 200);
+
+  // ── the token cache + retry-once ──────────────────────────────────────────
+  const grantsBefore = dbxFake.state.tokenGrants;
+  dbxFake.seed.expireTokens();
+  ok('15e TOKEN: an expired access token refreshes ONCE and the call succeeds',
+     (await GET(`/api/shows/${S}/dropbox-links`, { token: PMT })).status === 200
+     && dbxFake.state.tokenGrants === grantsBefore + 1, dbxFake.state.tokenGrants - grantsBefore);
+
+  // ── UNLINK — local only, the invariant ────────────────────────────────────
+  ok('15e FLOOR: a pm who owns nothing may not unlink',
+     (await DEL(`/api/shows/${S}/dropbox-links/${LKBOTH}`, { token: PM2T })).status === 403);
+  const preDeletes = dbxFake.state.deletes;
+  const unl = await DEL(`/api/shows/${S}/dropbox-links/${LKBOTH}`, { token: PMT });
+  ok('15e UNLINK: the link goes, and it says out loud that Dropbox was untouched',
+     unl.status === 200 && unl.body.touched_dropbox === false, unl.body);
+  ok('15e UNLINK INVARIANT: the fake counted ZERO remote deletes — the folder and its files still exist',
+     dbxFake.state.deletes === preDeletes && dbxFake.state.deletes === 0
+     && dbxFake.state.entries.has('/clients/smoke/both'), dbxFake.state.deletes);
+  // the strongest proof available: unlink WORKS with Dropbox entirely
+  // unconfigured — the route holds nothing that knows how to reach it.
+  // (every Dropbox-TALKING route on a real row 501s in the same window.)
+  const envHold = { k: process.env.DROPBOX_APP_KEY, s: process.env.DROPBOX_APP_SECRET,
+                    r: process.env.DROPBOX_REFRESH_TOKEN };
+  delete process.env.DROPBOX_APP_KEY;
+  delete process.env.DROPBOX_APP_SECRET;
+  delete process.env.DROPBOX_REFRESH_TOKEN;
+  ok('15e 501: on a REAL link, mark-seen honestly refuses while unconfigured',
+     (await POST(`/api/dropbox-links/${LKIN}/seen`, {}, { token: PMT })).status === 501);
+  ok('15e 501: probe too',
+     (await POST(`/api/dropbox-links/${LKIN}/probe`,
+       { entry_path: '/Clients/Smoke/Incoming/art.png' }, { token: PMT })).status === 501);
+  ok('15e 501: track too',
+     (await POST(`/api/dropbox-links/${LKIN}/track`,
+       { entry_path: '/Clients/Smoke/Incoming/art.png', content_piece_id: SPIECE },
+       { token: PMT })).status === 501);
+  ok('15e 501: ingest and deposit too',
+     (await POST(`/api/dropbox-links/${LKIN}/ingest`,
+       { entry_path: '/Clients/Smoke/Incoming/art.png' }, { token: PMT })).status === 501
+     && (await POST(`/api/dropbox-links/${LKOUT}/deposit`,
+       { file_id: ing.body.file.id }, { token: PMT })).status === 501);
+  const unl2 = await DEL(`/api/shows/${S}/dropbox-links/${LKOUT}`, { token: PMT });
+  ok('15e UNLINK: ...and unlink STILL WORKS unconfigured — it cannot touch what it cannot reach',
+     unl2.status === 200 && dbxFake.state.deletes === 0);
+  process.env.DROPBOX_APP_KEY = envHold.k;
+  process.env.DROPBOX_APP_SECRET = envHold.s;
+  process.env.DROPBOX_REFRESH_TOKEN = envHold.r;
+
+  // LKIN + the two request links stay on S — §6's cascade proof counts them
+  // and asserts the folder delete leaves zero orphans (and, by the invariant
+  // above, no Dropbox call: deleteShowCascade holds none).
+  await dbxFake.close();
+  delete process.env.DROPBOX_APP_KEY;
+  delete process.env.DROPBOX_APP_SECRET;
+  delete process.env.DROPBOX_REFRESH_TOKEN;
+  delete process.env.DROPBOX_API_BASE;
+  delete process.env.DROPBOX_CONTENT_BASE;
+
   section('16. Flex — the create-element route (stubbed; NO live Flex)');
 
   const flexLib = require('../lib/flex');
@@ -4994,6 +5427,7 @@ const DEL = (p, o) => call('DELETE', p, o);
      && before.tech_reports > 0 && before.notification_outbox > 0
      && before.show_contacts > 0
      && before.content_pieces > 0 && before.content_versions > 0
+     && before.show_dropbox_links > 0
      && before.gear_snapshots > 0,
      before);
   // add the remaining child types so the cascade is exercised in full
@@ -5383,6 +5817,9 @@ async function childCounts(projectId) {
     content_pieces:   await q(`SELECT COUNT(*) n FROM content_pieces WHERE show_id ${inShows}`),
     content_versions: await q(`SELECT COUNT(*) n FROM content_versions WHERE piece_id IN
                                (SELECT id FROM content_pieces WHERE show_id ${inShows})`),
+    // dropbox pass — the rule this list exists to enforce, once more: a table
+    // not counted here leaks rows on every folder delete.
+    show_dropbox_links: await q(`SELECT COUNT(*) n FROM show_dropbox_links WHERE show_id ${inShows}`),
     activity:         await q(`SELECT COUNT(*) n FROM activity WHERE project_id=$1 OR show_id ${inShows}`)
   };
 }

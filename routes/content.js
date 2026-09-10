@@ -326,6 +326,29 @@ router.delete('/content/:id', requireRole('pm'), asyncH(async (req, res) => {
 }));
 
 // ── versions: the proof rounds ──────────────────────────────────────────────
+// THE one writer of a version row. POST /content/:id/versions below calls it,
+// and so do the Dropbox bridges (routes/dropbox.js track + ingest) — one
+// function, so "supersede, never delete" cannot fork into two behaviours.
+// `detailSuffix` lets a bridge say where the round came from on the same
+// activity line.
+async function fileContentVersion(c, piece, fileId, actor, { detailSuffix = '' } = {}) {
+  const prev = await c.query(
+    `SELECT COALESCE(MAX(version_n), 0)::int AS n FROM content_versions WHERE piece_id=$1`,
+    [piece.id]);
+  const n = prev.rows[0].n + 1;
+  // supersede, never delete — the old rounds ARE the paper trail
+  await c.query(
+    `UPDATE content_versions SET status='superseded' WHERE piece_id=$1 AND status='current'`,
+    [piece.id]);
+  const r = await c.query(
+    `INSERT INTO content_versions (piece_id, version_n, file_id, status, created_by)
+     VALUES ($1,$2,$3,'current',$4) RETURNING *`, [piece.id, n, fileId, actor]);
+  await logActivity(c, { projectId: piece.project_id, showId: piece.show_id, actor,
+    action: 'content.version',
+    detail: `${piece.name} · v${n}${n > 1 ? ' (supersedes v' + (n - 1) + ')' : ''}${detailSuffix}` });
+  return r.rows[0];
+}
+
 // POST a new version pointing at a REAL uploaded files row. The previous
 // current version is SUPERSEDED — kept, never deleted — which is the whole
 // paper-trail promise, and the gate a mutation test stands on.
@@ -343,21 +366,7 @@ router.post('/content/:id/versions', asyncH(async (req, res) => {
   }
 
   const out = await withTx(async (c) => {
-    const prev = await c.query(
-      `SELECT COALESCE(MAX(version_n), 0)::int AS n FROM content_versions WHERE piece_id=$1`,
-      [piece.id]);
-    const n = prev.rows[0].n + 1;
-    // supersede, never delete — the old rounds ARE the paper trail
-    await c.query(
-      `UPDATE content_versions SET status='superseded' WHERE piece_id=$1 AND status='current'`,
-      [piece.id]);
-    const r = await c.query(
-      `INSERT INTO content_versions (piece_id, version_n, file_id, status, created_by)
-       VALUES ($1,$2,$3,'current',$4) RETURNING *`, [piece.id, n, fileId, req.actor]);
-    await logActivity(c, { projectId: piece.project_id, showId: piece.show_id, actor: req.actor,
-      action: 'content.version',
-      detail: `${piece.name} · v${n}${n > 1 ? ' (supersedes v' + (n - 1) + ')' : ''}` });
-    return r.rows[0];
+    return fileContentVersion(c, piece, fileId, req.actor);
   });
   res.json(dbToContentVersion(out, file));
 }));
@@ -462,3 +471,8 @@ router.post('/shows/:id/content-seed', requireRole('pm'), asyncH(async (req, res
 }));
 
 module.exports = router;
+// The Dropbox bridges (routes/dropbox.js) file rounds through the SAME writer
+// this module's own version route uses — the files.js insertExpense pattern —
+// and gate on the SAME step-owner predicate, so who-may-file cannot drift.
+module.exports.fileContentVersion = fileContentVersion;
+module.exports.canWorkPiece = canWorkPiece;

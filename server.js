@@ -154,7 +154,11 @@ app.get('/api/config', (req, res) => {
       // and a boolean — the host and credentials stay in /api/health's
       // operator view and out of the public bootstrap.
       fileUpload: storageReady(),
-      storageDriver: storage.name
+      storageDriver: storage.name,
+      // Dropbox pass. Same argument once more: the Content tab's Folders
+      // strip greys itself into nothing rather than offering clicks that can
+      // only 501. A BOOLEAN — the app key/secret/token never leave the env.
+      dropbox: require('./lib/dropbox').dropboxConfigured()
     },
     // F5. The stage vocabulary, published so the SPA never hardcodes it.
     stages: {
@@ -209,6 +213,18 @@ app.get('/api/health', async (req, res) => {
                  passSet: !!process.env.SCHEDULER_PASS,
                  configuredMeans: 'env vars are present in this process. This is NOT a login test — the dry-run and a real push are what measure the account.'
                },
+               // Dropbox, same doctrine: PRESENCE booleans read from env,
+               // never a value — so "which variable did the deploy drop" can
+               // be answered from outside without a login or a guess.
+               dropbox: {
+                 configured: require('./lib/dropbox').dropboxConfigured(),
+                 appKeySet: !!process.env.DROPBOX_APP_KEY,
+                 appSecretSet: !!process.env.DROPBOX_APP_SECRET,
+                 refreshTokenSet: !!process.env.DROPBOX_REFRESH_TOKEN,
+                 configuredMeans: 'env vars are present in this process. This is NOT a token test — ' +
+                   'the first live call (browse a folder) is what measures the authorization, and a ' +
+                   'capability the team admin has not granted answers a named 501 when asked, not here.'
+               },
                // The read-through byte cache. Reported as its OWN object with
                // `role` spelled out, and deliberately NOT folded into any of
                // the storage* keys above: a warm cache in front of a dead NAS
@@ -260,6 +276,7 @@ app.use('/api', require('./routes/finance'));
 app.use('/api', require('./routes/purchasing'));
 app.use('/api', require('./routes/contacts'));
 app.use('/api', require('./routes/content'));
+app.use('/api', require('./routes/dropbox'));
 app.use('/api', require('./routes/notes'));
 app.use('/api', require('./routes/schedule'));
 app.use('/api', require('./routes/deliverables'));

@@ -2613,6 +2613,147 @@ function contentSeedFor(showId) {
 })();
 
 /* ============================================================================
+   DROPBOX FOLDER LINKS — where the content bytes actually live (Tom, 2026-09-10)
+   ----------------------------------------------------------------------------
+   Dropbox is where content LIVES; Showrunner tracks it. A show links folders,
+   each carrying a SET of roles (incoming / to client / to operator — one, the
+   other, or both: Tom's flexibility requirement verbatim), the listing is
+   live with a NEW badge diffed against a deliberately-reset "seen" baseline,
+   and the PRIMARY bridge to content pieces is TRACK IN PLACE — a version that
+   references the Dropbox file, no bytes copied. Ingest-a-copy is the
+   explicit, secondary archival door. These twins model every state so file://
+   renders the whole strip: one link per role including a dual-role folder, a
+   NEW arrival whose measured pixels MATCH an owed piece (the suggestion the
+   track modal pre-selects), a probed codec, an unreadable container, a
+   pending Dropbox media_info, and a file request with its copyable URL.
+   ========================================================================== */
+var DBX_ROLES = ['incoming', 'to_client', 'to_operator'];
+var DBX_ROLE_LABEL = { incoming: 'Incoming', to_client: 'To client', to_operator: 'To operator' };
+
+var _dbxSeq = 0;
+var ALL_DBX_LINKS = [], DBX_LINKS_BY_ID = {};
+
+function dbxHomeUrl(p, isFile) {
+  var segs = String(p || '').split('/').filter(function (s) { return !!s; });
+  if (isFile && segs.length) {
+    var file = segs.pop();
+    return 'https://www.dropbox.com/home/' + segs.map(encodeURIComponent).join('/') +
+      '?preview=' + encodeURIComponent(file);
+  }
+  return 'https://www.dropbox.com/home/' + segs.map(encodeURIComponent).join('/');
+}
+function mkDbxLink(o) {
+  var l = {
+    id: ++_dbxSeq, show_id: o.show, project_id: o.project || null,
+    path: o.path, label: o.label || '',
+    roles: (o.roles || ['incoming']).slice(),
+    file_request_id: o.request_id || null,
+    file_request_url: o.request_url || '',
+    external_url: dbxHomeUrl(o.path, false),
+    last_checked_at: o.checked_off == null ? null : dayISO(o.checked_off) + 'T09:00',
+    created_at: dayISO(o.off == null ? -10 : o.off), created_by: o.by || 'tandres',
+    entries: (o.entries || []).slice(),
+    new_count: 0,
+    note: o.note || null
+  };
+  l.new_count = l.entries.filter(function (e) { return e.is_new; }).length;
+  DBX_LINKS_BY_ID[l.id] = l;
+  ALL_DBX_LINKS.push(l);
+  return l;
+}
+/* one demo entry — the server's listing shape byte for byte */
+var _dbxEntrySeq = 0;
+function mkDbxEntry(o) {
+  return { name: o.name, path: o.dir + '/' + o.name, rev: o.rev || 'rDEMO' + (++_dbxEntrySeq),
+           size: o.size || 0, server_modified: dayISO(o.off == null ? -1 : o.off) + 'T14:30:00Z',
+           is_new: !!o.is_new, spec: o.spec || null, spec_unreadable: !!o.unreadable,
+           match_piece: o.match || null };
+}
+function dbxLinksForShow(showId) {
+  return ALL_DBX_LINKS.filter(function (l) { return l.show_id === Number(showId); });
+}
+
+/* what GET /api/dropbox/browse answers, per path — a small modeled tree */
+var DBX_DEMO_BROWSE = {
+  '/': { path: '/', folders: [
+    { name: 'Clients', path: '/Clients' }, { name: 'File requests', path: '/File requests' },
+    { name: 'Shows', path: '/Shows' }], file_count: 0 },
+  '/Clients': { path: '/Clients', folders: [
+    { name: 'AVCA', path: '/Clients/AVCA' }, { name: 'LOVB', path: '/Clients/LOVB' }], file_count: 0 },
+  '/Clients/AVCA': { path: '/Clients/AVCA', folders: [
+    { name: 'Deliverables', path: '/Clients/AVCA/Deliverables' },
+    { name: 'Incoming art', path: '/Clients/AVCA/Incoming art' }], file_count: 2 },
+  '/Shows': { path: '/Shows', folders: [{ name: 'AVCA First Serve', path: '/Shows/AVCA First Serve' }], file_count: 0 }
+};
+var DBX_DEMO_FILE_REQUESTS = [
+  { id: 'FRDEMO1', title: 'AVCA — First Serve content drop', destination: '/File requests/AVCA content',
+    url: 'https://www.dropbox.com/request/DEMOfR1', file_count: 3 },
+  { id: 'FRDEMO2', title: 'LOVB sponsor logos', destination: '/File requests/LOVB logos',
+    url: 'https://www.dropbox.com/request/DEMOfR2', file_count: 0 }
+];
+
+(function seedDbx() {
+  var show = SHOWS_BY_ID[1];
+  if (!show) return;
+  /* the intro-sting chase piece — the NEW arrival's measured pixels match its
+     spec, which is exactly what the track modal pre-selects */
+  var sting = ALL_CONTENT.filter(function (p) {
+    return p.show_id === 1 && /intro sting/i.test(p.name);
+  })[0] || null;
+
+  /* 1 · the file request's incoming folder — a NEW arrival with a match
+     suggestion, a probed still, an unreadable container, a pending video */
+  mkDbxLink({ show: 1, path: '/File requests/AVCA content', label: 'AVCA — First Serve content drop',
+    roles: ['incoming'], request_id: 'FRDEMO1', request_url: 'https://www.dropbox.com/request/DEMOfR1',
+    off: -12, checked_off: -3, entries: [
+      mkDbxEntry({ dir: '/File requests/AVCA content', name: 'team_intro_sting_v1.mp4', size: 48211004,
+        off: -1, is_new: true,
+        spec: { source: 'probe', w: 1920, h: 1080, duration_s: 8.02, codec: 'ProRes 422 HQ', fps: 59.94, audio: true },
+        match: sting ? { id: sting.id, name: sting.name, spec_w: 1920, spec_h: 1080 } : null }),
+      mkDbxEntry({ dir: '/File requests/AVCA content', name: 'sponsor_stack_BAD.mov', size: 1204,
+        off: -2, is_new: true, unreadable: true }),
+      mkDbxEntry({ dir: '/File requests/AVCA content', name: 'court_wrap_art.png', size: 8100224,
+        off: -5, spec: { source: 'probe', w: 7200, h: 1200, codec: 'PNG' } }),
+      mkDbxEntry({ dir: '/File requests/AVCA content', name: 'schedule_notes.pdf', size: 92034, off: -6 })
+    ] });
+
+  /* 2 · the dual-role deliverables folder — Tom's "might be one, the other,
+     or both", modeled */
+  mkDbxLink({ show: 1, path: '/Clients/AVCA/Deliverables', label: 'Deliverables (client + operator)',
+    roles: ['to_client', 'to_operator'], off: -10, checked_off: -1, entries: [
+      mkDbxEntry({ dir: '/Clients/AVCA/Deliverables', name: 'Sponsor rotation v2.mp4', size: 61224400,
+        off: -1, spec: { source: 'dropbox', w: 7680, h: 128, duration_s: 30 } })
+    ] });
+
+  /* 3 · the operator's own folder — Dropbox media info still pending on the
+     fresh upload, so it honestly shows nothing */
+  mkDbxLink({ show: 1, path: '/Shows/AVCA First Serve', label: 'Show ops',
+    roles: ['to_operator'], off: -8, entries: [
+      mkDbxEntry({ dir: '/Shows/AVCA First Serve', name: 'playback_rundown.mp4', size: 1520044, off: 0, is_new: true })
+    ] });
+
+  /* a TRACKED version — v2 of the league loop lives in Dropbox, no copy made:
+     the remote third state renders in the ladder from file:// */
+  var league = ALL_CONTENT.filter(function (p) {
+    return p.show_id === 1 && /League partner loop/.test(p.name);
+  })[0];
+  if (league) {
+    var rf = mkFile({ name: 'League partner loop FINAL', ext: 'mp4', kind: 'proof', artifact: 'image',
+      size: 88221004, dim: '7680 x 128', by: 'tandres', off: -3, meta: 'lives in Dropbox — tracked in place' });
+    rf.show_id = 1; rf.project_id = null;
+    rf.width = 7680; rf.height = 128; rf.duration_s = 62;
+    rf.external_store = 'dropbox';
+    rf.external_path = '/Clients/AVCA/Deliverables/League partner loop FINAL.mp4';
+    rf.external_rev = 'rDEMO88';
+    rf.external_url = dbxHomeUrl(rf.external_path, true);
+    FILES_BY_ID[rf.id] = rf;
+    show.files.push(rf);
+    (league.versions || []).forEach(function (v) { if (v.status === 'current') v.status = 'superseded'; });
+    mkContentVersion(league, { file: rf, status: 'current', off: -3, by: 'tandres' });
+  }
+})();
+
+/* ============================================================================
    NOTES + @MENTIONS — anchored comments (notes pass)
    ----------------------------------------------------------------------------
    The decided model (TEAM_FEEDBACK): threads live ON things, never free-

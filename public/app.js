@@ -5694,6 +5694,374 @@ async function cpSeedCommit() {
   return refreshShowTab(showId, 'content');
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   DROPBOX FOLDERS — where the content bytes actually live (Tom, 2026-09-10)
+   ────────────────────────────────────────────────────────────────────────────
+   The Content tab's Folders strip. Dropbox is the home; Showrunner TRACKS:
+   the primary bridge is track-in-place (a version referencing the Dropbox
+   file, zero bytes copied), ingest-a-copy is the explicit archival exception,
+   and unlink is local-only — the confirm says so out loud, and the server
+   route it calls holds no Dropbox client at all. The strip self-hydrates:
+   tabContent renders from DBX_UI and dbxEnsure() fills it (feature-flagged
+   off features.dropbox — a strip that can only 501 renders as nothing).
+   ══════════════════════════════════════════════════════════════════════════ */
+var DBX_UI = { byShow: {}, loading: {}, open: {} };
+function dbxEnsure(showId) {
+  var sid = Number(showId);
+  if (DBX_UI.byShow[sid] || DBX_UI.loading[sid]) return;
+  DBX_UI.loading[sid] = true;
+  api.dropboxEnabled().then(function (on) {
+    if (!on) { DBX_UI.byShow[sid] = { off: true }; return null; }
+    return api.listDropboxLinks(sid).then(function (r) {
+      DBX_UI.byShow[sid] = { links: (r && r.links) || [] };
+    }, function (e) {
+      DBX_UI.byShow[sid] = { error: String(e && e.message || e) };
+    });
+  }).then(function () {
+    DBX_UI.loading[sid] = false;
+    if (CUR.showId === sid && activeShowTab() === 'content') refreshShowTab(sid, 'content');
+  }, function () { DBX_UI.loading[sid] = false; });
+}
+async function dbxReload(showId) {
+  var sid = Number(showId);
+  delete DBX_UI.byShow[sid];
+  DBX_UI.loading[sid] = false;
+  dbxEnsure(sid);
+}
+function dbxLinkById(id) {
+  var byShow = DBX_UI.byShow;
+  var keys = Object.keys(byShow);
+  for (var i = 0; i < keys.length; i++) {
+    var links = byShow[keys[i]] && byShow[keys[i]].links;
+    if (!links) continue;
+    for (var j = 0; j < links.length; j++) if (links[j].id === Number(id)) return links[j];
+  }
+  /* demo store fallback — file:// renders before any loader ran */
+  return (typeof DBX_LINKS_BY_ID !== 'undefined' && DBX_LINKS_BY_ID[Number(id)]) || null;
+}
+
+/* ── link a folder: the browse picker ──────────────────────────────────────── */
+var PENDING_DBX_LINK = null;
+async function dbxLinkAct(showId) {
+  PENDING_DBX_LINK = { showId: Number(showId), path: '/' };
+  return dbxBrowseDraw();
+}
+async function dbxBrowseDraw() {
+  var pp = PENDING_DBX_LINK;
+  if (!pp) return;
+  var node;
+  try { node = await api.dropboxBrowse(pp.path === '/' ? '' : pp.path); }
+  catch (e) { toast('Could not browse Dropbox', String(e && e.message || e), 'err'); return; }
+  pp.path = node.path || pp.path;
+  var up = pp.path !== '/' ? pp.path.split('/').slice(0, -1).join('/') || '/' : null;
+  var rows = (node.folders || []).map(function (f) {
+    return '<button class="next-item" style="width:100%;text-align:left;cursor:pointer" ' +
+      act('dbxBrowseTo', null, f.path) + '>' + icon('folder') + '<div class="txt">' + esc(f.name) +
+      '</div>' + icon('chevR') + '</button>';
+  }).join('') || '<div class="empty" style="padding:10px">No subfolders here.</div>';
+  var roleBoxes = DBX_ROLES.map(function (r) {
+    return '<label style="display:inline-flex;align-items:center;gap:6px;margin-right:14px;cursor:pointer">' +
+      '<input type="checkbox" class="dbxRole" value="' + esc(r) + '"' + (r === 'incoming' ? ' checked' : '') + '>' +
+      esc(DBX_ROLE_LABEL[r]) + '</label>';
+  }).join('');
+  openModal('Link a Dropbox folder',
+    '<div class="mono" style="font-size:12px;margin-bottom:8px;display:flex;align-items:center;gap:8px">' +
+    (up !== null ? '<button class="btn sm ghost" ' + act('dbxBrowseTo', null, up) + '>' + icon('chevL') + 'Up</button>' : '') +
+    '<span>' + esc(pp.path) + '</span>' +
+    (node.file_count ? '<span class="mini">' + node.file_count + ' file' + (node.file_count === 1 ? '' : 's') + '</span>' : '') +
+    '</div>' +
+    '<div class="next-list" style="max-height:240px;overflow:auto;margin-bottom:12px">' + rows + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Roles', '<div style="padding:6px 0">' + roleBoxes + '</div>',
+      'what this folder IS to the show — one, the other, or both (Tom’s flexibility rule)') +
+    finLabelWrap('Label', '<input id="dbxLabel" class="cell-in" placeholder="Client uploads">') +
+    finLabelWrap('File request URL (optional)',
+      '<input id="dbxReqUrl" class="cell-in" placeholder="https://www.dropbox.com/request/…">',
+      'paste it if this folder is a file request’s destination — the copy-URL chip uses it') +
+    '</div>' +
+    _foot(act('dbxLinkCommit'), 'Link this folder', 'link'));
+}
+async function dbxBrowseToAct(k) {
+  if (!PENDING_DBX_LINK) return;
+  PENDING_DBX_LINK.path = String(k || '/');
+  return dbxBrowseDraw();
+}
+async function dbxLinkCommit() {
+  if (!PENDING_DBX_LINK) return;
+  var pp = PENDING_DBX_LINK;
+  if (pp.path === '/' || !pp.path) { toast('Pick a folder', 'The Dropbox root is not a folder to link'); return; }
+  var roles = [];
+  var els = document.querySelectorAll('.dbxRole');
+  for (var i = 0; i < els.length; i++) if (els[i].checked) roles.push(els[i].value);
+  if (!roles.length) { toast('Pick at least one role', 'What is this folder to the show?'); return; }
+  try {
+    await api.addDropboxLink(pp.showId, { path: pp.path, roles: roles,
+      label: _v('dbxLabel'), file_request_url: _v('dbxReqUrl') });
+  } catch (e) { toast('Not linked', String(e && e.message || e), 'err'); return; }
+  var showId = pp.showId;
+  PENDING_DBX_LINK = null;
+  closeM();
+  toast('Folder linked', pp.path + ' · ' + roles.map(function (r) { return DBX_ROLE_LABEL[r]; }).join(' + '));
+  await dbxReload(showId);
+  return refreshShowTab(showId, 'content');
+}
+
+/* ── link an existing file request (needs file_requests.read; the paste-URL
+      path on a plain folder link covers the scope-less world) ─────────────── */
+async function dbxLinkRequestAct(showId) {
+  var list;
+  try { list = await api.dropboxFileRequests(); }
+  catch (e) { toast('Could not list file requests', String(e && e.message || e), 'err'); return; }
+  if (!list || !list.length) {
+    toast('No open file requests', 'Create one here, or link its destination folder and paste the URL.', 'warn');
+    return;
+  }
+  var rows = list.map(function (fr) {
+    return '<button class="next-item" style="width:100%;text-align:left;cursor:pointer" ' +
+      act('dbxRequestPick', Number(showId), fr.id) + '><div class="txt">' + esc(fr.title || fr.id) +
+      '<span>' + esc(fr.destination || '') + (fr.file_count ? ' · ' + fr.file_count + ' file' +
+      (fr.file_count === 1 ? '' : 's') : '') + '</span></div>' + icon('chevR') + '</button>';
+  }).join('');
+  openModal('Link a file request',
+    '<p style="margin:0 0 10px;color:var(--text-2);font-size:13px">The request’s destination folder links as ' +
+    '<b>incoming</b>; its URL rides along for copy-to-clipboard.</p>' +
+    '<div class="next-list" style="max-height:280px;overflow:auto">' + rows + '</div>');
+}
+async function dbxRequestPickAct(showId, requestId) {
+  var link;
+  try { link = await api.addDropboxLink(Number(showId), { file_request_id: requestId }); }
+  catch (e) { toast('Not linked', String(e && e.message || e), 'err'); return; }
+  closeM();
+  toast('File request linked', (link && link.path) || String(requestId));
+  await dbxReload(showId);
+  return refreshShowTab(Number(showId), 'content');
+}
+
+/* ── mint a new file request over in Dropbox ───────────────────────────────── */
+var PENDING_DBX_REQ = null;
+function dbxNewRequestAct(showId) {
+  PENDING_DBX_REQ = { showId: Number(showId) };
+  openModal('New Dropbox file request',
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Title', '<input id="dbxReqTitle" class="cell-in" placeholder="AVCA — First Serve content drop">',
+      'what the client sees on the request page') + '</div>' +
+    '<p style="margin:6px 0 0;color:var(--text-2);font-size:12.5px">Dropbox creates the request and this show ' +
+    'links its destination as an <b>incoming</b> folder. You get the URL to send — the folder itself appears ' +
+    'when the first upload lands.</p>' +
+    _foot(act('dbxNewRequestCommit'), 'Create request', 'plus'));
+}
+async function dbxNewRequestCommit() {
+  if (!PENDING_DBX_REQ) return;
+  var title = _v('dbxReqTitle');
+  if (!title) { toast('A request needs a title', 'What should the client see?'); return; }
+  var r;
+  try { r = await api.createDropboxFileRequest(PENDING_DBX_REQ.showId, title); }
+  catch (e) { toast('Not created', String(e && e.message || e), 'err'); return; }
+  var showId = PENDING_DBX_REQ.showId;
+  PENDING_DBX_REQ = null;
+  closeM();
+  await dbxReload(showId);
+  var url = (r && r.url) || (r && r.link && r.link.file_request_url) || '';
+  openModal('File request created',
+    '<p style="margin:0 0 10px;font-size:13px">Send the client this link — whatever they upload lands in ' +
+    '<span class="mono">' + esc((r && r.link && r.link.path) || '') + '</span>:</p>' +
+    '<div class="mono" style="font-size:12.5px;word-break:break-all;padding:10px;background:var(--surface-1);' +
+    'border-radius:6px;margin-bottom:10px">' + esc(url) + '</div>' +
+    (r && r.link ? '<button class="btn primary" ' + act('dbxCopyUrl', r.link.id) + '>' + icon('link') +
+      'Copy the URL</button>' : ''));
+  return refreshShowTab(showId, 'content');
+}
+async function dbxCopyUrlAct(linkId) {
+  var link = dbxLinkById(linkId);
+  var url = link && link.file_request_url;
+  if (!url) { toast('No URL on this link', 'Paste one onto the link, or re-link the file request.', 'warn'); return; }
+  var okCopy = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(url);
+      okCopy = true;
+    }
+  } catch (_) { /* fall through to the textarea trick */ }
+  if (!okCopy) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = url;
+      document.body.appendChild(ta);
+      ta.select();
+      okCopy = document.execCommand('copy');
+      document.body.removeChild(ta);
+    } catch (_) { okCopy = false; }
+  }
+  if (okCopy) toast('URL copied', url);
+  else toast('Could not copy', 'Clipboard refused — copy it by hand: ' + url, 'err');
+}
+
+/* ── listing chrome ────────────────────────────────────────────────────────── */
+function dbxOpenAct(id) {
+  DBX_UI.open[Number(id)] = !DBX_UI.open[Number(id)];
+  var link = dbxLinkById(id);
+  if (link) return refreshShowTab(link.show_id, 'content');
+}
+async function dbxSeenAct(id) {
+  var link = dbxLinkById(id);
+  try { await api.dropboxMarkSeen(id); }
+  catch (e) { toast('Not marked', String(e && e.message || e), 'err'); return; }
+  toast('Marked seen', 'The NEW badge now measures from this moment.');
+  if (link) { await dbxReload(link.show_id); return refreshShowTab(link.show_id, 'content'); }
+}
+async function dbxRefreshAct(showId) {
+  await dbxReload(showId);
+  return refreshShowTab(Number(showId), 'content');
+}
+async function dbxUnlinkAct(id) {
+  var link = dbxLinkById(id);
+  if (!link) return;
+  if (!askConfirm('Unlink ' + link.path + '?\n\n' +
+      'This removes the LINK only — nothing in Dropbox is touched, deleted or moved. ' +
+      'The folder and every file in it stay exactly where they are.')) return;
+  try { await api.deleteDropboxLink(link.show_id, link.id); }
+  catch (e) { toast('Not unlinked', String(e && e.message || e), 'err'); return; }
+  toast('Folder unlinked', link.path + ' — Dropbox untouched');
+  await dbxReload(link.show_id);
+  return refreshShowTab(link.show_id, 'content');
+}
+async function dbxProbeAct(linkId, entryPath) {
+  var link = dbxLinkById(linkId);
+  var r;
+  try { r = await api.dropboxProbe(linkId, entryPath); }
+  catch (e) { toast('Probe failed', String(e && e.message || e), 'err'); return; }
+  if (r && r.unreadable) {
+    toast('Container unreadable', String(r.note || 'Only what the bytes themselves say is ever shown.'), 'warn');
+  } else if (r) {
+    toast('Measured from the file’s own bytes',
+      (r.w && r.h ? r.w + ' × ' + r.h + 'px' : '') +
+      (r.duration_s ? ' · ' + r.duration_s + 's' : '') +
+      (r.codec ? ' · ' + r.codec : '') + (r.fps ? ' · ' + r.fps + ' fps' : ''));
+  }
+  if (link) { await dbxReload(link.show_id); return refreshShowTab(link.show_id, 'content'); }
+}
+
+/* ── the bridge: TRACK IN PLACE (primary) / INGEST A COPY (explicit) ───────── */
+var PENDING_DBX_TRACK = null;
+function dbxTrackAct(linkId, entryPath) {
+  var link = dbxLinkById(linkId);
+  if (!link) return;
+  var entry = (link.entries || []).filter(function (e) { return e.path === entryPath; })[0];
+  if (!entry) return;
+  PENDING_DBX_TRACK = { linkId: Number(linkId), entryPath: entryPath, showId: link.show_id };
+  var pieces = contentForShow(link.show_id).filter(function (p) { return p.status !== 'na'; });
+  var matchId = entry.match_piece ? entry.match_piece.id : null;
+  var opts = '<option value="">— just file it (no piece) —</option>' + pieces.map(function (p) {
+    return '<option value="' + Number(p.id) + '"' + (matchId === p.id ? ' selected' : '') + '>' +
+      esc(p.name + (p.spec_w ? ' · ' + p.spec_w + '×' + p.spec_h : '')) + '</option>';
+  }).join('');
+  var specLine = entry.spec
+    ? (entry.spec.w && entry.spec.h ? entry.spec.w + ' × ' + entry.spec.h + 'px' : '') +
+      (entry.spec.duration_s ? ' · ' + entry.spec.duration_s + 's' : '') +
+      (entry.spec.codec ? ' · ' + entry.spec.codec : '')
+    : null;
+  openModal('Track ' + entry.name,
+    '<p style="margin:0 0 10px;color:var(--text-2);font-size:13px">The file <b>stays in Dropbox</b> — ' +
+    'Showrunner keeps track of it. Linking it to a piece files it as that piece’s next version by ' +
+    'reference, no copy made.</p>' +
+    (specLine ? '<div class="mono" style="font-size:12px;margin-bottom:10px">' + esc(specLine) +
+      (entry.match_piece ? ' <span class="fresh-chip" title="' +
+        esc('Measured pixels equal “' + entry.match_piece.name + '”’s spec — a suggestion, your call.') +
+        '">matches ' + esc(entry.match_piece.name) + '</span>' : '') + '</div>' : '') +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Content piece', '<select id="dbxPiece" class="cell-in">' + opts + '</select>',
+      'track (recommended) needs a piece; “just file it” is ingest-only') + '</div>' +
+    '<div style="display:flex;gap:9px;margin-top:14px;justify-content:flex-end;flex-wrap:wrap">' +
+    '<button class="btn ghost" ' + act('dbxIngestCommit') +
+      ' title="Copies the file into Showrunner’s own storage — the explicit archival door">' +
+      icon('download') + 'Ingest a copy</button>' +
+    '<button class="btn primary" ' + act('dbxTrackCommit') + '>' + icon('link') + 'Track in place</button>' +
+    '</div>');
+}
+async function dbxTrackCommit() {
+  if (!PENDING_DBX_TRACK) return;
+  var pt = PENDING_DBX_TRACK;
+  var pieceId = _v('dbxPiece');
+  if (!pieceId) { toast('Pick the piece', 'Track links an arrival TO a piece — or use Ingest a copy.'); return; }
+  var r;
+  try { r = await api.dropboxTrack(pt.linkId, pt.entryPath, Number(pieceId)); }
+  catch (e) { toast('Not tracked', String(e && e.message || e), 'err'); return; }
+  PENDING_DBX_TRACK = null;
+  closeM();
+  var f = r && r.file;
+  toast('Tracked in place', (f ? f.name : '') + ' — v' + (r && r.version ? r.version.version_n : '?') +
+    ' references Dropbox; no copy was made');
+  await dbxReload(pt.showId);
+  return refreshShowTab(pt.showId, 'content');
+}
+async function dbxIngestCommit() {
+  if (!PENDING_DBX_TRACK) return;
+  var pt = PENDING_DBX_TRACK;
+  var pieceId = _v('dbxPiece');
+  var r;
+  try { r = await api.dropboxIngest(pt.linkId, pt.entryPath, pieceId ? Number(pieceId) : null); }
+  catch (e) { toast('Not ingested', String(e && e.message || e), 'err'); return; }
+  PENDING_DBX_TRACK = null;
+  closeM();
+  var f2 = r && r.file;
+  toast('Copy ingested', (f2 ? f2.name + ' — ' + fmtBytes(f2.size) + ' stored in Showrunner' : '') +
+    (r && r.version ? ' · filed as v' + r.version.version_n : ''));
+  await dbxReload(pt.showId);
+  return refreshShowTab(pt.showId, 'content');
+}
+
+/* ── deposit: a show file's bytes OUT to a delivery folder ─────────────────── */
+var PENDING_DBX_DEPOSIT = null;
+function dbxDepositAct(linkId) {
+  var link = dbxLinkById(linkId);
+  if (!link) return;
+  var show = SHOWS_BY_ID[link.show_id];
+  PENDING_DBX_DEPOSIT = { linkId: Number(linkId), showId: link.show_id };
+  /* content pieces' current rounds first (labeled), then the rest of the
+     show's real-byte files — remote rows excluded: those already live there */
+  var byFile = {};
+  contentForShow(link.show_id).forEach(function (p) {
+    (p.versions || []).forEach(function (v) {
+      var f = v.file || (v.file_id ? FILES_BY_ID[v.file_id] : null);
+      if (f && v.status === 'current') byFile[f.id] = p.name + ' · v' + v.version_n;
+    });
+  });
+  var candidates = ((show && show.files) || []).filter(function (f) {
+    return Number(f.size) > 0 && f.external_store !== 'dropbox';
+  });
+  if (!candidates.length) {
+    toast('Nothing to send', 'No files with real bytes on this show yet — deposits send stored bytes.', 'warn');
+    return;
+  }
+  var opts = candidates.map(function (f) {
+    var tag = byFile[f.id] ? byFile[f.id] + ' — ' : '';
+    return '<option value="' + Number(f.id) + '">' + esc(tag + f.name + (f.ext ? '.' + f.ext : '') +
+      ' · ' + fmtBytes(f.size)) + '</option>';
+  }).join('');
+  openModal('Send a file to ' + (link.label || link.path),
+    '<p style="margin:0 0 10px;color:var(--text-2);font-size:13px">Uploads the stored bytes to ' +
+    '<span class="mono">' + esc(link.path) + '</span>. Dropbox auto-renames on a name collision — ' +
+    'nothing over there is ever overwritten.</p>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('File', '<select id="dbxDepFile" class="cell-in">' + opts + '</select>',
+      'pieces’ current rounds first, then the show’s other stored files') + '</div>' +
+    _foot(act('dbxDepositCommit'), 'Send to folder', 'upload'));
+}
+async function dbxDepositCommit() {
+  if (!PENDING_DBX_DEPOSIT) return;
+  var pd = PENDING_DBX_DEPOSIT;
+  var fileId = _v('dbxDepFile');
+  if (!fileId) { toast('Pick a file', 'Which file goes out?'); return; }
+  var r;
+  try { r = await api.dropboxDeposit(pd.linkId, Number(fileId)); }
+  catch (e) { toast('Not deposited', String(e && e.message || e), 'err'); return; }
+  PENDING_DBX_DEPOSIT = null;
+  closeM();
+  toast('Deposited', (r && r.path ? r.path + ' · ' : '') + fmtBytes(r && r.size));
+  await dbxReload(pd.showId);
+  return refreshShowTab(pd.showId, 'content');
+}
+
 /* ── F4 · THE CHANGELOG ──────────────────────────────────────────────────────
    The activity table had 68 verbs, 128 writers and one buried per-show tab. The
    cross-project read is the one company-wide question a person can now ask that
@@ -6708,6 +7076,25 @@ var ACTIONS = {
   cpFeedbackCommit: function () { return cpFeedbackCommit(); },
   cpSeed:        function (t, id) { return cpSeedAct(id); },
   cpSeedCommit:  function () { return cpSeedCommit(); },
+  /* dropbox folders — where the content bytes actually live (Tom, 2026-09-10) */
+  dbxLink:       function (t, id) { return dbxLinkAct(id); },
+  dbxBrowseTo:   function (t, id, k) { return dbxBrowseToAct(k); },
+  dbxLinkCommit: function () { return dbxLinkCommit(); },
+  dbxLinkRequest: function (t, id) { return dbxLinkRequestAct(id); },
+  dbxRequestPick: function (t, id, k) { return dbxRequestPickAct(id, k); },
+  dbxNewRequest: function (t, id) { return dbxNewRequestAct(id); },
+  dbxNewRequestCommit: function () { return dbxNewRequestCommit(); },
+  dbxCopyUrl:    function (t, id) { return dbxCopyUrlAct(id); },
+  dbxOpen:       function (t, id) { return dbxOpenAct(id); },
+  dbxSeen:       function (t, id) { return dbxSeenAct(id); },
+  dbxRefresh:    function (t, id) { return dbxRefreshAct(id); },
+  dbxProbe:      function (t, id, k) { return dbxProbeAct(id, k); },
+  dbxTrack:      function (t, id, k) { return dbxTrackAct(id, k); },
+  dbxTrackCommit: function () { return dbxTrackCommit(); },
+  dbxIngestCommit: function () { return dbxIngestCommit(); },
+  dbxDeposit:    function (t, id) { return dbxDepositAct(id); },
+  dbxDepositCommit: function () { return dbxDepositCommit(); },
+  dbxUnlink:     function (t, id) { return dbxUnlinkAct(id); },
   setDiv:        async function (t, id, k) { DIV_FILTER = (DIV_FILTER === k && k !== 'all') ? 'all' : k; await render('projects'); },
   selectTpl:     async function (t, id, k) {
     /* the versions list is per-type — fetch the newly-opened type's before the
