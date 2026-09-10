@@ -3684,6 +3684,187 @@ const DEL = (p, o) => call('DELETE', p, o);
     { show_id: S, name: TAG + ' cascade-rider-v1', ext: 'mp4', kind: 'proof' }, { token: PMT });
   await POST(`/api/content/${cpKeep.body.id}/versions`, { file_id: keepFile.body.id }, { token: PMT });
 
+  section('15d-i. the sheet importer — one gate, one transaction');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom (2026-09-10): "we need some means to upload a spreadsheet or something
+  // and then track deliverables in any bucket from it." The CLIENT parses
+  // (public/importer.js — pure and DOM-free, required below through its
+  // module guard so these assertions run the byte-for-byte shipped file);
+  // POST /shows/:id/content-pieces/import is the GATE: whitelists re-checked
+  // per row, idempotent by (show, name) case/trim-insensitive, EXPECTED
+  // problems isolated per row with the sheet row number in the echo, and an
+  // UNEXPECTED crash rolling the WHOLE import back — the documented
+  // all-or-nothing choice, pinned here with an INT-overflow row.
+
+  // ── the pure half: the dims parser against the nasty-strings table ────────
+  const imp = require('../public/importer.js');
+  const dimsTable = [
+    ['3840x96',       { w: 3840, h: 96 }],
+    ['3840 × 96',     { w: 3840, h: 96 }],
+    ['3840X96',       { w: 3840, h: 96 }],
+    ['3840 × 96 px',  { w: 3840, h: 96 }],
+    ['1920*1080',     { w: 1920, h: 1080 }],
+    ['11,520x96',     { w: 11520, h: 96 }],
+    ['96x3840',       { w: 96, h: 3840 }],   // parsed AS WRITTEN — never a helpful swap
+    ['big', null], ['', null], ['3840', null], ['3840x', null],
+    ['48 ft × 8 ft', null],                  // a print spec is not a pixel map
+    ['0x96', null]
+  ];
+  for (const [dstr, want] of dimsTable) {
+    const got = imp.cpDimsParse(dstr);
+    ok(`15d-i DIMS: ${JSON.stringify(dstr)} → ${want ? want.w + '×' + want.h : 'null'}`,
+       JSON.stringify(got) === JSON.stringify(want), got);
+  }
+  // the hand-rolled CSV parser's hard cases, inline (the fixture files ride
+  // the persona walk; these pin the character-level rules)
+  const csv1 = imp.csvParse('"a,b","say ""hi"""');
+  ok('15d-i CSV: quoted commas and doubled quotes survive as one row',
+     csv1.length === 1 && csv1[0][0] === 'a,b' && csv1[0][1] === 'say "hi"', csv1);
+  const csv2 = imp.csvParse('a,b\r\nc,d\r\n');
+  ok('15d-i CSV: CRLF endings + a trailing newline → exactly two rows, no phantom',
+     csv2.length === 2 && csv2[1][1] === 'd', csv2);
+  const csv3 = imp.csvParse('"line1\nline2",x');
+  ok('15d-i CSV: an embedded newline inside quotes stays ONE cell',
+     csv3.length === 1 && csv3[0][0] === 'line1\nline2', csv3);
+  ok('15d-i CSV: a UTF-8 BOM never becomes part of the first header',
+     imp.csvParse('﻿Name,Size')[0][0] === 'Name');
+
+  // ── a fresh show, so nothing here leans on 15d's rows ─────────────────────
+  const impShow = await POST('/api/shows', {
+    project_id: P, name: TAG + ' Import City', venue: 'Import Arena',
+    load_in_date: '2026-12-05', event_date: '2026-12-06', stage: 'planning'
+  }, { token: A });
+  const SI = impShow.body.id;
+  const IMP = `/api/shows/${SI}/content-pieces/import`;
+  const impCount = async () =>
+    (await pool.query(`SELECT COUNT(*)::int AS n FROM content_pieces WHERE show_id=$1`, [SI])).rows[0].n;
+
+  ok('15d-i FLOOR: a tech may not import (rank)',
+     (await POST(IMP, { rows: [{ name: 'sneak' }] }, { token: TECHT })).status === 403);
+  ok('15d-i FLOOR: a pm who owns nothing may not either (ownership)',
+     (await POST(IMP, { rows: [{ name: 'sneak' }] }, { token: PM2T })).status === 403);
+  ok('15d-i: ...and the refusals wrote nothing', (await impCount()) === 0);
+  ok('15d-i: no rows is a 400', (await POST(IMP, {}, { token: PMT })).status === 400);
+  ok('15d-i: rows must be an ARRAY — a raw CSV string is refused',
+     (await POST(IMP, { rows: 'Name,Size\nx,1x1' }, { token: PMT })).status === 400);
+  const overRes = await POST(IMP,
+    { rows: Array.from({ length: 501 }, (_, i) => ({ name: 'r' + i })) }, { token: PMT });
+  ok('15d-i: 501 rows is a 400 naming the 500-row ceiling',
+     overRes.status === 400 && /500-row/.test(overRes.body.error), overRes.body);
+
+  // ── the representative import: all three buckets + three broken rows ──────
+  const impRows = [
+    { row_n: 2, name: TAG + ' Sponsor loop — ribbon', surface: 'Courtside ribbon', kind: 'video',
+      spec_w: 3840, spec_h: 96, duration_spec: ':30', due_date: '2026-12-01', source: 'e360' },
+    { row_n: 3, name: TAG + ' Halftime stack', kind: 'video', spec_w: 3840, spec_h: 192, source: 'client' },
+    { row_n: 4, name: TAG + ' Court wrap print', kind: 'print', source: 'third_party',
+      notes: 'source: Acme Printing' },
+    { row_n: 5, name: TAG + ' Concourse poster', kind: 'still', spec_w: 1080, spec_h: 1920, source: 'e360' },
+    { row_n: 6, name: TAG + ' IPTV variant', spec_w: 1920, spec_h: 1080 },
+    { row_n: 12, name: '', spec_w: 3840, spec_h: 96 },                  // no name
+    { row_n: 30, name: TAG + ' Mystery size', size_raw: 'big' },        // the unparseable cell, named
+    { row_n: 31, name: TAG + ' Vendor thing', source: 'vendor' }        // vocabulary miss
+  ];
+  const imp1 = await POST(IMP, { rows: impRows, file_name: 'LOVB_content_list.xlsx' }, { token: PMT });
+  ok('15d-i: the import lands — creates 5 · skips 0 · 3 rows invalid',
+     imp1.status === 200 && imp1.body.summary.created === 5
+     && imp1.body.summary.skipped === 0 && imp1.body.summary.invalid === 3, imp1.body.summary);
+  const rowOf = (n) => (imp1.body.results || []).find((x) => x.row_n === n) || {};
+  ok('15d-i ISOLATION: row 12 refused BY ROW NUMBER — no name',
+     rowOf(12).outcome === 'invalid' && rowOf(12).reason === 'no name', rowOf(12));
+  ok('15d-i ISOLATION: row 30 refused NAMING the unparseable cell',
+     rowOf(30).outcome === 'invalid' && rowOf(30).reason === "unparseable size 'big'", rowOf(30));
+  ok('15d-i ONEOF: row 31 refused naming the source whitelist',
+     rowOf(31).outcome === 'invalid' && /source must be one of/.test(rowOf(31).reason)
+     && /third_party/.test(rowOf(31).reason), rowOf(31));
+  ok('15d-i ISOLATION: 3 broken rows blocked NOTHING — all 5 good rows are on the show',
+     (await impCount()) === 5);
+  const impList = await GET(`/api/shows/${SI}/content`, { token: TECHT });
+  const impBy = {};
+  for (const p of impList.body.pieces) impBy[p.name] = p;
+  ok('15d-i BUCKETS: each row landed in ITS bucket — e360 / client / third_party',
+     impBy[TAG + ' Sponsor loop — ribbon'].source === 'e360'
+     && impBy[TAG + ' Halftime stack'].source === 'client'
+     && impBy[TAG + ' Court wrap print'].source === 'third_party');
+  ok('15d-i: specs, duration, due date and the kept-raw-source note all landed',
+     impBy[TAG + ' Sponsor loop — ribbon'].spec_w === 3840
+     && impBy[TAG + ' Sponsor loop — ribbon'].spec_h === 96
+     && impBy[TAG + ' Sponsor loop — ribbon'].duration_spec === ':30'
+     && impBy[TAG + ' Sponsor loop — ribbon'].due_date === '2026-12-01'
+     && /Acme Printing/.test(impBy[TAG + ' Court wrap print'].notes));
+  ok('15d-i: a row with no kind/status defaults video · needed — the create route\'s own defaults',
+     impBy[TAG + ' IPTV variant'].kind === 'video' && impBy[TAG + ' IPTV variant'].status === 'needed');
+  ok('15d-i ORDINARY PIECES: the rollup counts them like any hand-typed row',
+     impList.body.rollup.total === 5 && impList.body.rollup.done === 0, impList.body.rollup);
+  ok('15d-i: ONE summary activity line — "imported 5 pieces from LOVB_content_list.xlsx"',
+     (await pool.query(`SELECT detail FROM activity WHERE show_id=$1 AND action='content.import'`, [SI]))
+       .rows.filter((r) => /imported 5 pieces from LOVB_content_list\.xlsx/.test(r.detail)
+                        && /3 rows invalid/.test(r.detail)).length === 1);
+
+  // oneOf on kind + status — per-row refusals, clean neighbours land
+  const impVocab = await POST(IMP, { rows: [
+    { row_n: 2, name: TAG + ' Gif thing', kind: 'gif' },
+    { row_n: 3, name: TAG + ' Done thing', status: 'done' },
+    { row_n: 4, name: TAG + ' Fine thing' }
+  ] }, { token: PMT });
+  ok('15d-i ONEOF: an unknown kind is a per-row refusal naming the list',
+     impVocab.body.summary.invalid === 2
+     && /kind must be one of/.test((impVocab.body.results.find((x) => x.row_n === 2) || {}).reason || ''),
+     impVocab.body.results);
+  ok('15d-i ONEOF: an unknown status the same — and the clean neighbour still landed',
+     /status must be one of/.test((impVocab.body.results.find((x) => x.row_n === 3) || {}).reason || '')
+     && impVocab.body.summary.created === 1);
+  ok('15d-i: a malformed due date is a per-row refusal too',
+     (((await POST(IMP, { rows: [{ name: TAG + ' Bad date', due_date: 'ASAP' }] }, { token: PMT }))
+       .body.results || [])[0] || {}).reason === 'due_date must be YYYY-MM-DD');
+
+  // ── IDEMPOTENT: re-import the updated sheet — only the new row lands ──────
+  const imp2 = await POST(IMP, { rows: [
+    // the same piece, MANGLED in case and padding — the skip must not care
+    { row_n: 2, name: '  ' + (TAG + ' Sponsor loop — ribbon').toUpperCase() + '  ',
+      spec_w: 3840, spec_h: 96 },
+    { row_n: 3, name: TAG + ' Halftime stack' },
+    { row_n: 4, name: TAG + ' New for v2' }
+  ], file_name: 'LOVB_content_list_v2.xlsx' }, { token: PMT });
+  ok('15d-i IDEMPOTENT GATE: the UPPERCASED, padded twin of “' + TAG + ' Sponsor loop — ribbon” skips, '
+     + 'pointing at the piece it duplicates — case/trim-insensitive by design',
+     imp2.status === 200 && imp2.body.summary.created === 1 && imp2.body.summary.skipped === 2
+     && (imp2.body.results.find((x) => x.row_n === 2) || {}).outcome === 'skipped'
+     && (imp2.body.results.find((x) => x.row_n === 2) || {}).reason === 'already on this show'
+     && (imp2.body.results.find((x) => x.row_n === 2) || {}).id === impBy[TAG + ' Sponsor loop — ribbon'].id,
+     imp2.body.results);
+  const imp3 = await POST(IMP, { rows: [
+    { row_n: 2, name: TAG + ' Sponsor loop — ribbon' },
+    { row_n: 3, name: TAG + ' Halftime stack' },
+    { row_n: 4, name: TAG + ' New for v2' }
+  ] }, { token: PMT });
+  ok('15d-i IDEMPOTENT: importing the same sheet AGAIN creates zero — every row skips',
+     imp3.body.summary.created === 0 && imp3.body.summary.skipped === 3, imp3.body.summary);
+  const impDup = await POST(IMP, { rows: [
+    { row_n: 2, name: TAG + ' Twice listed' },
+    { row_n: 3, name: '  ' + TAG + ' twice LISTED' }
+  ] }, { token: PMT });
+  ok('15d-i: a sheet listing a piece TWICE creates it once — the twin names the earlier row',
+     impDup.body.summary.created === 1 && impDup.body.summary.skipped === 1
+     && /earlier row in this sheet/.test((impDup.body.results.find((x) => x.row_n === 3) || {}).reason || ''),
+     impDup.body.results);
+
+  // ── TRANSACTION: an unexpected crash row → 500, NOTHING half-written ──────
+  // spec_w 99999999999 passes intOrNull and overflows INT4 at the INSERT — a
+  // genuine server-side crash, not a validation miss. The documented choice:
+  // expected problems are per-row results; the unexpected rolls back WHOLE.
+  const impBefore = await impCount();
+  const impCrash = await POST(IMP, { rows: [
+    { row_n: 2, name: TAG + ' Good neighbour' },
+    { row_n: 3, name: TAG + ' Crash row', spec_w: 99999999999 }
+  ] }, { token: PMT });
+  ok('15d-i TRANSACTION: a genuinely crashing row 500s the whole import',
+     impCrash.status === 500, impCrash.status);
+  ok('15d-i TRANSACTION: ...and NOTHING was half-written — the good neighbour did not land either',
+     (await impCount()) === impBefore
+     && !(await GET(`/api/shows/${SI}/content`, { token: PMT })).body.pieces
+          .some((p) => p.name === TAG + ' Good neighbour'));
+
   section('15e. dropbox — folders, requests, track/ingest/deposit, the probe');
   // ══════════════════════════════════════════════════════════════════════════
   // Tom (2026-09-10): folders link to shows with a SET of roles (incoming /

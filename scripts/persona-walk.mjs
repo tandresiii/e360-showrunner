@@ -2390,6 +2390,151 @@ async function main() {
      (await GET(`/api/files/${wf2.body.id}`, { token: T.brenden })).status === 200);
 
   // ══════════════════════════════════════════════════════════════════════════
+  section('41b · the sheet importer — a client\'s list becomes tracked pieces');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom (2026-09-10): "we need some means to upload a spreadsheet or
+  // something and then track deliverables in any bucket from it." Clients
+  // send content lists as Excel/CSV; until this pass somebody retyped them.
+  // The walk drives the REAL parsing module (public/importer.js — pure and
+  // DOM-free on purpose, loaded byte-for-byte into a bare vm) against the
+  // COMMITTED fixture CSVs, then feeds the rows it built to the real route,
+  // exactly the way the modal does: open → pick/paste → mapping guessed → a
+  // human corrects one column → preview counts exact → import → pieces land
+  // in their buckets → re-import skips everything → invalid rows echo back
+  // by sheet row number.
+
+  reach('Import a sheet of content pieces', {
+    seam: 'importContent', action: ['cpImport', 'cpImportParse', 'cpImportCommit'] });
+
+  const impCtx = { console };
+  vm.createContext(impCtx);
+  new vm.Script(SRC['importer.js'], { filename: 'public/importer.js' }).runInContext(impCtx);
+  ok('public/importer.js is PURE — it loads on a bare vm with nothing but a console',
+     typeof impCtx.csvParse === 'function' && typeof impCtx.cpBuildRows === 'function');
+
+  // ── the modal's mechanics, held to the honest copy ───────────────────────
+  ok('every mapping guess is a DROPDOWN a human can correct, re-rendered live',
+     /class="cell-in impMap"/.test(APP_JS) && /impMap[\s\S]{0,600}addEventListener\('change'/.test(APP_JS));
+  ok('the first-row-is-headers toggle and the bucket default both render (auto-detected, overridable)',
+     /id="impHeader"/.test(APP_JS) && /id="impBucket"/.test(APP_JS) &&
+     /First row is headers/.test(APP_JS));
+  ok('XLSX is best-effort: SheetJS is PINNED to one exact cdnjs build',
+     /cdnjs\.cloudflare\.com\/ajax\/libs\/xlsx\/0\.18\.5\/xlsx\.full\.min\.js/.test(APP_JS));
+  ok('…lazy-loaded ONLY in API mode — file:// and the demo never dial a CDN',
+     /function cpImpReadFile[\s\S]{0,600}!SR\.isApi\(\)[\s\S]{0,600}cpLoadSheetJS/.test(APP_JS));
+  ok('…and every failure path says the honest sentence, on a timeout too — never a silent hang',
+     /save as CSV and import that/.test(APP_JS) && /}, 20000\)/.test(APP_JS));
+  ok('spreadsheet cells are HOSTILE INPUT — grid cells, header labels and the file name render esc()ed',
+     /esc\(String\(row\[c2\]/.test(APP_JS) && /esc\(String\(pi\.grid\[0\]\[c\]/.test(APP_JS) &&
+     /esc\(pi\.fileName\)/.test(APP_JS));
+
+  // ── the CLEAN fixture: the mapping guesses itself ────────────────────────
+  const readFix = (n) => fs.readFileSync(path.join(APP, 'scripts', 'fixtures', n), 'utf8');
+  const gClean = impCtx.csvParse(readFix('content-list-clean.csv'));
+  ok('the clean fixture parses — a header row and four data rows, headers auto-detected',
+     gClean.length === 5 && impCtx.cpDetectHeader(gClean) === true);
+  ok('the mapping GUESSES itself — Name/Width/Height/Duration/Due date/Type/Notes, every column placed',
+     JSON.stringify(impCtx.cpGuessMapping(gClean[0])) ===
+     JSON.stringify(['name', 'spec_w', 'spec_h', 'duration_spec', 'due_date', 'kind', 'notes']),
+     impCtx.cpGuessMapping(gClean[0]));
+
+  // ── the TRICKY fixture: CRLF, quoted commas, ×-variants, a source column ─
+  const tTricky = readFix('content-list-tricky.csv');
+  ok('the tricky fixture still carries its REAL CRLF endings (.gitattributes holds the bytes)',
+     tTricky.indexOf('\r\n') >= 0);
+  const gTricky = impCtx.csvParse(tTricky);
+  ok('CRLF + quoted fields parse: 5 rows, the comma-bearing name intact',
+     gTricky.length === 5 && gTricky[1][0] === 'Sponsor loop, ribbon — north', gTricky.length);
+  ok('doubled quotes and an embedded newline survive as CELLS, not row breaks',
+     gTricky[2][0] === 'Halftime stack — "hero" spot'
+     && gTricky[3][5] === 'two lines:\ncrowd prompt');
+  const mTricky = impCtx.cpGuessMapping(gTricky[0]);
+  ok('Piece/Resolution/Length/Source/Screen/Notes guess name/size/duration/source/surface/notes',
+     JSON.stringify(mTricky) ===
+     JSON.stringify(['name', 'size', 'duration_spec', 'source', 'surface', 'notes']), mTricky);
+  const bTricky = impCtx.cpBuildRows(gTricky, mTricky, { headerRow: true, bucket: 'e360' });
+  ok('THE ×-VARIANTS: "3840x96", "3840 × 96" and "3840X96" all parse to the same 3840×96',
+     bTricky[0].spec_w === 3840 && bTricky[0].spec_h === 96
+     && bTricky[1].spec_w === 3840 && bTricky[1].spec_h === 96
+     && bTricky[2].spec_w === 3840 && bTricky[2].spec_h === 96,
+     bTricky.map((r) => r.spec_w + 'x' + r.spec_h).join(' '));
+  ok('…and "11,520x96" sheds its thousands comma — 11520×96',
+     bTricky[3].spec_w === 11520 && bTricky[3].spec_h === 96);
+  ok('SOURCE FUZZING: "us" → e360 · "Client" → client · an empty cell → the picker\'s default',
+     bTricky[0].source === 'e360' && bTricky[1].source === 'client' && bTricky[3].source === 'e360');
+  ok('…and "Acme Printing" → third_party with the RAW VALUE kept in notes — never a silent guess',
+     bTricky[2].source === 'third_party' && /source: Acme Printing/.test(bTricky[2].notes));
+
+  // ── a human corrects one column: unmap Length, durations drop everywhere ─
+  const mFixed = mTricky.slice();
+  mFixed[2] = null;
+  const bFixed = impCtx.cpBuildRows(gTricky, mFixed, { headerRow: true, bucket: 'e360' });
+  ok('REMAP: un-mapping the Length column drops durations from every built row',
+     bTricky[0].duration_spec === ':30'
+     && bFixed.every((r) => r.duration_spec === ''));
+
+  // ── the INVALID fixture: the dry preview counts exactly right ────────────
+  const gInv = impCtx.csvParse(readFix('content-list-invalid.csv'));
+  const bInv = impCtx.cpBuildRows(gInv, impCtx.cpGuessMapping(gInv[0]),
+    { headerRow: true, bucket: 'client' });
+  const pInv = impCtx.cpPreviewCounts(bInv, []);
+  ok('PREVIEW: creates 2 · skips 1 (an in-sheet twin) · 2 invalid — the dry summary is exact',
+     pInv.creates.length === 2 && pInv.skips.length === 1 && pInv.invalids.length === 2,
+     { c: pInv.creates.length, s: pInv.skips.length, i: pInv.invalids.length });
+  ok('…invalids carry SHEET row numbers a person can go fix — row 3: no name · row 4: the size, named',
+     pInv.invalids[0].row_n === 3 && pInv.invalids[0].reason === 'no name'
+     && pInv.invalids[1].row_n === 4 && pInv.invalids[1].reason === "unparseable size 'big'",
+     pInv.invalids);
+  ok('…and the US-shaped date normalized on the way through — 11/20/2026 → 2026-11-20',
+     (bInv.find((r) => r.name === 'Closing sting') || {}).due_date === '2026-11-20');
+
+  // ── the WRITE: rows the real parser built, through the real route ────────
+  ok('GATE: Omar (tech) may not import',
+     (await POST(`/api/shows/${SHOW}/content-pieces/import`, { rows: bTricky },
+       { token: T.omar })).status === 403);
+  ok('GATE: Pat (owns nothing) may not either',
+     (await POST(`/api/shows/${SHOW}/content-pieces/import`, { rows: bTricky },
+       { token: T.pat })).status === 403);
+  const wImp = await POST(`/api/shows/${SHOW}/content-pieces/import`,
+    { rows: bTricky, file_name: 'content-list-tricky.csv' }, { token: T.brenden });
+  ok('Brenden imports the parsed sheet — 4 created, per-row results echoed',
+     wImp.status === 200 && wImp.body.summary.created === 4
+     && (wImp.body.results || []).every((x) => x.outcome === 'created'), wImp.body.summary);
+  const wImpList = await GET(`/api/shows/${SHOW}/content`, { token: T.omar });
+  const wImpBy = {};
+  for (const p of wImpList.body.pieces) wImpBy[p.name] = p;
+  ok('the created rows are ORDINARY content_pieces — right buckets, right specs, on the tab with everything else',
+     wImpBy['Sponsor loop, ribbon — north'].source === 'e360'
+     && wImpBy['Sponsor loop, ribbon — north'].spec_w === 3840
+     && wImpBy['Sponsor loop, ribbon — north'].spec_h === 96
+     && wImpBy['Halftime stack — "hero" spot'].source === 'client'
+     && wImpBy['Center hung sting'].source === 'third_party'
+     && /Acme Printing/.test(wImpBy['Center hung sting'].notes));
+  ok('…and the owed arrivals join the chase-list shape — client/third-party, not yet in hand',
+     wImpBy['Halftime stack — "hero" spot'].status === 'needed'
+     && wImpBy['Center hung sting'].status === 'needed');
+  ok('ONE activity line for the whole import, naming the file',
+     (await activityFor(SHOW, 'content.import')).some((a) =>
+       /imported 4 pieces from content-list-tricky\.csv/.test(a.detail)));
+
+  // ── re-import the SAME sheet: idempotent by (show, name) ─────────────────
+  const wImp2 = await POST(`/api/shows/${SHOW}/content-pieces/import`,
+    { rows: bTricky, file_name: 'content-list-tricky.csv' }, { token: T.brenden });
+  ok('RE-IMPORT: zero created — all 4 skip as already-on-this-show, nothing duplicated',
+     wImp2.status === 200 && wImp2.body.summary.created === 0
+     && wImp2.body.summary.skipped === 4, wImp2.body.summary);
+
+  // ── the invalid sheet end to end: bad rows echo by row number ────────────
+  const wImp3 = await POST(`/api/shows/${SHOW}/content-pieces/import`,
+    { rows: bInv, file_name: 'content-list-invalid.csv' }, { token: T.brenden });
+  ok('the invalid fixture imports its GOOD rows — 2 created · 1 in-sheet twin skipped · 2 invalid by row number',
+     wImp3.body.summary.created === 2 && wImp3.body.summary.skipped === 1
+     && wImp3.body.summary.invalid === 2
+     && (wImp3.body.results.find((x) => x.row_n === 3) || {}).reason === 'no name'
+     && /unparseable size 'big'/.test((wImp3.body.results.find((x) => x.row_n === 4) || {}).reason || ''),
+     wImp3.body.results);
+
+  // ══════════════════════════════════════════════════════════════════════════
   section('42 · the nightly backup — honest when it cannot run, reachable when it can');
   // ══════════════════════════════════════════════════════════════════════════
   // THIS server runs with no storage ON PURPOSE (§12's production-default

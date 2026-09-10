@@ -1,0 +1,6 @@
+# The importer fixture CSVs are BYTE-EXACT test vectors: the CRLF row
+# endings, the LF-only embedded newline inside a quoted cell, and the UTF-8
+# characters ARE what the suites assert against. Line-ending normalization
+# (core.autocrlf) would rewrite exactly the bytes under test — so these
+# files opt out of text handling entirely, on every platform.
+scripts/fixtures/*.csv -text

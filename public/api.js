@@ -2903,6 +2903,11 @@ var api = (function () {
        PUT  /api/content/versions/:id/feedback -> contentFeedback(id, text)
        GET  /api/shows/:id/content-seed     -> contentSeed(showId)
        POST /api/shows/:id/content-seed     -> contentSeedApply(showId, picks)
+       POST /api/shows/:id/content-pieces/import -> importContent(showId,
+                                               rows, fileName)  [structured
+                                               rows parsed client-side —
+                                               public/importer.js; idempotent
+                                               by name; per-row results]
        ==================================================================== */
     listContent: function (showId) {
       if (!API()) {
@@ -3135,6 +3140,81 @@ var api = (function () {
         { picks: picks.map(Number) }, { noNotify: true })
         .then(function (r) {
           return { created: ((r && r.created) || []).map(A.contentPiece) };
+        });
+    },
+    /* the sheet importer's one write — rows are STRUCTURED already
+       (public/importer.js parsed the CSV/XLSX client-side; the server never
+       grows a spreadsheet dependency). Idempotent by (show, name),
+       case/trim-insensitive; per-row results echo back with sheet row
+       numbers; expected problems (no name, unparseable size, vocabulary
+       misses) are per-row 'invalid' and never block their neighbours; an
+       UNEXPECTED error rolls the whole import back — nothing half-written.
+       The demo twin mirrors the server's walk row for row, so the file://
+       demo renders the identical summary. */
+    importContent: function (showId, rows, fileName) {
+      if (!Array.isArray(rows) || !rows.length) {
+        return fail('rows required — the parsed sheet, one object per row');
+      }
+      if (rows.length > 500) {
+        return fail('that sheet is over the 500-row ceiling — split it and import in parts');
+      }
+      if (!API()) {
+        var show = SHOWS_BY_ID[Number(showId)];
+        if (!show) return fail('show ' + showId + ' not found');
+        if (!canEditFolderOf(show)) return fail('importing pieces is the show-runner’s call');
+        var seen = {};
+        contentForShow(show.id).forEach(function (p) {
+          seen[String(p.name).trim().toLowerCase()] = p.id;
+        });
+        var results = [], created = [];
+        rows.forEach(function (r, i) {
+          r = r && typeof r === 'object' ? r : {};
+          var rowN = Number(r.row_n) || (i + 1);
+          var name = String(r.name || '').trim();
+          var sizeRaw = String(r.size_raw || '').trim();
+          var src = r.source === undefined || r.source === '' ? 'e360' : r.source;
+          var knd = r.kind === undefined || r.kind === '' ? 'video' : r.kind;
+          var stt = r.status === undefined || r.status === '' ? 'needed' : r.status;
+          var reason = null;
+          if (!name) reason = 'no name';
+          else if (sizeRaw && r.spec_w == null && r.spec_h == null) {
+            reason = 'unparseable size \'' + sizeRaw.slice(0, 40) + '\'';
+          }
+          else if (CONTENT_SOURCES.indexOf(src) < 0) reason = 'source must be one of ' + CONTENT_SOURCES.join(', ');
+          else if (CONTENT_KINDS.indexOf(knd) < 0) reason = 'kind must be one of ' + CONTENT_KINDS.join(', ');
+          else if (CONTENT_STATUSES.indexOf(stt) < 0) reason = 'status must be one of ' + CONTENT_STATUSES.join(', ');
+          else if (r.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(String(r.due_date))) {
+            reason = 'due_date must be YYYY-MM-DD';
+          }
+          if (reason) { results.push({ row_n: rowN, outcome: 'invalid', reason: reason }); return; }
+          var key = name.toLowerCase();
+          if (seen[key] !== undefined) {
+            results.push({ row_n: rowN, outcome: 'skipped', name: name,
+              reason: typeof seen[key] === 'number'
+                ? 'already on this show' : 'duplicate of an earlier row in this sheet',
+              id: typeof seen[key] === 'number' ? seen[key] : null });
+            return;
+          }
+          var p = mkContentPiece({ show: show.id, name: name, surface: r.surface || '',
+            kind: knd, w: r.spec_w == null ? null : Number(r.spec_w),
+            h: r.spec_h == null ? null : Number(r.spec_h),
+            dur: r.duration_spec || '', source: src, status: stt,
+            notes: r.notes || '', by: ME, off: 0 });
+          if (r.due_date) p.due_date = r.due_date;
+          seen[key] = 'sheet';
+          created.push(p);
+          results.push({ row_n: rowN, outcome: 'created', name: name, id: p.id });
+        });
+        return ok({ results: results, created: created,
+          summary: { created: created.length,
+            skipped: results.filter(function (x) { return x.outcome === 'skipped'; }).length,
+            invalid: results.filter(function (x) { return x.outcome === 'invalid'; }).length } });
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/content-pieces/import',
+        { rows: rows, file_name: fileName || '' }, { notifyOk: true })
+        .then(function (r) {
+          ((r && r.created) || []).forEach(A.contentPiece);
+          return r;
         });
     },
 

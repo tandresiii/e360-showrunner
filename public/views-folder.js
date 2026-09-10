@@ -1680,6 +1680,9 @@ function tabContent(show) {
     (editable ? '<button class="btn ghost" ' + act('cpSeed', show.id) +
       ' title="One proposed piece per media-server zone of the bound content spec — stack-aware pixel sizes, a human picks which">' +
       icon('layers') + 'Add pieces from spec</button>' +
+      '<button class="btn ghost" ' + act('cpImport', show.id) +
+      ' title="Upload or paste the client’s content list — CSV or Excel — map the columns, preview, import into any bucket">' +
+      icon('grid') + 'Import sheet</button>' +
       '<button class="btn primary" ' + act('cpAdd', show.id) + '>' + icon('plus') + 'Add piece</button>'
       : '') + '</div></div>';
 
@@ -1695,7 +1698,8 @@ function tabContent(show) {
       (editable
         ? '<div style="display:flex;gap:9px;justify-content:center;margin-top:16px;flex-wrap:wrap">' +
           '<button class="btn primary" ' + act('cpAdd', show.id) + '>' + icon('plus') + 'Add piece</button>' +
-          '<button class="btn ghost" ' + act('cpSeed', show.id) + '>' + icon('layers') + 'Add pieces from spec</button></div>'
+          '<button class="btn ghost" ' + act('cpSeed', show.id) + '>' + icon('layers') + 'Add pieces from spec</button>' +
+          '<button class="btn ghost" ' + act('cpImport', show.id) + '>' + icon('grid') + 'Import sheet</button></div>'
         : '') + '</div>';
   }
 

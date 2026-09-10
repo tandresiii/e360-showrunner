@@ -51,7 +51,7 @@ with **Jobs** (the commercial dimension) alongside the shows in the folder.
 | `routes/notes.js` | 387 | anchored notes, mentions, the personal inbox |
 | `routes/schedule.js` | 824 | run of show, crew, call-sheet header |
 | `routes/photos.js` | 601 | photo curation, picks, the thumbnailer contract |
-| `routes/content.js` | 470 | content pieces — the graphic-design pipeline: sources, proof rounds, spec seeding, the measured-vs-spec question |
+| `routes/content.js` | 596 | content pieces — the graphic-design pipeline: sources, proof rounds, spec seeding, the measured-vs-spec question, the sheet importer (structured rows in; parsing lives in `public/importer.js`) |
 | `routes/deliverables.js` | 624 | the client recap lifecycle |
 | `routes/proposals.js` | 406 | **confirm / reject — session only** |
 | `routes/agent.js` | 660 | the whole `/api/agent/*` surface |
@@ -858,6 +858,22 @@ Content     GET /api/shows/:id/content · GET /api/content?project_id=&show_id=&
              zones, stack-aware; no spec / no zones answers honestly)
             POST /api/shows/:id/content-seed  (picks = zone INDEXES; the server
              re-derives every pixel number — a size never arrives client-typed)
+            POST /api/shows/:id/content-pieces/import  (the sheet importer —
+             {rows:[{row_n, name, surface?, kind?, spec_w?, spec_h?,
+             size_raw?, duration_spec?, due_date?, source?, status?,
+             notes?}], file_name?}. Rows are STRUCTURED — the client parses
+             CSV/XLSX (public/importer.js); the server never grows a
+             spreadsheet dependency and is the GATE: oneOf whitelists
+             re-checked per row. pm+ AND canEditProject. IDEMPOTENT by
+             (show, name) case/trim-insensitive — re-importing an updated
+             sheet only adds new rows; in-sheet twins create once. Expected
+             problems (no name, unparseable size — size_raw carries the raw
+             cell so the refusal names it, vocabulary misses, malformed
+             dates) are per-row 'invalid' results with sheet row numbers and
+             NEVER block valid rows; an UNEXPECTED error rolls the whole
+             import back in one transaction — nothing half-written. ≤500
+             rows. One summary activity line; created rows are ordinary
+             content_pieces)
 Dropbox     GET /api/dropbox/browse?path= (folder picker) · GET /api/dropbox/file-requests
             GET /api/shows/:id/dropbox-links   (links + per-link LIVE listing:
              entries with is_new vs the seen-snapshot, media specs, match_piece

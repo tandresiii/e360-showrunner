@@ -470,6 +470,124 @@ router.post('/shows/:id/content-seed', requireRole('pm'), asyncH(async (req, res
   res.json({ created: await hydratePieces(created) });
 }));
 
+// ── the sheet importer ──────────────────────────────────────────────────────
+// Tom (2026-09-10): "we need some means to upload a spreadsheet or something
+// and then track deliverables in any bucket from it." Clients send content
+// lists as Excel/CSV and somebody retyped them. The CLIENT parses (CSV
+// hand-rolled, XLSX best-effort — public/importer.js; this server never
+// grows a spreadsheet dependency); this route accepts STRUCTURED rows and is
+// the gate: every whitelist re-checked here, because the browser's preview
+// is convenience and a direct API caller gets the same law.
+//
+//   · IDEMPOTENT by (show, piece name), case/trim-insensitive — re-importing
+//     an updated sheet only adds the new rows. A name already on the show,
+//     or already earlier in the SAME sheet, is a per-row 'skipped', never an
+//     error.
+//   · PER-ROW ISOLATION for EXPECTED problems: no name, an unparseable size
+//     (the raw cell travels as `size_raw` so the refusal can name it), a
+//     vocabulary miss on source/kind/status, a malformed due date — each is
+//     an 'invalid' result carrying the SHEET row number, and never blocks
+//     its neighbours.
+//   · ONE TRANSACTION, all-or-nothing for the UNEXPECTED: if any insert
+//     genuinely crashes (the suite proves it with an INT-overflow spec_w),
+//     the whole request 500s and NOTHING is half-written — a partial import
+//     with no record of where it stopped is the one outcome worse than
+//     retrying. That is the documented choice; the smoke suite pins it.
+//
+// One activity line for the whole import ("imported 44 pieces from
+// LOVB_content_list.xlsx"), the house notify passthrough, and the created
+// rows are ORDINARY content_pieces — chase panel, spec chips and Dropbox
+// matching all just work on them.
+router.post('/shows/:id/content-pieces/import', requireRole('pm'), asyncH(async (req, res) => {
+  const show = await loadShowOr404(idParam(req));
+  await assertCanEditShow(req, show);
+  const b = req.body || {};
+  const rows = pick(b, 'rows');
+  if (!Array.isArray(rows) || !rows.length) {
+    throw badRequest('rows required — the parsed sheet, one object per row');
+  }
+  if (rows.length > 500) {
+    throw badRequest('that sheet is over the 500-row ceiling — split it and import in parts');
+  }
+  const fileName = String(pick(b, 'file_name') || '').trim().slice(0, 120) || 'a spreadsheet';
+
+  // the idempotency ledger: every name already on the show, lowered+trimmed.
+  // In-sheet duplicates join it as rows land, so a sheet that lists a piece
+  // twice creates it once.
+  const existing = new Map();
+  const cur = await pool.query(`SELECT id, name FROM content_pieces WHERE show_id=$1`, [show.id]);
+  for (const p of cur.rows) existing.set(String(p.name).trim().toLowerCase(), p.id);
+
+  const out = await withTx(async (c) => {
+    const results = [];
+    const created = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i] && typeof rows[i] === 'object' ? rows[i] : {};
+      const rowN = intOrNull(pick(r, 'row_n')) || (i + 1);
+      const name = String(pick(r, 'name') || '').trim();
+      const sizeRaw = String(pick(r, 'size_raw') || '').trim();
+      const specW = intOrNull(pick(r, 'spec_w'));
+      const specH = intOrNull(pick(r, 'spec_h'));
+      const due = String(pick(r, 'due_date') || '').trim();
+      // expected problems, refused PER ROW with the reason in words
+      let reason = null;
+      const source = pick(r, 'source') === undefined || pick(r, 'source') === ''
+        ? 'e360' : oneOf(String(pick(r, 'source')), CONTENT_SOURCES, null);
+      const kind = pick(r, 'kind') === undefined || pick(r, 'kind') === ''
+        ? 'video' : oneOf(String(pick(r, 'kind')), CONTENT_KINDS, null);
+      const status = pick(r, 'status') === undefined || pick(r, 'status') === ''
+        ? 'needed' : oneOf(String(pick(r, 'status')), CONTENT_STATUSES, null);
+      if (!name) reason = 'no name';
+      else if (sizeRaw && specW == null && specH == null) {
+        reason = `unparseable size '${sizeRaw.slice(0, 40)}'`;
+      }
+      else if (!source) reason = `source must be one of ${CONTENT_SOURCES.join(', ')}`;
+      else if (!kind) reason = `kind must be one of ${CONTENT_KINDS.join(', ')}`;
+      else if (!status) reason = `status must be one of ${CONTENT_STATUSES.join(', ')}`;
+      else if (due && !isISODate(due)) reason = 'due_date must be YYYY-MM-DD';
+      if (reason) { results.push({ row_n: rowN, outcome: 'invalid', reason }); continue; }
+
+      // the duplicate-skip — THE idempotency rule, case/trim-insensitive
+      const key = name.trim().toLowerCase();
+      if (existing.has(key)) {
+        results.push({ row_n: rowN, outcome: 'skipped', name,
+          reason: typeof existing.get(key) === 'number'
+            ? 'already on this show' : 'duplicate of an earlier row in this sheet',
+          id: typeof existing.get(key) === 'number' ? existing.get(key) : null });
+        continue;
+      }
+
+      const ins = await c.query(
+        `INSERT INTO content_pieces (show_id, project_id, name, surface, kind,
+           spec_w, spec_h, duration_spec, source, due_date, status, notes, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+        [show.id, show.project_id, name, String(pick(r, 'surface') || '').trim(), kind,
+         specW, specH, String(pick(r, 'duration_spec') || '').trim(),
+         source, due, status, String(pick(r, 'notes') || '').trim(), req.actor]);
+      existing.set(key, 'sheet');   // an in-sheet twin of this row now skips
+      created.push(ins.rows[0]);
+      results.push({ row_n: rowN, outcome: 'created', name, id: ins.rows[0].id });
+    }
+    const skipped = results.filter((x) => x.outcome === 'skipped').length;
+    const invalid = results.filter((x) => x.outcome === 'invalid').length;
+    // ONE summary line for the whole import — 44 create lines would bury the
+    // feed the way the bulk ops the M365 memo warns about bury a mailbox.
+    await logActivity(c, { projectId: show.project_id, showId: show.id, actor: req.actor,
+      action: 'content.import', accent: created.length > 0,
+      detail: `imported ${created.length} piece${created.length === 1 ? '' : 's'} from ${fileName}` +
+        (skipped ? ` · ${skipped} duplicate${skipped === 1 ? '' : 's'} skipped` : '') +
+        (invalid ? ` · ${invalid} row${invalid === 1 ? '' : 's'} invalid` : '') });
+    await notifyTargets(c, {
+      body: b, anchorType: 'show', anchorId: show.id,
+      projectId: show.project_id, showId: show.id, actor: req.actor,
+      summary: `imported ${created.length} content piece${created.length === 1 ? '' : 's'} from ${fileName} —`
+    });
+    return { results, created, summary: { created: created.length, skipped, invalid } };
+  });
+  res.json({ summary: out.summary, results: out.results,
+             created: await hydratePieces(out.created) });
+}));
+
 module.exports = router;
 // The Dropbox bridges (routes/dropbox.js) file rounds through the SAME writer
 // this module's own version route uses — the files.js insertExpense pattern —

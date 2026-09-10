@@ -5694,6 +5694,277 @@ async function cpSeedCommit() {
   return refreshShowTab(showId, 'content');
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+   THE SHEET IMPORTER (Tom, 2026-09-10): "we need some means to upload a
+   spreadsheet or something and then track deliverables in any bucket from
+   it." One modal, staged: pick/paste → map columns (guessed, every guess a
+   dropdown) → preview counts → import. All parsing is public/importer.js —
+   pure, DOM-free, suite-driven; this block is only the modal around it and
+   the one api.importContent() write. CSV is FIRST-CLASS and works from
+   file://; XLSX is best-effort: a PINNED SheetJS build lazy-loads from the
+   CDN only when an .xlsx is picked in API mode, and every failure path says
+   the same honest sentence — save as CSV and import that — never a silent
+   hang. Spreadsheet cells are HOSTILE INPUT: every rendered cell, header
+   and file name below goes through esc().
+   ──────────────────────────────────────────────────────────────────────── */
+var CP_IMP_LABEL = { name: 'Name', surface: 'Surface / zone', kind: 'Kind',
+  size: 'Size (W×H)', spec_w: 'Width (px)', spec_h: 'Height (px)',
+  duration_spec: 'Duration', due_date: 'Due date', source: 'Source', notes: 'Notes' };
+var PENDING_IMPORT = null;
+async function cpImportAct(showId) {
+  var show = await api.getShow(showId);
+  /* warm the store so the duplicate-skip preview knows what is already here */
+  try { await api.listContent(showId); } catch (_) { /* preview degrades to zero known names */ }
+  PENDING_IMPORT = { showId: Number(showId), label: showLabel(show),
+                     fileName: '', grid: null, mapping: [], headerRow: true, bucket: 'e360' };
+  openModal('Import sheet · ' + showLabel(show),
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">The client’s content list, as they ' +
+    'sent it — <b>CSV</b> works everywhere; <b>Excel</b> (.xlsx) needs the online spreadsheet library. ' +
+    'You map the columns and confirm a preview before anything is created.</p>' +
+    finLabelWrap('File', '<input type="file" id="impFile" class="cell-in" accept=".csv,.xlsx,.xls">') +
+    '<div style="margin:12px 0 4px;color:var(--muted);font-size:12px">— or paste CSV —</div>' +
+    '<textarea id="impPaste" class="note-in" rows="6" placeholder="' +
+    esc('Name,Size,Duration,Due\nSponsor loop — ribbon,3840x96,:30,2026-11-01') + '"></textarea>' +
+    _foot(act('cpImportParse'), 'Parse pasted text', 'grid'));
+  var fi = document.getElementById('impFile');
+  if (fi) fi.addEventListener('change', function () {
+    var f = fi.files && fi.files[0];
+    if (f) cpImpReadFile(f);
+  });
+}
+/* the pinned SheetJS build — one exact version, one host, cached promise.
+   Loaded ONLY on an .xlsx pick in API mode: file:// and the demo never dial
+   a CDN, they get the honest sentence instead. */
+var CP_SHEETJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+var CP_SHEETJS_P = null;
+var CP_SHEETJS_SORRY = 'Couldn’t load the spreadsheet library — save as CSV and import that.';
+function cpLoadSheetJS() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  if (CP_SHEETJS_P) return CP_SHEETJS_P;
+  CP_SHEETJS_P = new Promise(function (resolve, reject) {
+    var s = document.createElement('script');
+    var done = false;
+    var timer = setTimeout(function () {
+      /* offline, blocked CDN, tarpit — 20s is the difference between
+         best-effort and a silent hang */
+      done = true; CP_SHEETJS_P = null; s.remove();
+      reject(new Error(CP_SHEETJS_SORRY));
+    }, 20000);
+    s.src = CP_SHEETJS_URL;
+    s.onload = function () {
+      if (done) return;
+      clearTimeout(timer);
+      if (window.XLSX) resolve(window.XLSX);
+      else { CP_SHEETJS_P = null; reject(new Error(CP_SHEETJS_SORRY)); }
+    };
+    s.onerror = function () {
+      if (done) return;
+      clearTimeout(timer); CP_SHEETJS_P = null; s.remove();
+      reject(new Error(CP_SHEETJS_SORRY));
+    };
+    document.head.appendChild(s);
+  });
+  return CP_SHEETJS_P;
+}
+async function cpImpReadFile(f) {
+  var name = String(f.name || 'sheet');
+  if (/\.(xlsx|xls)$/i.test(name)) {
+    if (!SR.isApi()) {
+      /* no server means no CDN worth pretending about — same honest path */
+      toast('Excel import needs the spreadsheet library', CP_SHEETJS_SORRY, 'err');
+      return;
+    }
+    var X;
+    try { X = await cpLoadSheetJS(); }
+    catch (e) { toast('Excel import unavailable', String(e && e.message || e), 'err'); return; }
+    try {
+      var buf = await f.arrayBuffer();
+      var wb = X.read(buf, { type: 'array' });
+      var ws = wb.Sheets[wb.SheetNames[0]];
+      var grid = X.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' })
+        .map(function (row) { return row.map(function (c) { return String(c == null ? '' : c); }); });
+      cpImpLoaded(name, grid);
+    } catch (e) {
+      toast('Could not read that workbook', String(e && e.message || e), 'err');
+    }
+    return;
+  }
+  /* CSV — first-class, the hand-rolled parser, no library, works everywhere */
+  var text;
+  try { text = await f.text(); }
+  catch (e) { toast('Could not read that file', String(e && e.message || e), 'err'); return; }
+  cpImpLoaded(name, csvParse(text));
+}
+function cpImportParse() {
+  if (!PENDING_IMPORT) return;
+  var el = document.getElementById('impPaste');
+  var text = el ? String(el.value || '') : '';
+  if (!text.trim()) { toast('Nothing to parse', 'Paste CSV first — or pick a file above.', 'warn'); return; }
+  cpImpLoaded('pasted CSV', csvParse(text));
+}
+function cpImpLoaded(name, grid) {
+  if (!PENDING_IMPORT) return;
+  grid = (grid || []).filter(function (r) { return r && r.length; });
+  if (!grid.length) { toast('Nothing to import', 'That sheet parsed to zero rows.', 'warn'); return; }
+  PENDING_IMPORT.fileName = name;
+  PENDING_IMPORT.grid = grid;
+  PENDING_IMPORT.headerRow = cpDetectHeader(grid);
+  /* guess from headers when there are headers; a headerless sheet gets the
+     one safe guess — column 1 is the names, a dims-shaped column is the
+     size — and the dropdowns carry it from there */
+  if (PENDING_IMPORT.headerRow) {
+    PENDING_IMPORT.mapping = cpGuessMapping(grid[0]);
+  } else {
+    PENDING_IMPORT.mapping = grid[0].map(function (c, i) {
+      if (i === 0) return 'name';
+      return cpDimsParse(c) ? 'size' : null;
+    });
+    var seenSize = false;
+    PENDING_IMPORT.mapping = PENDING_IMPORT.mapping.map(function (f) {
+      if (f === 'size') { if (seenSize) return null; seenSize = true; }
+      return f;
+    });
+  }
+  cpImpRender();
+}
+function cpImpRender() {
+  var pi = PENDING_IMPORT;
+  if (!pi || !pi.grid) return;
+  var dataRows = pi.grid.slice(pi.headerRow ? 1 : 0);
+  var built = cpBuildRows(pi.grid, pi.mapping, { headerRow: pi.headerRow, bucket: pi.bucket });
+  var prev = cpPreviewCounts(built, contentForShow(pi.showId).map(function (p) { return p.name; }));
+  var byRow = {};
+  prev.creates.forEach(function (r) { byRow[r.row_n] = { t: 'creates · ' + (CONTENT_SOURCE_LABEL[r.source] || r.source), c: 'var(--go, #3a9)' }; });
+  prev.skips.forEach(function (r) { byRow[r.row_n] = { t: 'skips — ' + r.reason, c: 'var(--muted)' }; });
+  prev.invalids.forEach(function (r) { byRow[r.row_n] = { t: 'invalid — ' + r.reason, c: 'var(--crit, #c55)' }; });
+
+  var nCols = 0;
+  pi.grid.forEach(function (r) { if (r.length > nCols) nCols = r.length; });
+  var mapRow = '';
+  for (var c = 0; c < nCols; c++) {
+    var opts = '<option value=""' + (!pi.mapping[c] ? ' selected' : '') + '>— ignored —</option>' +
+      CP_IMP_FIELDS.map(function (f) {
+        return '<option value="' + esc(f) + '"' + (pi.mapping[c] === f ? ' selected' : '') + '>' +
+          esc(CP_IMP_LABEL[f]) + '</option>';
+      }).join('');
+    mapRow += '<th style="min-width:110px"><select class="cell-in impMap" data-col="' + c + '">' +
+      opts + '</select>' +
+      (pi.headerRow ? '<span style="display:block;font-weight:400;color:var(--muted);font-size:10.5px;' +
+        (!pi.mapping[c] ? 'text-decoration:line-through;' : '') + 'margin-top:3px">' +
+        esc(String(pi.grid[0][c] == null ? '' : pi.grid[0][c])) + '</span>' : '') + '</th>';
+  }
+  var bodyRows = dataRows.slice(0, 8).map(function (row, i) {
+    var rowN = i + (pi.headerRow ? 2 : 1);
+    var cells = '';
+    for (var c2 = 0; c2 < nCols; c2++) {
+      cells += '<td class="mono" style="font-size:11.5px;max-width:180px;overflow:hidden;' +
+        'text-overflow:ellipsis;white-space:nowrap;' +
+        (!pi.mapping[c2] ? 'color:var(--muted);text-decoration:line-through' : '') + '">' +
+        esc(String(row[c2] == null ? '' : row[c2])) + '</td>';
+    }
+    var v = byRow[rowN];
+    return '<tr>' + cells + '<td class="mono" style="font-size:10.5px;white-space:nowrap;color:' +
+      (v ? v.c : 'var(--muted)') + '">' + esc(v ? v.t : '') + '</td></tr>';
+  }).join('');
+
+  var invalidBits = prev.invalids.slice(0, 3).map(function (r) {
+    return 'row ' + r.row_n + ': ' + r.reason;
+  }).join('; ') + (prev.invalids.length > 3 ? '; …' : '');
+  var previewLine = 'creates ' + prev.creates.length +
+    ' · skips ' + prev.skips.length + ' already on this show (by name)' +
+    ' · ' + prev.invalids.length + ' row' + (prev.invalids.length === 1 ? '' : 's') + ' invalid' +
+    (prev.invalids.length ? ' (' + invalidBits + ')' : '');
+
+  openModal('Import sheet · ' + pi.label,
+    '<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">' +
+    '<span class="mono" style="font-size:12px">' + esc(pi.fileName) + ' · ' + dataRows.length +
+    ' data row' + (dataRows.length === 1 ? '' : 's') + '</span>' +
+    '<span style="display:inline-flex;gap:12px;align-items:center;flex-wrap:wrap">' +
+    '<label style="display:inline-flex;gap:6px;align-items:center;font-size:12.5px;cursor:pointer">' +
+    '<input type="checkbox" id="impHeader"' + (pi.headerRow ? ' checked' : '') + '>First row is headers</label>' +
+    '<label style="display:inline-flex;gap:6px;align-items:center;font-size:12.5px">Default bucket ' +
+    '<select id="impBucket" class="cell-in" style="width:auto" title="Applied to every row — unless a mapped Source column overrides it per row">' +
+    CONTENT_SOURCES.map(function (s) {
+      return '<option value="' + esc(s) + '"' + (pi.bucket === s ? ' selected' : '') + '>' +
+        esc(CONTENT_SOURCE_LABEL[s] || s) + '</option>';
+    }).join('') + '</select></label></span></div>' +
+    '<div class="tbl-wrap" style="max-height:280px;overflow:auto;margin-bottom:10px">' +
+    '<table class="tbl"><thead><tr>' + mapRow + '<th></th></tr></thead>' +
+    '<tbody>' + bodyRows +
+    (dataRows.length > 8 ? '<tr><td colspan="' + (nCols + 1) + '" style="color:var(--muted);font-size:11.5px">… ' +
+      (dataRows.length - 8) + ' more row' + (dataRows.length - 8 === 1 ? '' : 's') +
+      ' — the counts below cover the whole sheet</td></tr>' : '') +
+    '</tbody></table></div>' +
+    '<div class="hint" id="impPreview" style="margin-bottom:2px">' + icon('bolt') + '<span><b>' +
+    esc(previewLine) + '</b> — nothing is written until you import; re-importing an updated sheet ' +
+    'later only adds the new rows (matched by name, case-insensitive).</span></div>' +
+    _foot(act('cpImportCommit'), 'Import ' + prev.creates.length + ' piece' +
+      (prev.creates.length === 1 ? '' : 's'), 'upload',
+      '<button class="btn ghost" ' + act('cpImport', pi.showId) + '>' + icon('chevL') + 'Start over</button>'));
+  cpImpWireMap();
+}
+/* the correction wiring — every guess is a dropdown; changing one re-renders
+   the preview live. A field picked on one column releases it from any other
+   (two "Name" columns cannot silently shadow each other — the loser flips
+   to ignored, visibly). Direct listeners, the finShowPicked file-input
+   pattern: these are inner controls of one modal, not page affordances. */
+function cpImpWireMap() {
+  var pi = PENDING_IMPORT;
+  if (!pi) return;
+  var sels = document.querySelectorAll('.impMap');
+  for (var i = 0; i < sels.length; i++) {
+    (function (sel) {
+      sel.addEventListener('change', function () {
+        var col = Number(sel.getAttribute('data-col'));
+        var f = sel.value || null;
+        if (f) pi.mapping = pi.mapping.map(function (m) { return m === f ? null : m; });
+        pi.mapping[col] = f;
+        cpImpRender();
+      });
+    })(sels[i]);
+  }
+  var hd = document.getElementById('impHeader');
+  if (hd) hd.addEventListener('change', function () {
+    pi.headerRow = !!hd.checked;
+    /* re-guess from the row that just became (or stopped being) headers */
+    pi.mapping = pi.headerRow ? cpGuessMapping(pi.grid[0]) : pi.mapping;
+    cpImpRender();
+  });
+  var bk = document.getElementById('impBucket');
+  if (bk) bk.addEventListener('change', function () {
+    pi.bucket = bk.value || 'e360';
+    cpImpRender();
+  });
+}
+async function cpImportCommit() {
+  var pi = PENDING_IMPORT;
+  if (!pi || !pi.grid) return;
+  var built = cpBuildRows(pi.grid, pi.mapping, { headerRow: pi.headerRow, bucket: pi.bucket });
+  if (!built.length) { toast('Nothing to import', 'Every row is empty.', 'warn'); return; }
+  var r;
+  try { r = await api.importContent(pi.showId, built, pi.fileName); }
+  catch (e) { toast('Not imported', String(e && e.message || e), 'err'); return; }
+  var showId = pi.showId, fromName = pi.fileName;
+  PENDING_IMPORT = null;
+  closeM();
+  var s = (r && r.summary) || { created: 0, skipped: 0, invalid: 0 };
+  var bits = [];
+  if (s.skipped) bits.push(s.skipped + ' duplicate' + (s.skipped === 1 ? '' : 's') + ' skipped');
+  if (s.invalid) {
+    var firsts = ((r && r.results) || []).filter(function (x) { return x.outcome === 'invalid'; })
+      .slice(0, 2).map(function (x) { return 'row ' + x.row_n + ': ' + x.reason; }).join('; ');
+    bits.push(s.invalid + ' row' + (s.invalid === 1 ? '' : 's') + ' invalid' + (firsts ? ' — ' + firsts : ''));
+  }
+  if (s.created === 0) {
+    toast('Nothing new to import', bits.join(' · ') || 'Every row was already on this show.', 'warn');
+  } else {
+    toast('Imported ' + s.created + ' piece' + (s.created === 1 ? '' : 's'),
+      bits.length ? 'From ' + fromName + ' · ' + bits.join(' · ') : 'From ' + fromName,
+      s.invalid ? 'warn' : 'ok');
+  }
+  return refreshShowTab(showId, 'content');
+}
+
 /* ════════════════════════════════════════════════════════════════════════════
    DROPBOX FOLDERS — where the content bytes actually live (Tom, 2026-09-10)
    ────────────────────────────────────────────────────────────────────────────
@@ -7076,6 +7347,10 @@ var ACTIONS = {
   cpFeedbackCommit: function () { return cpFeedbackCommit(); },
   cpSeed:        function (t, id) { return cpSeedAct(id); },
   cpSeedCommit:  function () { return cpSeedCommit(); },
+  /* the sheet importer — upload/paste a client's content list (Tom, 2026-09-10) */
+  cpImport:      function (t, id) { return cpImportAct(id); },
+  cpImportParse: function () { return cpImportParse(); },
+  cpImportCommit: function () { return cpImportCommit(); },
   /* dropbox folders — where the content bytes actually live (Tom, 2026-09-10) */
   dbxLink:       function (t, id) { return dbxLinkAct(id); },
   dbxBrowseTo:   function (t, id, k) { return dbxBrowseToAct(k); },
