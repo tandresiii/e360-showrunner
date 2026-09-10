@@ -175,6 +175,15 @@ table.tbl tbody tr.rowlink:hover{background:var(--surface-2)}
 .next-list{display:flex; flex-direction:column}
 .next-item{display:flex; align-items:center; gap:11px; padding:11px 0; border-bottom:1px solid var(--border)}
 .next-item:last-child{border-bottom:0}
+/* The Dropbox browser renders rows as BUTTONS (they navigate); a bare
+   button.next-item otherwise wears the UA's white chrome and its raw icon()
+   svgs have no size in this context — 9/10's giant-folder screenshot. Scoped
+   to the button form and its direct svg children so dashboard rows and their
+   own-sized pill icons are untouched. */
+button.next-item{background:transparent; border:0; border-bottom:1px solid var(--border); color:var(--text); font:inherit; font-family:var(--font-body)}
+button.next-item:hover{background:var(--surface-2)}
+button.next-item:last-child{border-bottom:0}
+button.next-item>svg{width:16px; height:16px; flex:none; color:var(--muted)}
 .next-item .txt{flex:1; font-size:13px; min-width:0}
 .next-item .txt span{display:block; color:var(--muted); font-size:11.5px; margin-top:2px}
 .summary{background:linear-gradient(180deg,var(--accent-ghost),transparent); border:1px solid color-mix(in srgb,var(--accent) 22%,var(--border))}
