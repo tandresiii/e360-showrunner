@@ -4081,6 +4081,74 @@ const DEL = (p, o) => call('DELETE', p, o);
      specd.spec && specd.spec.source === 'probe' && specd.spec.codec === 'H.264'
      && specd.spec.w === 320, specd.spec);
 
+  // ── concurrent probes: the coalescing guard + the atomic cache write ──────
+  // The client's auto-probe pass runs TWO probes at once, so two shapes of
+  // concurrency arrive at this route that a serial clicker never sent:
+  //   · the SAME file twice  → ONE in-flight measurement, coalesced;
+  //   · two files, one link  → BOTH cache writes land (per-key jsonb merge —
+  //     the full-JSON rewrite it replaces let the slower writer erase the
+  //     faster one's verdict, which the next render would then re-buy).
+  // The fake's per-response hold keeps the flights open long enough to be
+  // genuinely concurrent, not politely sequential.
+  dbxFake.seed.file('/Clients/Smoke/Incoming/twin.png', dbxFake.seed.png(800, 600));
+  dbxFake.seed.file('/Clients/Smoke/Incoming/left.png', dbxFake.seed.png(320, 240));
+  dbxFake.seed.file('/Clients/Smoke/Incoming/right.png', dbxFake.seed.png(640, 480));
+  dbxFake.seed.downloadDelay(60);
+  const dlTwin0 = dbxFake.state.downloads.length;
+  const [twinA, twinB] = await Promise.all([
+    POST(`/api/dropbox-links/${LKIN}/probe`,
+      { entry_path: '/Clients/Smoke/Incoming/twin.png' }, { token: PMT }),
+    POST(`/api/dropbox-links/${LKIN}/probe`,
+      { entry_path: '/Clients/Smoke/Incoming/twin.png' }, { token: TECHT })
+  ]);
+  const twinReads = dbxFake.state.downloads.slice(dlTwin0)
+    .filter((d) => d.path === '/Clients/Smoke/Incoming/twin.png');
+  ok('15e COALESCE: two concurrent probes of the SAME path+rev spend ONE set of ranges',
+     twinA.status === 200 && twinB.status === 200
+     && twinA.body.w === 800 && twinB.body.w === 800 && twinReads.length === 1,
+     twinReads.length);
+  ok('15e COALESCE: ...and exactly one of the two answers says it rode the other\'s flight',
+     [twinA.body.coalesced, twinB.body.coalesced].filter(Boolean).length === 1
+     && twinA.body.cached === false && twinB.body.cached === false,
+     [twinA.body.coalesced, twinB.body.coalesced]);
+  const dbxRouter = require('../routes/dropbox');
+  ok('15e COALESCE: the in-flight map is EMPTY once the flights settle — no leak, no wedge',
+     dbxRouter.probesInFlight instanceof Map && dbxRouter.probesInFlight.size === 0,
+     dbxRouter.probesInFlight && dbxRouter.probesInFlight.size);
+  const dlTwin1 = dbxFake.state.downloads.length;
+  const twinC = await POST(`/api/dropbox-links/${LKIN}/probe`,
+    { entry_path: '/Clients/Smoke/Incoming/twin.png' }, { token: PMT });
+  ok('15e COALESCE: a LATER probe of the same rev is the snapshot cache, zero reads — the guard released',
+     twinC.status === 200 && twinC.body.cached === true
+     && dbxFake.state.downloads.length === dlTwin1, twinC.body.cached);
+  const [lrA, lrB] = await Promise.all([
+    POST(`/api/dropbox-links/${LKIN}/probe`,
+      { entry_path: '/Clients/Smoke/Incoming/left.png' }, { token: PMT }),
+    POST(`/api/dropbox-links/${LKIN}/probe`,
+      { entry_path: '/Clients/Smoke/Incoming/right.png' }, { token: PMT })
+  ]);
+  dbxFake.seed.downloadDelay(0);
+  const lrSnap = (await pool.query(
+    `SELECT snapshot FROM show_dropbox_links WHERE id=$1`, [LKIN])).rows[0].snapshot;
+  const lrKeys = Object.keys((lrSnap && lrSnap.probes) || {});
+  ok('15e ATOMIC CACHE: two DIFFERENT files probed at once on one link — BOTH verdicts are in the snapshot',
+     lrA.body.w === 320 && lrB.body.w === 640
+     && lrKeys.some((k) => /left\.png/.test(k)) && lrKeys.some((k) => /right\.png/.test(k)),
+     lrKeys);
+  const lsLR = await GET(`/api/shows/${S}/dropbox-links`, { token: PMT });
+  const lrEnts = lsLR.body.links.find((l) => l.id === LKIN).entries;
+  ok('15e ATOMIC CACHE: ...and the listing serves BOTH from cache — the slower writer erased nothing',
+     lrEnts.find((e) => e.name === 'left.png').spec.w === 320
+     && lrEnts.find((e) => e.name === 'right.png').spec.w === 640,
+     lrEnts.filter((e) => /left|right/.test(e.name)).map((e) => [e.name, e.spec]));
+  // mark-seen writes ONLY the seen baseline now — the probe cache rides along
+  // MECHANICALLY, so a probe landing mid-click cannot be erased by it
+  await POST(`/api/dropbox-links/${LKIN}/seen`, {}, { token: PMT });
+  const lsSeen2 = await GET(`/api/shows/${S}/dropbox-links`, { token: PMT });
+  ok('15e: mark-seen leaves every cached verdict standing — seeing a file does not forget its measurements',
+     lsSeen2.body.links.find((l) => l.id === LKIN).entries
+       .find((e) => e.name === 'twin.png').spec.w === 800);
+
   // ── the MATCH suggestion, against an open owed piece ──────────────────────
   const smokePiece = await POST(`/api/shows/${S}/content`, {
     name: TAG + ' Smoke intro sting', kind: 'video', spec_w: 1920, spec_h: 1080,

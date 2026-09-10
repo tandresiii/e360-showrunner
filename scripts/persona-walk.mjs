@@ -2734,6 +2734,77 @@ async function main() {
   ok('Brenden walks the tracked piece to approved — the pipeline closes over a file Showrunner never held',
      wApproved.status === 200 && wApproved.body.status === 'approved');
 
+  // ── the AUTO-PROBE pass — specs appear WITHOUT clicks (Tom, live 9-10) ───
+  // "do i have to probe all the files individually to see specs?" No: an
+  // open listing probes its own un-probed media entries — two lanes, first
+  // 25 per pass, cached and unreadable verdicts cost ZERO content requests
+  // ever after. EXECUTED here — not scanned — through §37's browser-half vm
+  // against this walk's live server, with the fake's request log as witness:
+  // its per-response hold makes real overlap observable, and its high-water
+  // mark is the lane cap's proof.
+  reach('Specs appear without clicks — the auto-probe pass on the open listing',
+    { seam: 'dropboxAutoProbe' });
+  ok('the listing card KICKS the pass on render, and rows patch IN PLACE',
+     /dbxAutoProbeKick\(link, editable\)/.test(SRC['views-folder.js'])
+     && /function dbxAutoProbeKick/.test(APP_JS) && /function dbxPatchRow/.test(APP_JS));
+  ok('a row whose probe is in flight reads as reading… — and its manual Probe button yields to the pass',
+     /reading…/.test(SRC['views-folder.js'])
+     && /!spec && !entry\.spec_unreadable && !reading/.test(SRC['views-folder.js']));
+
+  // a 31-media-file drop: 1 garbage .mov (the newest, so the pass meets it
+  // first) + 30 real PNGs — the pass must take the first 25 and STOP
+  wDbx.seed.folder('/Clients/AVCA/Bulk');
+  wDbx.seed.file('/Clients/AVCA/Bulk/broken_export.mov', wDbx.seed.garbage(),
+    { server_modified: '2026-09-10T23:59:00Z' });
+  for (let bi = 1; bi <= 30; bi += 1) {
+    wDbx.seed.file(`/Clients/AVCA/Bulk/frame_${String(bi).padStart(2, '0')}.png`,
+      wDbx.seed.png(640, 360),
+      { server_modified: `2026-09-10T12:${String(bi).padStart(2, '0')}:00Z` });
+  }
+  const wLkBulk = await POST(`/api/shows/${SHOW}/dropbox-links`,
+    { path: '/Clients/AVCA/Bulk', roles: ['incoming'], label: 'Bulk drop' }, { token: T.brenden });
+  const wBulkEntries = async () =>
+    (await GET(`/api/shows/${SHOW}/dropbox-links`, { token: T.omar }))
+      .body.links.find((l) => l.id === wLkBulk.body.id).entries;
+
+  tab.SR.setToken(T.omar);            // the vm tab signs in — probing is reading
+  wDbx.seed.downloadDelay(25);        // hold responses open: overlap becomes visible
+  wDbx.state.maxInflightDownloads = 0;
+  const wDl0 = wDbx.state.downloads.length;
+  let wStarts1 = 0;
+  const wPass1 = await tab.api.dropboxAutoProbe(wLkBulk.body.id, await wBulkEntries(),
+    { onStart: () => { wStarts1 += 1; } });
+  ok('THE 25 CAP · the pass probes the first 25 un-probed media entries and STOPS — the rest keep the manual door',
+     wPass1.probed === 25 && wStarts1 === 25 && wPass1.skipped === 6, wPass1);
+  ok('…and the fake counted exactly 25 content requests — one bounded head read per file',
+     wDbx.state.downloads.length - wDl0 === 25, wDbx.state.downloads.length - wDl0);
+  ok('THE TWO LANES · never more than two probes in flight — and really two, not a polite serial crawl',
+     wDbx.state.maxInflightDownloads === 2, wDbx.state.maxInflightDownloads);
+
+  // second render: 25 verdicts are CACHED (24 specs + 1 honest unreadable) —
+  // only the six past the first pass's cap cost anything now
+  const wDl1 = wDbx.state.downloads.length;
+  const wEnt2 = await wBulkEntries();
+  ok('the cached verdicts RIDE THE LISTING — 24 measured specs and the one honest unreadable',
+     wEnt2.filter((e) => e.spec && e.spec.source === 'probe' && e.spec.w === 640).length === 24
+     && wEnt2.filter((e) => e.spec_unreadable).length === 1
+     && wEnt2.find((e) => e.name === 'broken_export.mov').spec_unreadable === true,
+     { probed: wEnt2.filter((e) => e.spec).length, unreadable: wEnt2.filter((e) => e.spec_unreadable).length });
+  const wPass2 = await tab.api.dropboxAutoProbe(wLkBulk.body.id, wEnt2, {});
+  ok('RE-RENDER · the pass touches ONLY the six past the cap — every cached entry cost zero content requests',
+     wPass2.probed === 6 && wPass2.skipped === 0
+     && wDbx.state.downloads.length - wDl1 === 6,
+     { probed: wPass2.probed, requests: wDbx.state.downloads.length - wDl1 });
+
+  // third render: everything measured or honestly unreadable — ZERO requests,
+  // and the unreadable is NOT retried (its verdict is a cached result too)
+  const wDl2 = wDbx.state.downloads.length;
+  const wPass3 = await tab.api.dropboxAutoProbe(wLkBulk.body.id, await wBulkEntries(), {});
+  ok('WARM FOLDER · a later visit costs ZERO content requests — cached renders instantly, unreadable is never re-probed',
+     wPass3.probed === 0 && wPass3.skipped === 0 && wDbx.state.downloads.length === wDl2,
+     { probed: wPass3.probed, extra: wDbx.state.downloads.length - wDl2 });
+  wDbx.seed.downloadDelay(0);
+
   // ── ingest + deposit — the byte-moving verbs, on §34's child server ──────
   // ASYNC spawn, not spawnSync, and the difference is load-bearing: the fake
   // Dropbox lives in THIS process's event loop, and the child's ingest must

@@ -5976,7 +5976,7 @@ async function cpImportCommit() {
    tabContent renders from DBX_UI and dbxEnsure() fills it (feature-flagged
    off features.dropbox — a strip that can only 501 renders as nothing).
    ══════════════════════════════════════════════════════════════════════════ */
-var DBX_UI = { byShow: {}, loading: {}, open: {} };
+var DBX_UI = { byShow: {}, loading: {}, open: {}, reading: {} };
 function dbxEnsure(showId) {
   var sid = Number(showId);
   if (DBX_UI.byShow[sid] || DBX_UI.loading[sid]) return;
@@ -6210,6 +6210,51 @@ async function dbxProbeAct(linkId, entryPath) {
       (r.codec ? ' · ' + r.codec : '') + (r.fps ? ' · ' + r.fps + ' fps' : ''));
   }
   if (link) { await dbxReload(link.show_id); return refreshShowTab(link.show_id, 'content'); }
+}
+
+/* ── the AUTO-PROBE pass — specs appear WITHOUT clicks (Tom, 2026-09-10) ─────
+   "do i have to probe all the files individually to see specs?" No: when an
+   open listing renders, the seam's pass (api.dropboxAutoProbe — two lanes,
+   first 25 un-probed media entries; entries already carrying a spec or an
+   honest unreadable verdict are filtered out, so a warm folder costs ZERO
+   calls) measures the rest by itself. Each row is patched IN PLACE: a subtle
+   reading… while its probe flies, then the spec line — or the honest
+   unreadable, cached server-side so it is never re-fetched on a later
+   render. One pass per link at a time (a re-render mid-pass does not double
+   it); rows past the cap keep the manual Probe button as their door. A
+   TRANSPORT failure lands nothing and toasts nothing — failure toasts belong
+   to clicks, and the row simply keeps its Probe button. */
+var DBX_AUTOPROBE_RUNNING = {};
+function dbxAutoProbeKick(link, editable) {
+  var id = Number(link.id);
+  if (DBX_AUTOPROBE_RUNNING[id]) return;
+  DBX_AUTOPROBE_RUNNING[id] = true;
+  var done = function () { DBX_AUTOPROBE_RUNNING[id] = false; };
+  api.dropboxAutoProbe(id, link.entries || [], {
+    onStart: function (entry) {
+      DBX_UI.reading[dbxRowDomId(id, entry.path)] = true;
+      dbxPatchRow(link, entry, editable);
+    },
+    onDone: function (entry, r) {
+      delete DBX_UI.reading[dbxRowDomId(id, entry.path)];
+      if (r && r.unreadable) {
+        entry.spec_unreadable = true;
+        entry.spec = null;
+      } else if (r && (r.w || r.duration_s || r.codec)) {
+        entry.spec = { source: 'probe', w: r.w || null, h: r.h || null,
+                       duration_s: r.duration_s || null, codec: r.codec || null,
+                       fps: r.fps || null, audio: !!r.audio };
+      }
+      dbxPatchRow(link, entry, editable);
+    }
+  }).then(done, done);
+}
+/* swap ONE listing row for its re-render — the kick may fire before the pass's
+   HTML is in the document, so a missing row is a quiet no-op, never an error
+   (that first reading… state renders straight into the pass's own HTML) */
+function dbxPatchRow(link, entry, editable) {
+  var el = document.getElementById(dbxRowDomId(link.id, entry.path));
+  if (el) el.outerHTML = dbxEntryRow(entry, link, editable);
 }
 
 /* ── the bridge: TRACK IN PLACE (primary) / INGEST A COPY (explicit) ───────── */

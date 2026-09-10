@@ -116,6 +116,14 @@ function snapOf(link) {
 }
 const probeKey = (entryPath, rev) => `${lower(entryPath)}@${rev || ''}`;
 
+// Concurrent probes of the SAME path+rev coalesce onto ONE in-flight
+// measurement. The client's auto-probe pass runs two probes at a time, and a
+// human can click Probe while it runs — the ranges must never be spent twice
+// discovering the same thing. A key lives here only while its probe FLIES;
+// settled verdicts leave (the snapshot cache answers from then on), which the
+// smoke suite witnesses through the export below.
+const probesInFlight = new Map();
+
 // The free spec layer: what Dropbox itself measured, when it has. `pending`
 // is a real state — the entry simply carries nothing rather than a dash
 // dressed as data.
@@ -391,7 +399,10 @@ router.delete('/shows/:id/dropbox-links/:linkId', requireRole('pm'), asyncH(asyn
 
 // POST /api/dropbox-links/:id/seen — "mark seen": rewrite the NEW-badge
 // baseline to what the folder holds right now. The probe cache rides along
-// untouched — seeing a file does not forget its measurements.
+// untouched MECHANICALLY — the write below sets ONLY the seen key, so a probe
+// landing mid-click (the auto pass runs whenever a listing renders) cannot be
+// erased by a stale full-snapshot rewrite. Seeing a file does not forget its
+// measurements.
 router.post('/dropbox-links/:id/seen', requireRole('pm'), asyncH(async (req, res) => {
   requireDropbox();
   const link = await loadLinkOr404(idParam(req));
@@ -404,11 +415,11 @@ router.post('/dropbox-links/:id/seen', requireRole('pm'), asyncH(async (req, res
     seen[lower(e.path_display)] = { size: Number(e.size) || 0,
                                     server_modified: e.server_modified || null };
   }
-  const snap = snapOf(link);
   const r = await pool.query(
-    `UPDATE show_dropbox_links SET snapshot=$1, last_checked_at=NOW(),
+    `UPDATE show_dropbox_links SET snapshot=jsonb_set(COALESCE(snapshot,'{}'::jsonb),
+       '{seen}', $1::jsonb, true), last_checked_at=NOW(),
        updated_at=NOW(), updated_by=$2 WHERE id=$3 RETURNING *`,
-    [JSON.stringify({ seen, probes: snap.probes }), req.actor, link.id]);
+    [JSON.stringify(seen), req.actor, link.id]);
   res.json(dbToDropboxLink(r.rows[0], { seen_count: Object.keys(seen).length }));
 }));
 
@@ -419,7 +430,10 @@ router.post('/dropbox-links/:id/seen', requireRole('pm'), asyncH(async (req, res
 // file is reading it. Range reads only, capped by lib/mediaprobe.js; the
 // verdict — including an honest "couldn't read the container" — is cached in
 // the link snapshot per file REVISION, so a probe happens once per rev and
-// the listing serves it to everyone thereafter. A remote files row tracking
+// the listing serves it to everyone thereafter. Concurrent requests for the
+// same rev share ONE flight (probesInFlight above); concurrent requests for
+// DIFFERENT files of one link each land their own cache key without touching
+// the other's. A remote files row tracking
 // this exact path+rev gets the measured numbers too, so the version ladder's
 // ✓/? chips stand on real measurement.
 router.post('/dropbox-links/:id/probe', asyncH(async (req, res) => {
@@ -444,37 +458,59 @@ router.post('/dropbox-links/:id/probe', asyncH(async (req, res) => {
   const snap = snapOf(link);
   let result = snap.probes[key];
   const wasCached = !!result;
+  let coalesced = false;
   if (!result) {
-    try {
-      const spec = await probeSpecs({
-        size: Number(meta.size) || 0,
-        fetchRange: (a, b) => dbx.downloadRange(meta.path_display, a, b)
-      });
-      result = { ...spec, probed_at: new Date().toISOString() };
-    } catch (e) {
-      if (e.code === 'PROBE_UNREADABLE' || e.code === 'PROBE_BUDGET') {
-        // the honest failure is a result too — cached so the next click does
-        // not re-spend the ranges discovering the same nothing
-        result = { unreadable: true, note: e.message, probed_at: new Date().toISOString() };
-      } else {
-        throw e;
-      }
+    const flightKey = `${link.id}:${key}`;
+    let flight = probesInFlight.get(flightKey);
+    coalesced = !!flight;
+    if (!flight) {
+      flight = (async () => {
+        let out;
+        try {
+          const spec = await probeSpecs({
+            size: Number(meta.size) || 0,
+            fetchRange: (a, b) => dbx.downloadRange(meta.path_display, a, b)
+          });
+          out = { ...spec, probed_at: new Date().toISOString() };
+        } catch (e) {
+          if (e.code === 'PROBE_UNREADABLE' || e.code === 'PROBE_BUDGET') {
+            // the honest failure is a result too — cached so the next render
+            // does not re-spend the ranges discovering the same nothing
+            out = { unreadable: true, note: e.message, probed_at: new Date().toISOString() };
+          } else {
+            throw e;
+          }
+        }
+        // ONE key, atomically. The auto pass probes two files of the same
+        // link at once, and the full-JSON rewrite this replaces let the
+        // slower writer erase the faster one's verdict — which the next
+        // render would then re-fetch: exactly the spend the cache exists to
+        // prevent. jsonb_set touches nothing but probes.<key>.
+        await pool.query(
+          `UPDATE show_dropbox_links SET snapshot=jsonb_set(
+             jsonb_set(COALESCE(snapshot,'{}'::jsonb), '{probes}',
+                       COALESCE(snapshot->'probes','{}'::jsonb), true),
+             ARRAY['probes',$1::text], $2::jsonb, true), updated_at=NOW()
+           WHERE id=$3`,
+          [key, JSON.stringify(out), link.id]);
+        if (!out.unreadable) {
+          await pool.query(
+            `UPDATE files SET width=COALESCE($1, width), height=COALESCE($2, height),
+               duration_s=COALESCE($3, duration_s),
+               dim=CASE WHEN $1 IS NOT NULL AND $2 IS NOT NULL THEN $1 || ' x ' || $2 ELSE dim END
+             WHERE external_store='dropbox' AND LOWER(external_path)=LOWER($4) AND external_rev=$5`,
+            [out.w || null, out.h || null, out.duration_s || null,
+             meta.path_display, meta.rev || null]);
+        }
+        return out;
+      })();
+      probesInFlight.set(flightKey, flight);
+      const land = () => probesInFlight.delete(flightKey);
+      flight.then(land, land);
     }
-    snap.probes[key] = result;
-    await pool.query(
-      `UPDATE show_dropbox_links SET snapshot=$1, updated_at=NOW() WHERE id=$2`,
-      [JSON.stringify({ seen: snap.seen, probes: snap.probes }), link.id]);
-    if (!result.unreadable) {
-      await pool.query(
-        `UPDATE files SET width=COALESCE($1, width), height=COALESCE($2, height),
-           duration_s=COALESCE($3, duration_s),
-           dim=CASE WHEN $1 IS NOT NULL AND $2 IS NOT NULL THEN $1 || ' x ' || $2 ELSE dim END
-         WHERE external_store='dropbox' AND LOWER(external_path)=LOWER($4) AND external_rev=$5`,
-        [result.w || null, result.h || null, result.duration_s || null,
-         meta.path_display, meta.rev || null]);
-    }
+    result = await flight;
   }
-  res.json({ path: meta.path_display, rev: meta.rev || null, cached: wasCached, ...result });
+  res.json({ path: meta.path_display, rev: meta.rev || null, cached: wasCached, coalesced, ...result });
 }));
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -699,3 +735,6 @@ router.post('/dropbox-links/:id/deposit', requireRole('pm'), asyncH(async (req, 
 }));
 
 module.exports = router;
+// the suites' window into the coalescing guard: between requests the map must
+// be EMPTY — a wedged flight would be a leak, and only in-process eyes see it
+module.exports.probesInFlight = probesInFlight;

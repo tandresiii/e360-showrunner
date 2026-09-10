@@ -3233,6 +3233,11 @@ var api = (function () {
                                                     [LOCAL only — Dropbox untouched]
        POST /api/dropbox-links/:id/seen          -> dropboxMarkSeen(linkId)
        POST /api/dropbox-links/:id/probe         -> dropboxProbe(linkId, entryPath)
+                                                    …and dropboxAutoProbe(linkId,
+                                                    entries, hooks): the on-render
+                                                    pass over the same seam —
+                                                    2 lanes · first 25 · cached
+                                                    entries cost zero calls
        POST /api/dropbox-links/:id/track         -> dropboxTrack(linkId, entryPath, pieceId)
        POST /api/dropbox-links/:id/ingest        -> dropboxIngest(linkId, entryPath, pieceId?)
        POST /api/dropbox-links/:id/deposit       -> dropboxDeposit(linkId, fileId)
@@ -3346,6 +3351,18 @@ var api = (function () {
         var l3 = DBX_LINKS_BY_ID[Number(linkId)];
         var e3 = l3 ? l3.entries.filter(function (x) { return x.path === entryPath; })[0] : null;
         if (!e3) return fail('entry not found');
+        if (e3._probe) {
+          /* the demo's auto-probing twin: a _probe payload is the measurement
+             the simulated pass resolves to — a beat later, so file:// shows
+             the same reading… → spec transition the live pass has */
+          return new Promise(function (tick) { setTimeout(tick, 450); }).then(function () {
+            e3.spec = e3._probe;              /* the twin store IS the demo server: cached from now on */
+            e3._probe = null;
+            var sim3 = { path: entryPath, cached: false };
+            Object.keys(e3.spec).forEach(function (k) { sim3[k] = e3.spec[k]; });
+            return sim3;
+          });
+        }
         if (e3.spec_unreadable || !e3.spec) {
           return ok({ path: entryPath, unreadable: true,
             note: 'Couldn’t read the container — only what the bytes themselves say is ever shown.' });
@@ -3356,6 +3373,52 @@ var api = (function () {
       }
       return SR.post('/api/dropbox-links/' + Number(linkId) + '/probe',
         { entry_path: entryPath }, { noNotify: true });
+    },
+    /* AUTO-PROBE — Tom (2026-09-10, live): "do i have to probe all the files
+       individually to see specs?" No. When an open folder listing renders,
+       this pass measures the un-probed media entries itself, through the SAME
+       dropboxProbe seam a click uses (so both modes ride one contract):
+         · only extensions lib/mediaprobe.js actually parses — PNG / JPEG /
+           GIF / MP4 / MOV — anything else keeps rendering nothing, honestly;
+         · TWO lanes, never more — the byte budget is per file server-side,
+           so the lanes are what keep a fresh folder's burst polite;
+         · the FIRST 25 un-probed entries per pass — a 300-file folder must
+           not stampede; rows past the cap keep the manual Probe button;
+         · entries already carrying a spec or an honest unreadable verdict
+           are filtered OUT, so a warm folder costs ZERO calls — the walk
+           holds that by counting the fake's content requests.
+       hooks.onStart(entry) / hooks.onDone(entry, result) let the caller flip
+       a row to reading… and land the verdict in place. */
+    dropboxAutoProbe: function (linkId, entries, hooks) {
+      var LANES = 2;
+      var CAP = 25;
+      var EXTS = ['png', 'jpg', 'jpeg', 'gif', 'mp4', 'mov', 'm4v'];
+      var h = hooks || {};
+      var todo = (entries || []).filter(function (e) {
+        if (!e || !e.path || e.spec || e.spec_unreadable) return false;
+        var name3 = String(e.name || '');
+        var dot3 = name3.lastIndexOf('.');
+        var ext3 = dot3 > 0 ? name3.slice(dot3 + 1).toLowerCase() : '';
+        return EXTS.indexOf(ext3) >= 0;
+      });
+      var skipped = Math.max(0, todo.length - CAP);
+      todo = todo.slice(0, CAP);   /* the stampede cap — drop this line and the walk counts 30 probes */
+      var next = 0;
+      function lane() {
+        if (next >= todo.length) return ok(null);
+        var entry = todo[next];
+        next += 1;
+        if (h.onStart) h.onStart(entry);
+        return api.dropboxProbe(linkId, entry.path).then(
+          function (r) { if (h.onDone) h.onDone(entry, r || null); },
+          function (e) { if (h.onDone) h.onDone(entry, null, e); }
+        ).then(lane);
+      }
+      var lanes = [];
+      for (var ln = 0; ln < LANES && ln < todo.length; ln += 1) lanes.push(lane());
+      return Promise.all(lanes).then(function () {
+        return { probed: todo.length, skipped: skipped };
+      });
     },
     /* TRACK IN PLACE — the primary bridge. The version's file is a remote
        locator: bytes stay in Dropbox, specs are measured-or-absent. */

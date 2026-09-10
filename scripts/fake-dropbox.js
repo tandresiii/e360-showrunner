@@ -80,6 +80,11 @@ function startFakeDropbox({ appKey = 'fake-key', appSecret = 'fake-secret',
     deletes: 0,                    // the unlink invariant's witness
     uploads: [],                   // { path, size }
     downloads: [],                 // { path, start, end, bytes, ranged }
+    inflightDownloads: 0,          // content requests currently being served
+    maxInflightDownloads: 0,       // …and the high-water mark: the auto-probe
+                                   // pass's two-lane cap is asserted off this
+    downloadDelayMs: 0,            // seed.downloadDelay() — overlap is only
+                                   // observable while a response is held open
     entries: new Map(),            // path_lower -> entry
     fileRequests: [],
     missingScopes: new Set(),
@@ -241,11 +246,23 @@ function startFakeDropbox({ appKey = 'fake-key', appSecret = 'fake-secret',
     const slice = bytes.subarray(Math.min(start, bytes.length), Math.min(end + 1, bytes.length));
     state.downloads.push({ path: e.path_display, start, end, bytes: end - start + 1,
                            served: slice.length, ranged: !!m });
-    res.status(m ? 206 : 200)
-      .set('Dropbox-API-Result', JSON.stringify(entryJson(e, false)))
-      .set('Content-Type', 'application/octet-stream');
-    if (m) res.set('Content-Range', `bytes ${start}-${end}/${e.size}`);
-    res.send(slice);
+    // in-flight accounting: with a seeded delay the response stays open long
+    // enough for genuinely concurrent requests to OVERLAP here, and the
+    // high-water mark becomes the witness for the client's two-lane cap
+    state.inflightDownloads += 1;
+    if (state.inflightDownloads > state.maxInflightDownloads) {
+      state.maxInflightDownloads = state.inflightDownloads;
+    }
+    const answer = () => {
+      state.inflightDownloads -= 1;
+      res.status(m ? 206 : 200)
+        .set('Dropbox-API-Result', JSON.stringify(entryJson(e, false)))
+        .set('Content-Type', 'application/octet-stream');
+      if (m) res.set('Content-Range', `bytes ${start}-${end}/${e.size}`);
+      res.send(slice);
+    };
+    if (state.downloadDelayMs > 0) setTimeout(answer, state.downloadDelayMs);
+    else answer();
   });
   app.post('/2/files/upload', (req, res) => {
     const arg = apiArg(req);
@@ -328,6 +345,10 @@ function startFakeDropbox({ appKey = 'fake-key', appSecret = 'fake-secret',
     },
     expireTokens() { sessions.clear(); },
     pageSize(n) { state.pageSize = n; },
+    // hold each content response open for `ms` — concurrency only shows
+    // itself while a response is in flight (handlers here are otherwise
+    // same-tick, and same-tick concurrency reads as 1 forever)
+    downloadDelay(ms) { state.downloadDelayMs = Math.max(0, Number(ms) || 0); },
     // fixtures — real encoder output for the MP4s (see header)
     png: pngFixture,
     faststartMp4: () => fs.readFileSync(path.join(FIXTURES, 'faststart.mp4')),

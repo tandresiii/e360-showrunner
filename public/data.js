@@ -2624,8 +2624,10 @@ function contentSeedFor(showId) {
    explicit, secondary archival door. These twins model every state so file://
    renders the whole strip: one link per role including a dual-role folder, a
    NEW arrival whose measured pixels MATCH an owed piece (the suggestion the
-   track modal pre-selects), a probed codec, an unreadable container, a
-   pending Dropbox media_info, and a file request with its copyable URL.
+   track modal pre-selects), a probed codec, an unreadable container, an
+   AUTO-PROBING entry (pending media_info that the simulated pass measures a
+   beat after the listing opens — the reading… → spec ladder rung), and a
+   file request with its copyable URL.
    ========================================================================== */
 var DBX_ROLES = ['incoming', 'to_client', 'to_operator'];
 var DBX_ROLE_LABEL = { incoming: 'Incoming', to_client: 'To client', to_operator: 'To operator' };
@@ -2661,13 +2663,16 @@ function mkDbxLink(o) {
   ALL_DBX_LINKS.push(l);
   return l;
 }
-/* one demo entry — the server's listing shape byte for byte */
+/* one demo entry — the server's listing shape byte for byte. `probe` is the
+   demo-only extra: the spec the SIMULATED auto-probe pass resolves to (a beat
+   after the listing opens), so file:// shows the reading… → spec transition
+   without a server anywhere. */
 var _dbxEntrySeq = 0;
 function mkDbxEntry(o) {
   return { name: o.name, path: o.dir + '/' + o.name, rev: o.rev || 'rDEMO' + (++_dbxEntrySeq),
            size: o.size || 0, server_modified: dayISO(o.off == null ? -1 : o.off) + 'T14:30:00Z',
            is_new: !!o.is_new, spec: o.spec || null, spec_unreadable: !!o.unreadable,
-           match_piece: o.match || null };
+           match_piece: o.match || null, _probe: o.probe || null };
 }
 function dbxLinksForShow(showId) {
   return ALL_DBX_LINKS.filter(function (l) { return l.show_id === Number(showId); });
@@ -2726,10 +2731,13 @@ var DBX_DEMO_FILE_REQUESTS = [
     ] });
 
   /* 3 · the operator's own folder — Dropbox media info still pending on the
-     fresh upload, so it honestly shows nothing */
+     fresh upload, so the row shows nothing until the AUTO-PROBE pass (which
+     kicks the moment the listing opens) measures it: the reading… → spec
+     transition, simulated end to end from file:// */
   mkDbxLink({ show: 1, path: '/Shows/AVCA First Serve', label: 'Show ops',
     roles: ['to_operator'], off: -8, entries: [
-      mkDbxEntry({ dir: '/Shows/AVCA First Serve', name: 'playback_rundown.mp4', size: 1520044, off: 0, is_new: true })
+      mkDbxEntry({ dir: '/Shows/AVCA First Serve', name: 'playback_rundown.mp4', size: 1520044, off: 0, is_new: true,
+        probe: { source: 'probe', w: 1920, h: 1080, duration_s: 94.5, codec: 'H.264', fps: 29.97, audio: true } })
     ] });
 
   /* a TRACKED version — v2 of the league loop lives in Dropbox, no copy made:

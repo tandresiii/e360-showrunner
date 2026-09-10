@@ -1743,8 +1743,12 @@ function tabContent(show) {
    listing with a NEW badge diffed against a deliberately-reset baseline,
    pixel specs / codec measured from the files' own bytes (probe) or reported
    by Dropbox (media info) — never guessed — and per-entry TRACK as the
-   primary bridge into the piece ladder. Renders from DBX_UI, which
-   dbxEnsure() (app.js) hydrates; feature-flagged off features.dropbox.
+   primary bridge into the piece ladder. Specs appear WITHOUT clicks: an open
+   listing kicks the auto-probe pass (dbxAutoProbeKick, app.js — two lanes,
+   first 25 un-probed media entries; cached verdicts render instantly and
+   cost zero calls), rows past the cap keeping the manual Probe button.
+   Renders from DBX_UI, which dbxEnsure() (app.js) hydrates; feature-flagged
+   off features.dropbox.
    ========================================================================== */
 var DBX_ROLE_BADGE = { incoming: 'info', to_client: 'go', to_operator: 'warn' };
 function dbxRoleBadges(link) {
@@ -1756,10 +1760,21 @@ function dbxRoleBadges(link) {
       '"><span class="dot"></span>' + esc(DBX_ROLE_LABEL[r] || r) + '</span>';
   }).join(' ');
 }
+/* a stable, DOM-safe handle for one listing row — the auto-probe pass patches
+   rows IN PLACE as verdicts land, and a Dropbox path carries characters an id
+   cannot, so the row keys on a hash of the lowercased path */
+function dbxRowDomId(linkId, entryPath) {
+  var p = String(entryPath || '').toLowerCase();
+  var hsh = 0;
+  for (var i = 0; i < p.length; i++) hsh = ((hsh * 31) + p.charCodeAt(i)) >>> 0;
+  return 'dbxE' + Number(linkId) + '-' + hsh.toString(36);
+}
 /* one entry: name · size · date · NEW · the spec line (measured or reported,
-   the title says which — parsed-from-bytes beats reported) · Track / Probe */
+   the title says which — parsed-from-bytes beats reported; reading… while the
+   auto pass measures) · Track / Probe */
 function dbxEntryRow(entry, link, editable) {
   var spec = entry.spec;
+  var reading = !spec && !entry.spec_unreadable && !!DBX_UI.reading[dbxRowDomId(link.id, entry.path)];
   var specLine = '';
   if (spec) {
     var bits = [];
@@ -1777,6 +1792,10 @@ function dbxEntryRow(entry, link, editable) {
       esc('The probe read this file’s header ranges and could not parse the container — only what the ' +
           'bytes themselves say is ever shown, so it shows nothing rather than a guess.') +
       '">container unreadable</span>';
+  } else if (reading) {
+    specLine = '<span class="mini" style="color:var(--muted)" title="' +
+      esc('Measuring from the file’s own bytes — bounded range reads of the container headers, ' +
+          'two files at a time.') + '">reading…</span>';
   }
   var match = entry.match_piece
     ? ' <span class="fresh-chip" title="' +
@@ -1790,12 +1809,12 @@ function dbxEntryRow(entry, link, editable) {
       ' title="Track this arrival — it stays in Dropbox; linking it to a piece files it as the next version by reference">' +
       icon('link') + 'Track</button> ';
   }
-  if (!spec && !entry.spec_unreadable) {
+  if (!spec && !entry.spec_unreadable && !reading) {
     acts += '<button class="btn sm ghost" ' + act('dbxProbe', link.id, entry.path) +
       ' title="Read the container headers (bounded range reads) for pixel size, duration and codec">' +
       icon('search') + 'Probe</button>';
   }
-  return '<div class="next-item"><div class="txt">' + esc(entry.name) +
+  return '<div class="next-item" id="' + dbxRowDomId(link.id, entry.path) + '"><div class="txt">' + esc(entry.name) +
     (entry.is_new ? ' <span class="pill warn" style="margin-left:4px"><span class="dot"></span>NEW</span>' : '') +
     '<span>' + esc(fmtSize(entry.size)) +
     (entry.server_modified ? ' · ' + esc(fmtDate(String(entry.server_modified).slice(0, 10))) : '') +
@@ -1840,6 +1859,10 @@ function dbxLinkCard(link, editable) {
       body = '<div class="empty" style="padding:10px">' +
         esc(link.note || 'Nothing in this folder yet.') + '</div>';
     } else {
+      /* the AUTO-PROBE pass kicks the moment an open listing renders — BEFORE
+         the rows build, so the first lanes' reading… states render right into
+         this very pass of HTML (later verdicts patch their rows in place) */
+      dbxAutoProbeKick(link, editable);
       body = '<div class="next-list" style="margin-top:8px">' +
         entries.map(function (e) { return dbxEntryRow(e, link, editable); }).join('') + '</div>' +
         (editable
