@@ -288,11 +288,13 @@ var SR = (function () {
         DEMO fixture into a real session on login. */
      REPORTS_BY_ID, NOTIF_BY_ID, NEEDS_BY_ID,
      CONTACTS_BY_ID, SHOW_CONTACTS_BY_ID,
+     CONTENT_BY_ID, CONTENT_VERSIONS_BY_ID,
      NOTE_READS].forEach(clearMap);
     [PROJECTS, ALL_SHOWS, ALL_JOBS, ALL_EXPENSES, ALL_POS, PO_LINES, ALL_NOTES,
      ALL_DELIVERABLES, USERS, BUDGET_LINES,
      TECH_REPORTS, NOTIF_OUTBOX, ALL_NEEDS,
-     ALL_CONTACTS, ALL_SHOW_CONTACTS].forEach(function (a) { a.length = 0; });
+     ALL_CONTACTS, ALL_SHOW_CONTACTS,
+     ALL_CONTENT, ALL_CONTENT_VERSIONS].forEach(function (a) { a.length = 0; });
     NOTIF_PREFS = {};
     /* mentionLookup() memoizes name->username off USERS on first use. USERS is
        emptied above, but the cache is not derived state the maps own — so
@@ -483,6 +485,28 @@ var SR = (function () {
       if (sc.contact) sc.contact = A.contact(sc.contact);
       var rec = keep(SHOW_CONTACTS_BY_ID, sc);
       push1(ALL_SHOW_CONTACTS, rec);
+      return rec;
+    },
+    /* content pieces — the Content tab, the season row's "content 7/12" chip
+       and the chase panel all read the flat store synchronously
+       (contentForShow / contentRollup / contentWaitingOn), the demo way. The
+       version ladder rides ON the piece (piece.versions), matching the
+       server's payload, and each version's joined file is indexed so
+       openViewer() can resolve it. */
+    contentVersion: function (v) {
+      if (!v) return v;
+      if (v.file) v.file = A.file(v.file);
+      var rec = keep(CONTENT_VERSIONS_BY_ID, v);
+      push1(ALL_CONTENT_VERSIONS, rec);
+      return rec;
+    },
+    contentPiece: function (p) {
+      if (!p) return p;
+      if (p.versions) p.versions = p.versions.map(A.contentVersion);
+      if (p.contact) p.contact = A.contact(p.contact);
+      var rec = keep(CONTENT_BY_ID, p);
+      if (!rec.versions) rec.versions = [];
+      push1(ALL_CONTENT, rec);
       return rec;
     },
     list: function (fn) { return function (rows) { return (rows || []).map(fn); }; }
@@ -813,7 +837,8 @@ var api = (function () {
       SR.get('/api/shows/' + sid + '/schedule'),
       SR.get('/api/shows/' + sid + '/crew'),
       SR.get('/api/shows/' + sid + '/contacts'),
-      SR.get('/api/shows/' + sid + '/rooming')
+      SR.get('/api/shows/' + sid + '/rooming'),
+      SR.get('/api/shows/' + sid + '/content')
     ]).then(function (r) {
       var show = r[0];
       if (show.project) A.project(show.project);
@@ -830,6 +855,9 @@ var api = (function () {
          synchronously (contactsForShow), the demo way */
       (r[10] || []).forEach(A.showContact);
       show.room_assignments = (r[11] || []).map(A.rooming);
+      /* content pieces — the tab, the badge and the chase panel read the flat
+         store (contentForShow), so absorbing is the whole job */
+      ((r[12] && r[12].pieces) || []).forEach(A.contentPiece);
       if (show.job) A.job(show.job);
       var rec = A.show(show);
       /* the folder header renders from the project's own shape */
@@ -850,9 +878,13 @@ var api = (function () {
       SR.get('/api/files' + SR.qs({ project_id: pid, limit: 1000 })),
       SR.get('/api/steps' + SR.qs({ project_id: pid })),
       SR.get('/api/bookings' + SR.qs({ limit: 1000 })),
-      pid == null ? SR.get('/api/projects') : SR.get('/api/projects/' + pid).then(function (p) { return [p]; })
+      pid == null ? SR.get('/api/projects') : SR.get('/api/projects/' + pid).then(function (p) { return [p]; }),
+      /* the season row's "content 7/12" chip reads contentRollup() synchronously,
+         so the folder's pieces ride the same composite read */
+      SR.get('/api/content' + SR.qs({ project_id: pid, limit: 2000 })).catch(function () { return []; })
     ]).then(function (r) {
       (r[4] || []).forEach(A.project);
+      (r[5] || []).forEach(A.contentPiece);
       var byShow = {}, stepsBy = {}, bkBy = {};
       (r[1] || []).forEach(function (f) { A.file(f); (byShow[f.show_id] = byShow[f.show_id] || []).push(f); });
       (r[2] || []).forEach(function (s) { A.step(s); (stepsBy[s.show_id] = stepsBy[s.show_id] || []).push(s); });
@@ -1382,6 +1414,9 @@ var api = (function () {
       if (!API()) return fail('byte uploads need the Showrunner server');
       var q = (dims && dims.w && dims.h)
         ? '?w=' + Number(dims.w) + '&h=' + Number(dims.h) : '';
+      /* a video's measured duration rides the same measured-only channel as
+         the pixels — loadedmetadata gave it, or it is not sent at all */
+      if (dims && dims.dur > 0) q += (q ? '&' : '?') + 'dur=' + Number(dims.dur);
       return SR.putBytes('/api/files/' + Number(fileId) + '/content' + q, blob);
     },
     /* Pull the bytes back down THROUGH the app — the whole reason a tech in a
@@ -2848,6 +2883,258 @@ var api = (function () {
             if (i2 >= 0) ALL_SHOW_CONTACTS.splice(i2, 1);
           }
           return r;
+        });
+    },
+
+    /* ================= CONTENT PIECES ===================================
+       The graphic-design pipeline (Tom, 2026-09-10). Deliberately sends NO
+       notifications in v1 beyond the house notify passthrough on create —
+       the needs-list/rolodex precedent.
+       GET  /api/shows/:id/content          -> listContent(showId)
+       POST /api/shows/:id/content          -> createPiece(showId, body)
+       PUT  /api/content/:id                -> updatePiece(id, body)
+       PUT  /api/content/:id/status         -> pieceStatus(id, status)
+                                               [folder editors OR the piece's owner]
+       DELETE /api/content/:id              -> deletePiece(id)  [versions die,
+                                               files survive]
+       POST /api/content/:id/versions       -> addContentVersion(pieceId, fileId)
+                                               [supersedes, never deletes]
+       PUT  /api/content/versions/:id/send  -> sendContentVersion(id)
+       PUT  /api/content/versions/:id/feedback -> contentFeedback(id, text)
+       GET  /api/shows/:id/content-seed     -> contentSeed(showId)
+       POST /api/shows/:id/content-seed     -> contentSeedApply(showId, picks)
+       ==================================================================== */
+    listContent: function (showId) {
+      if (!API()) {
+        return ok({ pieces: contentForShow(showId), rollup: contentRollup(showId) });
+      }
+      return SR.get('/api/shows/' + Number(showId) + '/content').then(function (r) {
+        ((r && r.pieces) || []).forEach(A.contentPiece);
+        return { pieces: contentForShow(showId), rollup: (r && r.rollup) || contentRollup(showId) };
+      });
+    },
+    createPiece: function (showId, body) {
+      if (!body || !String(body.name || '').trim()) {
+        return fail('a content piece is a named thing — name is required');
+      }
+      if (body.source && CONTENT_SOURCES.indexOf(body.source) < 0) {
+        return fail('source must be one of ' + CONTENT_SOURCES.join(', '));
+      }
+      if (body.kind && CONTENT_KINDS.indexOf(body.kind) < 0) {
+        return fail('kind must be one of ' + CONTENT_KINDS.join(', '));
+      }
+      if (!API()) {
+        var show = SHOWS_BY_ID[Number(showId)];
+        if (!show) return fail('show ' + showId + ' not found');
+        if (!canEditFolderOf(show)) return fail('adding a piece is the show-runner’s call');
+        var src = body.source || 'e360';
+        var p = mkContentPiece({ show: show.id, name: String(body.name).trim(),
+          surface: body.surface, kind: body.kind || 'video',
+          w: body.spec_w === '' || body.spec_w == null ? null : Number(body.spec_w),
+          h: body.spec_h === '' || body.spec_h == null ? null : Number(body.spec_h),
+          dur: body.duration_spec, print: body.print_spec, source: src,
+          owner: src === 'e360' ? (body.owner || null) : null,
+          contact: src === 'e360' ? null : (body.contact_id ? Number(body.contact_id) : null),
+          status: body.status || 'needed', notes: body.notes, by: ME, off: 0 });
+        if (body.due_date) p.due_date = body.due_date;
+        return ok(p);
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/content', body, { notifyOk: true })
+        .then(A.contentPiece);
+    },
+    updatePiece: function (id, body) {
+      if (body && body.source !== undefined && CONTENT_SOURCES.indexOf(body.source) < 0) {
+        return fail('source must be one of ' + CONTENT_SOURCES.join(', '));
+      }
+      if (body && body.kind !== undefined && CONTENT_KINDS.indexOf(body.kind) < 0) {
+        return fail('kind must be one of ' + CONTENT_KINDS.join(', '));
+      }
+      if (body && body.status !== undefined && CONTENT_STATUSES.indexOf(body.status) < 0) {
+        return fail('status must be one of ' + CONTENT_STATUSES.join(', '));
+      }
+      if (!API()) {
+        var p = CONTENT_BY_ID[Number(id)];
+        if (!p) return fail('content piece ' + id + ' not found');
+        var show = SHOWS_BY_ID[p.show_id];
+        if (!canEditFolderOf(show)) return fail('editing a piece is the show-runner’s call');
+        if (body.name !== undefined) {
+          var nm = String(body.name || '').trim();
+          if (!nm) return fail('a content piece keeps its name — blank is not a rename');
+          p.name = nm;
+        }
+        ['surface', 'kind', 'duration_spec', 'print_spec', 'source', 'due_date',
+         'status', 'notes'].forEach(function (k) {
+          if (body[k] !== undefined) p[k] = body[k];
+        });
+        if (body.spec_w !== undefined) p.spec_w = body.spec_w === '' || body.spec_w == null ? null : Number(body.spec_w);
+        if (body.spec_h !== undefined) p.spec_h = body.spec_h === '' || body.spec_h == null ? null : Number(body.spec_h);
+        if (body.owner !== undefined) p.owner = body.owner || null;
+        if (body.contact_id !== undefined) p.contact_id = body.contact_id ? Number(body.contact_id) : null;
+        /* the source decides which half means anything — same rule as the server */
+        if (p.source === 'e360') p.contact_id = null; else p.owner = null;
+        return ok(p);
+      }
+      return SR.put('/api/content/' + Number(id), body, { noNotify: true }).then(A.contentPiece);
+    },
+    /* the one write a piece's OWNER may make without folder ownership — the
+       step-owner rule, mirrored from the server gate */
+    pieceStatus: function (id, status) {
+      if (CONTENT_STATUSES.indexOf(status) < 0) {
+        return fail('status must be one of ' + CONTENT_STATUSES.join(', '));
+      }
+      if (!API()) {
+        var p = CONTENT_BY_ID[Number(id)];
+        if (!p) return fail('content piece ' + id + ' not found');
+        var show = SHOWS_BY_ID[p.show_id];
+        var owns = p.owner && p.owner === ME;
+        if (!owns && !canEditFolderOf(show)) {
+          return fail('walking a piece’s status is for the folder’s editors — or the piece’s own owner');
+        }
+        p.status = status;
+        return ok(p);
+      }
+      return SR.put('/api/content/' + Number(id) + '/status', { status: status }, { noNotify: true })
+        .then(A.contentPiece);
+    },
+    deletePiece: function (id) {
+      if (!API()) {
+        var p = CONTENT_BY_ID[Number(id)];
+        if (!p) return fail('content piece ' + id + ' not found');
+        var show = SHOWS_BY_ID[p.show_id];
+        if (!canEditFolderOf(show)) return fail('deleting a piece is the show-runner’s call');
+        /* versions die with the piece; the FILES they pointed at survive */
+        (p.versions || []).forEach(function (v) {
+          delete CONTENT_VERSIONS_BY_ID[v.id];
+          var vi = ALL_CONTENT_VERSIONS.indexOf(v);
+          if (vi >= 0) ALL_CONTENT_VERSIONS.splice(vi, 1);
+        });
+        delete CONTENT_BY_ID[p.id];
+        var i = ALL_CONTENT.indexOf(p);
+        if (i >= 0) ALL_CONTENT.splice(i, 1);
+        return ok({ ok: true });
+      }
+      return SR.del('/api/content/' + Number(id), null, { noNotify: true }).then(function (r) {
+        var cached = CONTENT_BY_ID[Number(id)];
+        if (cached) {
+          (cached.versions || []).forEach(function (v) {
+            delete CONTENT_VERSIONS_BY_ID[v.id];
+            var vi = ALL_CONTENT_VERSIONS.indexOf(v);
+            if (vi >= 0) ALL_CONTENT_VERSIONS.splice(vi, 1);
+          });
+          delete CONTENT_BY_ID[cached.id];
+          var i2 = ALL_CONTENT.indexOf(cached);
+          if (i2 >= 0) ALL_CONTENT.splice(i2, 1);
+        }
+        return r;
+      });
+    },
+    /* a version IS an uploaded file — the caller registers/uploads the file
+       first (addFile + uploadFileBytes, the real-bytes path) and hands the id
+       here. The previous current version is SUPERSEDED — kept, never deleted. */
+    addContentVersion: function (pieceId, fileId) {
+      if (!fileId) return fail('file_id required — a version IS an uploaded file');
+      if (!API()) {
+        var p = CONTENT_BY_ID[Number(pieceId)];
+        if (!p) return fail('content piece ' + pieceId + ' not found');
+        var show = SHOWS_BY_ID[p.show_id];
+        var owns = p.owner && p.owner === ME;
+        if (!owns && !canEditFolderOf(show)) {
+          return fail('filing a version is for the folder’s editors — or the piece’s own owner');
+        }
+        var f = FILES_BY_ID[Number(fileId)];
+        if (!f) return fail('file ' + fileId + ' not found');
+        if (f.show_id !== p.show_id) {
+          return fail('that file belongs to a different show — a version must be one of this show’s own files');
+        }
+        (p.versions || []).forEach(function (v) { if (v.status === 'current') v.status = 'superseded'; });
+        return ok(mkContentVersion(p, { file: f, status: 'current', off: 0, by: ME }));
+      }
+      return SR.post('/api/content/' + Number(pieceId) + '/versions',
+        { file_id: Number(fileId) }, { noNotify: true })
+        .then(function (v) {
+          var rec = A.contentVersion(v);
+          var p2 = CONTENT_BY_ID[Number(pieceId)];
+          if (p2) {
+            (p2.versions || []).forEach(function (old) {
+              if (old.id !== rec.id && old.status === 'current') old.status = 'superseded';
+            });
+            if ((p2.versions || []).indexOf(rec) < 0) (p2.versions = p2.versions || []).push(rec);
+          }
+          return rec;
+        });
+    },
+    /* a STAMP, not a send — this app has no outbound path. Idempotent: the
+       first stamp stands. */
+    sendContentVersion: function (versionId) {
+      if (!API()) {
+        var v = CONTENT_VERSIONS_BY_ID[Number(versionId)];
+        if (!v) return fail('content version ' + versionId + ' not found');
+        var p = CONTENT_BY_ID[v.piece_id];
+        var show = p ? SHOWS_BY_ID[p.show_id] : null;
+        var owns = p && p.owner && p.owner === ME;
+        if (!owns && !canEditFolderOf(show)) {
+          return fail('marking a version sent is for the folder’s editors — or the piece’s own owner');
+        }
+        if (v.sent_at) return ok(v);
+        v.sent_at = TODAY_ISO + 'T' + _nowHM();
+        v.sent_by = ME;
+        return ok(v);
+      }
+      return SR.put('/api/content/versions/' + Number(versionId) + '/send', {}, { noNotify: true })
+        .then(A.contentVersion);
+    },
+    contentFeedback: function (versionId, text) {
+      var t = String(text || '').trim();
+      if (!t) return fail('feedback needs words — what did they say?');
+      if (!API()) {
+        var v = CONTENT_VERSIONS_BY_ID[Number(versionId)];
+        if (!v) return fail('content version ' + versionId + ' not found');
+        var p = CONTENT_BY_ID[v.piece_id];
+        var show = p ? SHOWS_BY_ID[p.show_id] : null;
+        var owns = p && p.owner && p.owner === ME;
+        if (!owns && !canEditFolderOf(show)) {
+          return fail('recording feedback is for the folder’s editors — or the piece’s own owner');
+        }
+        v.feedback = t;
+        v.feedback_by = ME;
+        v.feedback_at = TODAY_ISO + 'T' + _nowHM();
+        return ok(v);
+      }
+      return SR.put('/api/content/versions/' + Number(versionId) + '/feedback',
+        { feedback: t }, { noNotify: true })
+        .then(A.contentVersion);
+    },
+    /* the picker's proposals — one candidate per media-server zone of the
+       bound .e360, stack-aware. No spec / no zones answers honestly. */
+    contentSeed: function (showId) {
+      if (!API()) return ok(contentSeedFor(showId));
+      return SR.get('/api/shows/' + Number(showId) + '/content-seed');
+    },
+    contentSeedApply: function (showId, picks) {
+      if (!Array.isArray(picks) || !picks.length) return fail('pick at least one zone');
+      if (!API()) {
+        var show = SHOWS_BY_ID[Number(showId)];
+        if (!show) return fail('show ' + showId + ' not found');
+        if (!canEditFolderOf(show)) return fail('seeding pieces is the show-runner’s call');
+        var seed = contentSeedFor(showId);
+        if (!seed.available) return fail(seed.reason);
+        var created = [];
+        for (var i = 0; i < picks.length; i++) {
+          var z = null;
+          for (var j = 0; j < seed.zones.length; j++) {
+            if (seed.zones[j].index === Number(picks[i])) { z = seed.zones[j]; break; }
+          }
+          if (!z) return fail('pick ' + picks[i] + ' names no zone on the bound spec — nothing was created');
+          created.push(mkContentPiece({ show: show.id, name: z.name, surface: z.name,
+            kind: 'video', w: z.spec_w, h: z.spec_h, dur: seed.duration_spec || '',
+            source: 'e360', status: 'needed', by: ME, off: 0 }));
+        }
+        return ok({ created: created });
+      }
+      return SR.post('/api/shows/' + Number(showId) + '/content-seed',
+        { picks: picks.map(Number) }, { noNotify: true })
+        .then(function (r) {
+          return { created: ((r && r.created) || []).map(A.contentPiece) };
         });
     },
 

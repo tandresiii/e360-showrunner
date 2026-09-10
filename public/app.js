@@ -1166,6 +1166,47 @@ function measureImage(file) {
   });
 }
 
+/* The video twin of measureImage(), and just as honest: a <video> element's
+   loadedmetadata event hands back videoWidth / videoHeight / duration — REAL
+   measurement, browser-side, of the actual bytes the person picked. Resolves
+   to null for anything the browser cannot decode; nothing is ever guessed.
+   The object URL is revoked either way — a leaked blob URL pins the file in
+   memory for the life of the tab. */
+function measureVideo(file) {
+  return new Promise(function (resolve) {
+    if (!file || !/^video\//.test(String(file.type || ''))) return resolve(null);
+    if (typeof URL === 'undefined' || !URL.createObjectURL) return resolve(null);
+    var url = null, done = false;
+    function finish(v) {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
+      if (url) { try { URL.revokeObjectURL(url); } catch (_) {} }
+      resolve(v);
+    }
+    var t = setTimeout(function () { finish(null); }, 8000);
+    try {
+      url = URL.createObjectURL(file);
+      var vid = document.createElement('video');
+      vid.preload = 'metadata';
+      vid.muted = true;
+      vid.onloadedmetadata = function () {
+        var w = vid.videoWidth, h = vid.videoHeight, dur = vid.duration;
+        finish(w && h ? { w: w, h: h, dur: isFinite(dur) && dur > 0 ? Math.round(dur * 100) / 100 : null }
+                      : null);
+      };
+      vid.onerror = function () { finish(null); };
+      vid.src = url;
+    } catch (_) { finish(null); }
+  });
+}
+/* Image first, then video — one call for "whatever they picked". */
+async function measureMedia(file) {
+  var img = await measureImage(file);
+  if (img) return img;
+  return measureVideo(file);
+}
+
 function fmtBytes(n) {
   n = Number(n) || 0;
   if (n < 1024) return n + ' B';
@@ -1179,7 +1220,7 @@ async function uploadRealFile(showId, file, opts) {
   opts = opts || {};
   var g = guessFileKind(file.name);
   var kind = opts.kind || g.kind;
-  var dims = await measureImage(file);
+  var dims = await measureMedia(file);   /* real pixels (and, for video, a real duration) or nothing */
   var f = await api.addFile(showId, {
     name: opts.name || g.base,
     ext: g.ext,
@@ -5375,6 +5416,263 @@ async function proofAction(proofId, approve) {
   return refreshShowTab(showId, 'proofs');
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   CONTENT PIECES — the graphic-design pipeline (Tom, 2026-09-10)
+   ────────────────────────────────────────────────────────────────────────────
+   The Content tab's write half. Every affordance routes through api.* — the
+   modal creates/edits, the ladder uploads REAL bytes through the same
+   uploadRealFile() every other upload uses (measured browser-side, never a
+   stamped size — the §12b rule), and the seed picker only ever sends zone
+   INDEXES: the server re-derives every pixel number from the bound spec, so a
+   size can never arrive client-typed wearing the spec's authority.
+   ══════════════════════════════════════════════════════════════════════════ */
+var PENDING_PIECE = null;
+async function openPiece(showId, pieceId) {
+  var show = await api.getShow(showId);
+  /* the "who owes it" select reads the rolodex — warm the store so an owed
+     piece can point at a card the session has not browsed yet */
+  try { await api.listContacts({}); } catch (_) { /* the select degrades to what is loaded */ }
+  var p = pieceId ? CONTENT_BY_ID[Number(pieceId)] : null;
+  PENDING_PIECE = { showId: Number(showId), id: p ? p.id : null };
+  function opts(list, labels, cur) {
+    return list.map(function (k) {
+      return '<option value="' + esc(k) + '"' + (cur === k ? ' selected' : '') + '>' +
+        esc(labels[k] ? (labels[k].label || labels[k]) : k) + '</option>';
+    }).join('');
+  }
+  var ownerOpts = '<option value="">— unassigned —</option>' +
+    activeUsers().map(function (u) {
+      return '<option value="' + esc(u.username) + '"' + (p && p.owner === u.username ? ' selected' : '') + '>' +
+        esc(u.name) + '</option>';
+    }).join('');
+  var contactOpts = '<option value="">— pick from the rolodex —</option>' +
+    activeContacts().map(function (c) {
+      return '<option value="' + Number(c.id) + '"' + (p && p.contact_id === c.id ? ' selected' : '') + '>' +
+        esc(c.name + (c.org ? ' · ' + c.org : '')) + '</option>';
+    }).join('');
+  openModal((p ? 'Edit piece' : 'New content piece') + ' · ' + showLabel(show),
+    '<div class="fin-inputs" style="grid-template-columns:1.5fr 1fr">' +
+    finLabelWrap('Name', '<input id="cpName" class="cell-in" placeholder="Sponsor loop — ribbon" value="' +
+      esc(p ? p.name : '') + '">') +
+    finLabelWrap('Surface / zone', '<input id="cpSurface" class="cell-in" placeholder="Courtside ribbon" value="' +
+      esc(p ? p.surface || '' : '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr 1fr">' +
+    finLabelWrap('Kind', '<select id="cpKind" class="cell-in">' +
+      opts(CONTENT_KINDS, { video: 'Video', still: 'Still', print: 'Print', other: 'Other' },
+        p ? p.kind : 'video') + '</select>') +
+    finLabelWrap('Spec width (px)', '<input id="cpW" class="cell-in" type="number" min="1" value="' +
+      esc(p && p.spec_w != null ? p.spec_w : '') + '">') +
+    finLabelWrap('Spec height (px)', '<input id="cpH" class="cell-in" type="number" min="1" value="' +
+      esc(p && p.spec_h != null ? p.spec_h : '') + '">') +
+    finLabelWrap('Duration', '<input id="cpDur" class="cell-in" placeholder=":30 · loop · any" value="' +
+      esc(p ? p.duration_spec || '' : '') + '">',
+      'free text — “:30”, “loop”, “any”') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Print spec', '<input id="cpPrint" class="cell-in" placeholder="48 ft × 8 ft · 150 dpi vinyl" value="' +
+      esc(p ? p.print_spec || '' : '') + '">',
+      'for print pieces — sizes and stock in plain words') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1fr">' +
+    finLabelWrap('Source', '<select id="cpSource" class="cell-in">' +
+      opts(CONTENT_SOURCES, CONTENT_SOURCE_LABEL, p ? p.source : 'e360') + '</select>',
+      'e360 pieces get an owner + due date; client / third-party pieces are OWED to us and chase a contact') +
+    finLabelWrap('Owner (e360 builds)', '<select id="cpOwner" class="cell-in">' + ownerOpts + '</select>') +
+    finLabelWrap('Who owes it (client / 3rd party)', '<select id="cpContact" class="cell-in">' +
+      contactOpts + '</select>') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr 1.4fr">' +
+    finLabelWrap('Due', '<input id="cpDue" class="cell-in" type="date" value="' +
+      esc(p ? p.due_date || '' : '') + '">') +
+    finLabelWrap('Status', '<select id="cpStatus" class="cell-in">' +
+      opts(CONTENT_STATUSES, CONTENT_STATUS_META, p ? p.status : 'needed') + '</select>') +
+    finLabelWrap('Notes', '<input id="cpNotes" class="cell-in" value="' + esc(p ? p.notes || '' : '') + '">') +
+    '</div>' +
+    _foot(act('cpCommit'), p ? 'Save piece' : 'Create piece', p ? 'check' : 'plus',
+      p ? '<button class="btn ghost" ' + act('cpDelete', p.id) + '>' + icon('trash') + 'Delete</button>' : ''));
+}
+async function cpCommit() {
+  if (!PENDING_PIECE) return;
+  var pp = PENDING_PIECE;
+  var name = _v('cpName');
+  if (!name) { toast('A piece needs a name', 'What file does the show owe?'); return; }
+  var body = {
+    name: name, surface: _v('cpSurface'), kind: _v('cpKind'),
+    spec_w: _v('cpW') || null, spec_h: _v('cpH') || null,
+    duration_spec: _v('cpDur'), print_spec: _v('cpPrint'),
+    source: _v('cpSource'), owner: _v('cpOwner') || null,
+    contact_id: _v('cpContact') || null,
+    due_date: _v('cpDue'), status: _v('cpStatus'), notes: _v('cpNotes')
+  };
+  try {
+    if (pp.id) await api.updatePiece(pp.id, body);
+    else await api.createPiece(pp.showId, body);
+  } catch (e) { toast(pp.id ? 'Not saved' : 'Not created', String(e && e.message || e), 'err'); return; }
+  var showId = pp.showId, wasNew = !pp.id;
+  PENDING_PIECE = null;
+  closeM();
+  toast(wasNew ? 'Piece created' : 'Piece saved', name);
+  return refreshShowTab(showId, 'content');
+}
+async function cpDeleteAct(id) {
+  var p = CONTENT_BY_ID[Number(id)];
+  var showId = (PENDING_PIECE && PENDING_PIECE.showId) || (p && p.show_id) || CUR.showId;
+  if (!askConfirm('Delete ' + (p ? p.name : 'this piece') + '?\n\n' +
+      'Its version history goes with it. The uploaded files themselves stay in ' +
+      'the show’s Files — deleting a piece never eats a document.')) return;
+  try { await api.deletePiece(id); }
+  catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
+  PENDING_PIECE = null;
+  closeM();
+  toast('Piece deleted', p ? p.name : '');
+  return refreshShowTab(showId, 'content');
+}
+/* advance one stage at a time (the PO rule) — the piece's own owner may walk
+   it, exactly like a tech on their own step */
+async function cpAdvanceAct(id) {
+  var p = CONTENT_BY_ID[Number(id)];
+  if (!p) return;
+  var i = CONTENT_STAGE_WALK.indexOf(p.status);
+  if (i < 0 || i >= CONTENT_STAGE_WALK.length - 1) return;
+  var next = CONTENT_STAGE_WALK[i + 1];
+  try { await api.pieceStatus(p.id, next); }
+  catch (e) { toast('Not moved', String(e && e.message || e), 'err'); return; }
+  toast(CONTENT_STATUS_META[next].label, p.name);
+  return refreshShowTab(p.show_id, 'content');
+}
+async function cpNaAct(id) {
+  var p = CONTENT_BY_ID[Number(id)];
+  if (!p) return;
+  var next = p.status === 'na' ? 'needed' : 'na';
+  try { await api.pieceStatus(p.id, next); }
+  catch (e) { toast('Not changed', String(e && e.message || e), 'err'); return; }
+  toast(next === 'na' ? 'Struck n/a' : 'Restored',
+    p.name + (next === 'na' ? ' — kept, struck through, out of the rollup' : ' — needed again'));
+  return refreshShowTab(p.show_id, 'content');
+}
+function cpOpenAct(id) {
+  CONTENT_UI.open[Number(id)] = !CONTENT_UI.open[Number(id)];
+  var p = CONTENT_BY_ID[Number(id)];
+  if (p) return refreshShowTab(p.show_id, 'content');
+}
+function cpFilterAct(showId, k) {
+  CONTENT_UI.filter[Number(showId)] = k === '*' ? null : k;
+  return refreshShowTab(Number(showId), 'content');
+}
+/* upload the next round: REAL bytes through the one honest path. The files
+   row is registered without a size, the bytes go up, the browser's own
+   measurement (image OR video — loadedmetadata) rides along, and only then
+   does the version row land. */
+async function cpUploadAct(pieceId) {
+  var p = CONTENT_BY_ID[Number(pieceId)];
+  if (!p) return;
+  var nextN = (p.versions || []).length + 1;
+  var inp = document.createElement('input');
+  inp.type = 'file';
+  inp.addEventListener('change', async function () {
+    var file = inp.files && inp.files[0];
+    if (!file) return;
+    var res;
+    try {
+      res = await uploadRealFile(p.show_id, file, { kind: 'proof', name: p.name + ' — v' + nextN });
+      await api.addContentVersion(p.id, res.file.id);
+    } catch (e) { toast('Version not filed', String(e && e.message || e), 'err'); return; }
+    var f = FILES_BY_ID[res.file.id] || res.file;
+    var measured = f.width && f.height ? f.width + ' × ' + f.height + 'px' : null;
+    if (res.stored) {
+      toast('v' + nextN + ' filed', p.name + ' · ' + fmtBytes(res.size) +
+        (measured ? ' · measured ' + measured : ''));
+    } else if (res.reason === 'not-configured') {
+      toast('v' + nextN + ' registered — bytes not stored',
+        'This server has no NAS storage configured; the round is on the record without its bytes.', 'warn');
+    } else {
+      toast('v' + nextN + ' filed, but the bytes did not land', String(res.reason || ''), 'err');
+    }
+    return refreshShowTab(p.show_id, 'content');
+  });
+  inp.click();
+}
+async function cpSendAct(versionId) {
+  var v = CONTENT_VERSIONS_BY_ID[Number(versionId)];
+  var p = v ? CONTENT_BY_ID[v.piece_id] : null;
+  try { v = await api.sendContentVersion(versionId); }
+  catch (e) { toast('Not marked', String(e && e.message || e), 'err'); return; }
+  toast('Marked sent', (p ? p.name + ' · ' : '') + 'v' + v.version_n +
+    ' — a record, not a send: the file goes out in your own mail');
+  if (p) return refreshShowTab(p.show_id, 'content');
+}
+var PENDING_FEEDBACK = null;
+async function cpFeedbackAct(versionId) {
+  var v = CONTENT_VERSIONS_BY_ID[Number(versionId)];
+  if (!v) return;
+  var p = CONTENT_BY_ID[v.piece_id];
+  PENDING_FEEDBACK = { versionId: v.id, showId: p ? p.show_id : null };
+  openModal('Feedback · ' + (p ? p.name : '') + ' v' + v.version_n,
+    '<textarea id="cpFb" class="note-in" rows="4" placeholder="' +
+    esc('What the client said, in their words — this is the round’s paper trail.') +
+    '">' + esc(v.feedback || '') + '</textarea>' +
+    _foot(act('cpFeedbackCommit'), 'Save feedback', 'check'));
+}
+async function cpFeedbackCommit() {
+  if (!PENDING_FEEDBACK) return;
+  var pf = PENDING_FEEDBACK;
+  var text = _v('cpFb');
+  if (!text) { toast('Feedback needs words', 'What did they say?'); return; }
+  try { await api.contentFeedback(pf.versionId, text); }
+  catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
+  PENDING_FEEDBACK = null;
+  closeM();
+  toast('Feedback recorded', 'On the round it belongs to.');
+  if (pf.showId) return refreshShowTab(pf.showId, 'content');
+}
+/* the seed picker — checkboxes over the bound spec's media-server zones, the
+   needs raise-PO picker's shape. A human chooses which zones become pieces;
+   the server re-derives every number. No bound spec → the button explains. */
+var PENDING_SEED = null;
+async function cpSeedAct(showId) {
+  var seed;
+  try { seed = await api.contentSeed(showId); }
+  catch (e) { toast('Could not read the spec', String(e && e.message || e), 'err'); return; }
+  if (!seed || !seed.available) {
+    toast('Nothing to seed from', String((seed && seed.reason) || 'No bound content spec.'), 'warn');
+    return;
+  }
+  PENDING_SEED = { showId: Number(showId) };
+  var rows = seed.zones.map(function (z) {
+    var dims = z.spec_w != null && z.spec_h != null
+      ? z.spec_w + ' × ' + z.spec_h + 'px' : 'size unknown — fill by hand';
+    return '<label class="next-item" style="cursor:pointer;gap:10px">' +
+      '<input type="checkbox" class="cpPick" value="' + Number(z.index) + '" checked>' +
+      '<div class="txt"><b style="font-weight:600">' + esc(z.name) + '</b>' +
+      '<span>' + esc('cabinets ' + (z.first != null ? z.first + '–' + z.last : '—') +
+        ' · ' + (z.count != null ? z.count + ' wide' : '—') +
+        (z.doubleStacked ? ' · double-stacked — height ×2' : '')) + '</span></div>' +
+      '<span class="mono" style="font-size:11.5px">' + esc(dims) + '</span></label>';
+  }).join('');
+  openModal('Add pieces from the bound spec',
+    '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">One piece per media-server zone of the ' +
+    'bound <b>.e360</b> — pixel sizes are the tool’s own zone math (' +
+    esc(seed.cabinetType || 'cabinet') + (seed.pxPerCabinet
+      ? ' · ' + seed.pxPerCabinet.w + '×' + seed.pxPerCabinet.h + 'px per cabinet' : '') +
+    '), <b>stack-aware</b>: a double-stacked zone is twice the height. Uncheck what already exists.</p>' +
+    (seed.note ? '<div class="hint" style="margin:0 0 10px">' + icon('alert') + esc(seed.note) + '</div>' : '') +
+    '<div class="next-list" style="max-height:300px;overflow:auto;margin:4px 0 6px">' + rows + '</div>' +
+    _foot(act('cpSeedCommit'), 'Add the checked zones', 'plus'));
+}
+async function cpSeedCommit() {
+  if (!PENDING_SEED) return;
+  var picks = [];
+  var els = document.querySelectorAll('.cpPick');
+  for (var i = 0; i < els.length; i++) if (els[i].checked) picks.push(Number(els[i].value));
+  if (!picks.length) { toast('Pick at least one zone', 'Nothing checked means nothing to add'); return; }
+  var r;
+  try { r = await api.contentSeedApply(PENDING_SEED.showId, picks); }
+  catch (e) { toast('Not added', String(e && e.message || e), 'err'); return; }
+  var showId = PENDING_SEED.showId;
+  PENDING_SEED = null;
+  closeM();
+  toast(r.created.length + ' piece' + (r.created.length === 1 ? '' : 's') + ' added',
+    r.created.map(function (p) { return p.name; }).join(', '));
+  return refreshShowTab(showId, 'content');
+}
+
 /* ── F4 · THE CHANGELOG ──────────────────────────────────────────────────────
    The activity table had 68 verbs, 128 writers and one buried per-show tab. The
    cross-project read is the one company-wide question a person can now ask that
@@ -6374,6 +6672,21 @@ var ACTIONS = {
   changesFilter: function (t, id, k) { return changesFilterAct(k); },
   proofApprove:  function (t, id) { return proofAction(id, true); },
   proofRevise:   function (t, id) { return proofAction(id, false); },
+  /* content pieces — the graphic-design pipeline (Tom, 2026-09-10) */
+  cpAdd:         function (t, id) { return openPiece(id, null); },
+  cpEdit:        function (t, id, k) { return openPiece(Number(k), id); },
+  cpCommit:      function () { return cpCommit(); },
+  cpDelete:      function (t, id) { return cpDeleteAct(id); },
+  cpAdvance:     function (t, id) { return cpAdvanceAct(id); },
+  cpNa:          function (t, id) { return cpNaAct(id); },
+  cpOpen:        function (t, id) { return cpOpenAct(id); },
+  cpFilter:      function (t, id, k) { return cpFilterAct(id, k); },
+  cpUpload:      function (t, id) { return cpUploadAct(id); },
+  cpSend:        function (t, id) { return cpSendAct(id); },
+  cpFeedback:    function (t, id) { return cpFeedbackAct(id); },
+  cpFeedbackCommit: function () { return cpFeedbackCommit(); },
+  cpSeed:        function (t, id) { return cpSeedAct(id); },
+  cpSeedCommit:  function () { return cpSeedCommit(); },
   setDiv:        async function (t, id, k) { DIV_FILTER = (DIV_FILTER === k && k !== 'all') ? 'all' : k; await render('projects'); },
   selectTpl:     async function (t, id, k) {
     /* the versions list is per-type — fetch the newly-opened type's before the

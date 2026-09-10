@@ -246,7 +246,7 @@ function viewSeason(project) {
     var phN = photoCount(s.id);
     var phChip = phN ? '<span class="ph-count" title="' + phN + ' event photo' + (phN === 1 ? '' : 's') + ' on this show">' + inlineIcon('cam') + phN + '</span>' : '';
     return '<tr class="rowlink' + (s.archived_at ? ' archived' : '') + '" ' + act('openShow', s.id) + '>' +
-      '<td><div class="ev-name"><div class="ic">' + icon(typeDef(s.type).icon) + '</div><div><b>' + esc(s.name) + '</b><span>' + esc(s.venue) + '</span></div>' + phChip + recapGlyph(s) + archivedChip(s) + '</div></td>' +
+      '<td><div class="ev-name"><div class="ic">' + icon(typeDef(s.type).icon) + '</div><div><b>' + esc(s.name) + '</b><span>' + esc(s.venue) + '</span></div>' + phChip + contentSeasonChip(s) + recapGlyph(s) + archivedChip(s) + '</div></td>' +
       '<td class="mono" style="font-size:12.5px">' + esc(fmtDate(s.event_date)) + '</td>' +
       /* F4 — the season row carries the scope line, so a season dashboard
          answers "how much LED is Madison" without a drill-in. */

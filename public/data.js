@@ -2383,6 +2383,236 @@ function archivedContacts() { return ALL_CONTACTS.filter(function (c) { return !
 })();
 
 /* ============================================================================
+   CONTENT PIECES — the graphic-design pipeline (Tom, 2026-09-10)
+   ----------------------------------------------------------------------------
+   Every show owes a set of CONTENT PIECES — "Sponsor loop — ribbon —
+   11520×90 — :30", "Court wrap print — 48'×8'". NOT the recap `deliverables`
+   domain and NOT `proofs`: a piece has a SOURCE (who is producing the file),
+   a pixel/print SPEC, and proof ROUNDS where every version is a real uploaded
+   file. The chase half — client/third-party pieces still owed to us, each
+   pointing at a rolodex contact — is as much the point as tracking our own.
+
+   Statuses walk needed → in_design → proofing → approved → delivered, with
+   'na' as the needs-list strikethrough: cut on purpose, kept, excluded from
+   the rollup. Durations are FREE TEXT (":30", "loop", "any") — never forced
+   into an integer.
+   ========================================================================== */
+var CONTENT_SOURCES  = ['e360', 'client', 'third_party'];
+var CONTENT_KINDS    = ['video', 'still', 'print', 'other'];
+var CONTENT_STATUSES = ['needed', 'in_design', 'proofing', 'approved', 'delivered', 'na'];
+var CONTENT_STAGE_WALK = ['needed', 'in_design', 'proofing', 'approved', 'delivered'];
+var CONTENT_SOURCE_LABEL = { e360: 'E360 builds', client: 'Client supplies', third_party: 'Third party' };
+var CONTENT_STATUS_META = {
+  needed:    { pill: 'idle', label: 'Needed' },
+  in_design: { pill: 'info', label: 'In design' },
+  proofing:  { pill: 'warn', label: 'Proofing' },
+  approved:  { pill: 'go',   label: 'Approved' },
+  delivered: { pill: 'go',   label: 'Delivered' },
+  na:        { pill: 'idle', label: 'n/a' }
+};
+
+var _pieceSeq = 0, _cvSeq = 0;
+var ALL_CONTENT = [], CONTENT_BY_ID = {};
+var ALL_CONTENT_VERSIONS = [], CONTENT_VERSIONS_BY_ID = {};
+
+function mkContentPiece(o) {
+  var p = {
+    id: ++_pieceSeq, show_id: o.show, project_id: o.project || null, job_id: o.job || null,
+    name: o.name, surface: o.surface || '', kind: o.kind || 'video',
+    spec_w: o.w == null ? null : o.w, spec_h: o.h == null ? null : o.h,
+    duration_spec: o.dur || '', print_spec: o.print || '',
+    source: o.source || 'e360',
+    owner: o.owner || null, contact_id: o.contact || null,
+    due_date: o.due_off == null ? '' : dayISO(o.due_off),
+    status: o.status || 'needed', notes: o.notes || '', sort_order: o.sort || 0,
+    created_at: dayISO(o.off == null ? -7 : o.off), created_by: o.by || 'tandres',
+    versions: []
+  };
+  CONTENT_BY_ID[p.id] = p;
+  ALL_CONTENT.push(p);
+  return p;
+}
+/* a version rides ON its piece (piece.versions, oldest first) — the same
+   payload shape GET /shows/:id/content answers, so the views read one shape
+   in both modes. `file` is the joined files row. */
+function mkContentVersion(piece, o) {
+  var v = {
+    id: ++_cvSeq, piece_id: piece.id, version_n: piece.versions.length + 1,
+    file_id: o.file ? o.file.id : null, file: o.file || null,
+    status: o.status || 'current',
+    sent_at: o.sent_off == null ? null : dayISO(o.sent_off) + 'T15:00',
+    sent_by: o.sent_by || null,
+    feedback: o.feedback || '',
+    feedback_by: o.feedback_by || null,
+    feedback_at: o.feedback_off == null ? null : dayISO(o.feedback_off) + 'T17:20',
+    created_at: dayISO(o.off == null ? 0 : o.off) + 'T14:00', created_by: o.by || 'jhawk'
+  };
+  CONTENT_VERSIONS_BY_ID[v.id] = v;
+  ALL_CONTENT_VERSIONS.push(v);
+  piece.versions.push(v);
+  return v;
+}
+
+function contentForShow(showId) {
+  return ALL_CONTENT.filter(function (p) { return p.show_id === Number(showId); })
+    .sort(function (a, b) { return (a.sort_order - b.sort_order) || (a.id - b.id); });
+}
+/* approved + delivered over everything that is not n/a — the "content 7/12"
+   chip. ONE arithmetic, mirrored from routes/content.js rollupOf(). */
+function contentRollup(showId) {
+  var counted = contentForShow(showId).filter(function (p) { return p.status !== 'na'; });
+  return {
+    total: counted.length,
+    done: counted.filter(function (p) { return p.status === 'approved' || p.status === 'delivered'; }).length
+  };
+}
+/* the chase list: client/third-party pieces not yet in hand — one glance at
+   who still owes us what. */
+function contentWaitingOn(showId) {
+  return contentForShow(showId).filter(function (p) {
+    return p.source !== 'e360' &&
+      ['approved', 'delivered', 'na'].indexOf(p.status) < 0;
+  });
+}
+function contentCurrentVersion(piece) {
+  var vs = piece.versions || [];
+  for (var i = vs.length - 1; i >= 0; i--) if (vs[i].status === 'current') return vs[i];
+  return vs.length ? vs[vs.length - 1] : null;
+}
+/* measured-vs-spec — a QUESTION, never an error. Mirrors lib/speccheck.js
+   contentQuestion() byte for byte in behaviour: a 2× height reads as "is this
+   zone double-stacked?", anything else asks which is right. In API mode the
+   server computed this and the row carries it (measure_state/question/match);
+   the mirror only runs for demo rows. */
+function contentVerdict(piece) {
+  if (piece && piece.measure_state !== undefined) {
+    return { state: piece.measure_state, question: piece.question || null, match: !!piece.match };
+  }
+  var sw = piece ? piece.spec_w : null, sh = piece ? piece.spec_h : null;
+  if (sw == null || sh == null) return { state: 'no-spec', question: null, match: false };
+  var cur = contentCurrentVersion(piece);
+  var f = cur ? (cur.file || FILES_BY_ID[cur.file_id]) : null;
+  var mw = f && f.width != null ? Number(f.width) : null;
+  var mh = f && f.height != null ? Number(f.height) : null;
+  if (mw == null || mh == null) return { state: 'unmeasured', question: null, match: false };
+  if (mw === sw && mh === sh) return { state: 'match', question: null, match: true };
+  var stackedLooking = mw === sw && mh === sh * 2;
+  return {
+    state: 'question', match: false,
+    question: {
+      id: 'content.size', kind: 'question',
+      ask: 'The spec asks for ' + sw + ' × ' + sh + 'px and the delivered file measures ' +
+           mw + ' × ' + mh + 'px. ' +
+           (stackedLooking
+             ? 'That is exactly double the height — is this zone double-stacked, and the spec behind?'
+             : 'Which is right — the spec, or the build?'),
+      detail: 'Stacked zones change pixel maps, and a spec can lag a design change — so a size ' +
+              'difference is a question about the piece, not an accusation about the file. ' +
+              'Nothing is rejected and nothing is silently accepted.',
+      values: { spec_w: sw, spec_h: sh, measured_w: mw, measured_h: mh, stackedLooking: stackedLooking }
+    }
+  };
+}
+
+/* what GET /shows/:id/content-seed would answer, modeled per show — the AVCA
+   folder has a bound .e360 whose media-server zones map to two canvases
+   (p391 → 128×128px per cabinet, ×2 height on the stacked zone — the tool's
+   own zonePixels math). Absent = no bound spec / no zones, and the demo says
+   so as honestly as the server would. */
+var CONTENT_SEED_DEMO = {
+  1: {
+    available: true, cabinetType: 'p391', pxKnown: true,
+    pxPerCabinet: { w: 128, h: 128 }, duration_spec: ':30', note: null,
+    zones: [
+      { index: 0, name: 'Courtside ribbon', first: 1, last: 60, count: 60,
+        doubleStacked: false, spec_w: 7680, spec_h: 128 },
+      { index: 1, name: 'North stack', first: 61, last: 64, count: 4,
+        doubleStacked: true, spec_w: 512, spec_h: 256 }
+    ]
+  }
+};
+function contentSeedFor(showId) {
+  return CONTENT_SEED_DEMO[Number(showId)] ||
+    { available: false, zones: [],
+      reason: 'No content spec (.e360) is bound to this show. Bind one from ' +
+              'E360 Spec Sheet Gen and the media-server zones become proposable pieces.' };
+}
+
+/* ---- demo seed: every state on the AVCA show, so the tab teaches itself ----
+   All three sources · a multi-round piece · a mismatch question · an n/a ·
+   an outstanding chase row and a received one. Version files are pushed into
+   the show's own files list (they ARE files — kind 'proof', measured w/h on
+   the row exactly where a real upload lands them). */
+(function seedContent() {
+  var show = SHOWS_BY_ID[1];
+  if (!show) return;
+  function contactByName(nm) {
+    return ALL_CONTACTS.filter(function (c) { return c.name === nm; })[0] || null;
+  }
+  var dana = contactByName('Dana Fox');
+  var wei = contactByName('Wei Lin');
+  function vfile(name, off, w, h, dur) {
+    var f = mkFile({ name: name, ext: 'mp4', kind: 'proof', artifact: 'image',
+                     ver: 'v1', size: 0, dim: w && h ? w + ' x ' + h : null,
+                     by: 'jhawk', off: off, meta: 'content proof round' });
+    f.show_id = show.id; f.project_id = null;
+    f.width = w == null ? null : w; f.height = h == null ? null : h;
+    f.duration_s = dur == null ? null : dur;
+    FILES_BY_ID[f.id] = f;
+    show.files.push(f);
+    return f;
+  }
+
+  /* 1 · the multi-round e360 piece: v1 sent, feedback, v2 back out — and the
+     current version MEASURES what the spec asks, so the ✓ renders. */
+  var loop = mkContentPiece({ show: 1, name: 'Sponsor rotation — courtside ribbon',
+    surface: 'Courtside ribbon', kind: 'video', w: 7680, h: 128, dur: ':30',
+    source: 'e360', owner: 'jhawk', due_off: -3, status: 'proofing', off: -14, by: 'tandres' });
+  mkContentVersion(loop, { file: vfile('Sponsor rotation v1', -8, 7680, 128, 30),
+    status: 'superseded', off: -8, sent_off: -7, sent_by: 'jhawk',
+    feedback: 'Sponsor logos read too small from the camera side — bump them 20% and hold each card a beat longer.',
+    feedback_by: 'tandres', feedback_off: -6 });
+  mkContentVersion(loop, { file: vfile('Sponsor rotation v2', -2, 7680, 128, 30),
+    status: 'current', off: -2, sent_off: -1, sent_by: 'jhawk' });
+
+  /* 2 · the mismatch QUESTION: a stacked-zone canvas delivered single-height.
+     512×256 asked, 512×128 measured — the chip asks, it never accuses. */
+  var stack = mkContentPiece({ show: 1, name: 'Halftime sponsor stack — north wall',
+    surface: 'North stack', kind: 'video', w: 512, h: 256, dur: ':30',
+    source: 'e360', owner: 'jhawk', due_off: 2, status: 'in_design', off: -10, by: 'tandres' });
+  mkContentVersion(stack, { file: vfile('Halftime stack v1', -1, 512, 128, 30),
+    status: 'current', off: -1 });
+
+  /* 3 · the chase row: the client owes the intro sting and it is overdue. */
+  mkContentPiece({ show: 1, name: 'Team intro sting — center hung',
+    surface: 'Center hung', kind: 'video', w: 1920, h: 1080, dur: ':08',
+    source: 'client', contact: dana ? dana.id : null, due_off: -1,
+    status: 'needed', off: -12, by: 'tandres',
+    notes: 'Client’s agency is cutting this from last season’s master.' });
+
+  /* 4 · a third-party print piece, in production at the vendor. */
+  mkContentPiece({ show: 1, name: 'Court wrap print — 48′×8′',
+    surface: 'Court apron', kind: 'print', print: '48 ft × 8 ft · 150 dpi vinyl',
+    source: 'third_party', contact: wei ? wei.id : null, due_off: 6,
+    status: 'in_design', off: -9, by: 'tandres' });
+
+  /* 5 · the n/a — cut on purpose, kept and struck through, out of the rollup. */
+  mkContentPiece({ show: 1, name: 'Venue IPTV variant — 16:9',
+    surface: 'Concourse IPTV', kind: 'video', w: 1920, h: 1080,
+    source: 'e360', owner: 'jhawk', status: 'na', off: -9, by: 'tandres',
+    notes: 'Venue runs its own IPTV loop — not ours this year.' });
+
+  /* 6 · a client piece already IN HAND — proves the chase list only counts
+     what is still outstanding. */
+  var league = mkContentPiece({ show: 1, name: 'League partner loop — ribbon',
+    surface: 'Courtside ribbon', kind: 'video', w: 7680, h: 128, dur: 'loop',
+    source: 'client', contact: dana ? dana.id : null, due_off: -8,
+    status: 'delivered', off: -15, by: 'tandres' });
+  mkContentVersion(league, { file: vfile('League partner loop', -8, 7680, 128, 62),
+    status: 'current', off: -8, by: 'tandres' });
+})();
+
+/* ============================================================================
    NOTES + @MENTIONS — anchored comments (notes pass)
    ----------------------------------------------------------------------------
    The decided model (TEAM_FEEDBACK): threads live ON things, never free-

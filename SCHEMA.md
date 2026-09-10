@@ -51,6 +51,7 @@ with **Jobs** (the commercial dimension) alongside the shows in the folder.
 | `routes/notes.js` | 387 | anchored notes, mentions, the personal inbox |
 | `routes/schedule.js` | 824 | run of show, crew, call-sheet header |
 | `routes/photos.js` | 601 | photo curation, picks, the thumbnailer contract |
+| `routes/content.js` | 470 | content pieces — the graphic-design pipeline: sources, proof rounds, spec seeding, the measured-vs-spec question |
 | `routes/deliverables.js` | 624 | the client recap lifecycle |
 | `routes/proposals.js` | 406 | **confirm / reject — session only** |
 | `routes/agent.js` | 660 | the whole `/api/agent/*` surface |
@@ -84,6 +85,9 @@ with **Jobs** (the commercial dimension) alongside the shows in the folder.
 | `po_lines.ownership` | `inventory` · `cogs` |
 | need `status` (`purchase_needs`) | `open` · `covered` · `na` — `covered` = raised onto a PO (`covered_by_po_id`) or checked off by hand; `na` = deliberately not needed, kept struck-through |
 | contact `kind` | `client` · `venue` · `vendor` · `crew` · `other` — a coarse rolodex filter, never a permission |
+| content piece `source` | `e360` · `client` · `third_party` — who produces the file. `e360` pieces carry an internal `owner` + due date; the other two are **owed to us** and carry a rolodex `contact_id` (the chase list) |
+| content piece `kind` / `status` | `video` · `still` · `print` · `other` / `needed` → `in_design` → `proofing` → `approved` → `delivered`, plus `na` — cut on purpose, kept struck-through, excluded from the rollup (the needs-list rule). Durations and print specs are **free text** (`":30"`, `"loop"`, `"48 ft × 8 ft"`) — never coerced |
+| content version `status` | `current` · `superseded` — a new version **supersedes**, never deletes (the spec chain's word and rule) |
 | note `anchor_type` | `project` · `show` · `step` · `file` · `job` · `expense` · `po` |
 | schedule `kind` | `travel` · `work` · `show` · `meal` · `strike` |
 | deliverable `kind` / `status` | `recap` · `call_sheet` · `photo_set` / `draft` · `approved` · `sent` |
@@ -119,7 +123,7 @@ Adding "Motion Graphics" with three new lanes is two rows, not a deploy.
 
 ---
 
-## Tables (39)
+## Tables (41)
 
 ### Core hierarchy
 
@@ -362,6 +366,46 @@ which is what the finance feed reads for budget events.
 > crew family — pm floor on the route, `canEditProject` in the body. The link
 > dies with the show (both cascades); the contact survives. **No notifications
 > in v1, deliberately** — the needs-list precedent.
+
+### Content pieces (2026-09-10 — the graphic-design pipeline)
+
+**`content_pieces`** *(idx: `show_id`, `contact_id`, `(owner, status)`)*
+`id · show_id (NOT NULL) · project_id · job_id · name (NOT NULL) · surface · kind · spec_w · spec_h · duration_spec · print_spec · source · owner · contact_id · due_date · status · notes · sort_order · stamps`
+
+> Every show owes a set of content pieces — "Sponsor loop — ribbon —
+> 11520×90 — :30", "Court wrap print — 48'×8'". **Not** a `deliverables` kind
+> (that table is the post-event client recap, a firewalled domain) and **not**
+> a `proofs` row (see below). `source` is the shape decision — mixed
+> producers: an `e360` piece gets an internal `owner` + `due_date`, assigned
+> like a task; a `client`/`third_party` piece is **owed to us** and points at
+> a rolodex `contact_id`, which is what the chase view reads. `spec_w`/`spec_h`
+> prefill **stack-aware** from the bound `.e360`'s media-server zones
+> (`lib/speccheck.js contentZonesFromDocs` — the tool's own `zonePixels` math,
+> a double-stacked zone is twice the height). `duration_spec`/`print_spec` are
+> **free text** on purpose. `job_id` optionally links the deal when we are
+> hired to design; no finance math rides it in v1. Contact hard-delete
+> **refuses naming the pieces** while referenced (routes/contacts.js), same as
+> the show-link rule; the pieces die with their show (both cascades).
+
+**`content_versions`** *(unique `(piece_id, version_n)`; idx: `file_id`)*
+`id · piece_id · version_n · file_id · status · sent_at · sent_by · feedback · feedback_by · feedback_at · created_at · created_by`
+
+> The proof rounds: v1 sent → feedback → v2 → approved. Every version
+> references a **real uploaded `files` row** (registered without a size; the
+> byte PUT records measured `?w=&h=&dur=` — the §12b rule), and a new version
+> **supersedes** the previous current one — kept, never deleted. The
+> measured-vs-spec verdict is computed per read (`contentQuestion`): a
+> divergence is a **QUESTION** naming both dims — ask, don't accuse — never a
+> silent accept or a hard reject. A file delete NULLs `file_id` (the round
+> stays as history); versions die with their piece; the piece's files
+> deliberately survive a piece delete.
+>
+> **Why not `proofs`/`proof_rounds`?** Those are the print sign-off ledger —
+> `code`/`round TEXT`/`date TEXT`, no file reference, no version integer, no
+> sent stamp, no feedback column. Reusing them would have meant bolting five
+> columns onto a shared table and teaching every proofs surface about
+> piece-anchored rounds — the same forced marriage `tech_reports` refused with
+> `deliverables.kind`. A clean own-table won.
 
 ### Conversation
 
@@ -706,7 +750,7 @@ deletes it, and asserts **zero orphans** in all 28.
 
 ---
 
-## API surface (198 routes)
+## API surface (209 routes)
 
 Human routes return **snake_case** records matching `public/data.js`; agent
 routes speak **camelCase** per `AGENT_API.md`. Request bodies accept **both**
@@ -762,6 +806,21 @@ Bookings    GET /api/bookings[/:id] · POST /api/bookings · PUT/DELETE /api/boo
              2026-09-01; ownership is still what decides.)
 Proofs      GET /api/proofs · POST /api/proofs · POST /api/proofs/:id/rounds
             PUT/DELETE /api/proofs/:id
+Content     GET /api/shows/:id/content · GET /api/content?project_id=&show_id=&source=
+            POST /api/shows/:id/content · PUT/DELETE /api/content/:id
+            (create/edit/delete: pm+ AND canEditProject, the schedule family's
+             gate exactly)
+            PUT /api/content/:id/status  (folder editors OR the piece's own
+                                          owner — the step-owner rule)
+            POST /api/content/:id/versions   (file_id of one of THIS show's
+             files; the previous current version is SUPERSEDED, never deleted)
+            PUT /api/content/versions/:id/send      (a stamp, not a send —
+             idempotent, the first stamp stands)
+            PUT /api/content/versions/:id/feedback
+            GET /api/shows/:id/content-seed   (proposals from the bound .e360's
+             zones, stack-aware; no spec / no zones answers honestly)
+            POST /api/shows/:id/content-seed  (picks = zone INDEXES; the server
+             re-derives every pixel number — a size never arrives client-typed)
 Jobs        GET /api/jobs[/:id] · POST /api/jobs · PUT/DELETE /api/jobs/:id
 Budget      GET/POST /api/jobs/:id/budget · PUT/DELETE /api/budget-lines/:id
 Expenses    GET /api/expenses · POST /api/expenses · PUT/DELETE /api/expenses/:id
@@ -886,12 +945,18 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | `updateStep` / `setStepStatus` / `assignStep` | `PUT /api/steps/:id` · `/status` · `/assign` |
 | `myOpenSteps(u)` | `GET /api/my-steps[?username=]` |
 | `listFiles` / `getFile` / `addFile` | `GET /api/files?show_id=` · `GET /api/files/:id` · `POST /api/files` |
-| `uploadFileBytes(id, blob, dims)` | `PUT /api/files/:id/content` (raw body; `?w=&h=` only when the image was really decoded) |
+| `uploadFileBytes(id, blob, dims)` | `PUT /api/files/:id/content` (raw body; `?w=&h=` only when the media was really decoded, `&dur=` only when a video's metadata really gave one) |
 | `downloadFileBytes(id)` | `GET /api/files/:id/content` → a Blob. Fetched rather than linked because auth is an `x-auth-token` **header**, not a cookie |
 | `uploadsEnabled()` | `GET /api/config` → `features.fileUpload`. Fails **closed** |
 | `replaceChainFile(sid, key, body)` | `POST /api/files` with `{chain_key, replace_chain:true}` |
 | `listBookings` / `getBooking` | `GET /api/bookings?show_id=` / `:id` |
 | `listProofs(sid)` | `GET /api/proofs?show_id=` |
+| `listContent(sid)` | `GET /api/shows/:id/content` → `{pieces, rollup}` |
+| `createPiece` / `updatePiece` / `deletePiece` | `POST /api/shows/:id/content` · `PUT`/`DELETE /api/content/:id` |
+| `pieceStatus(id, status)` | `PUT /api/content/:id/status` — folder editors OR the piece's own owner |
+| `addContentVersion(pieceId, fileId)` | `POST /api/content/:id/versions` — supersedes, never deletes |
+| `sendContentVersion` / `contentFeedback` | `PUT /api/content/versions/:id/send` · `/feedback` |
+| `contentSeed(sid)` / `contentSeedApply(sid, picks)` | `GET`/`POST /api/shows/:id/content-seed` — picks are zone indexes; numbers are server-derived |
 | `listActivity(sid)` | `GET /api/activity?show_id=` |
 | `getChain` / `updateChainNode` | `GET /api/shows/:id/chain` · `PUT /api/shows/:id/chain/:node` |
 | `getGear` / `updateGear` | `GET`/`PUT /api/shows/:id/gear` |

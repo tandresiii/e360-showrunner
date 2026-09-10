@@ -56,6 +56,17 @@ function viewShow(show, opts) {
   var phTab = '<button data-t="photos">Photos' + (phN ? ' <span class="n">' + phN + '</span>' : '') + '</button>';
   var docN = show.files.filter(function (f) { return f.kind !== 'photo'; }).length;
 
+  /* content pieces — the graphic-design pipeline. The badge is the rollup
+     ("7/12" = approved+delivered over everything not struck n/a), the same
+     arithmetic the season row's chip prints. The tab renders for every event
+     type — LED shows owe video canvases, print shows owe print files — and
+     its empty state does the explaining, the P3 rule. */
+  var cRoll = contentRollup(show.id);
+  var cWait = contentWaitingOn(show.id).length;
+  var contentTab = '<button data-t="content">Content' +
+    (cRoll.total ? ' <span class="n"' + (cWait ? ' style="color:var(--warn)"' : '') + '>' +
+      cRoll.done + '/' + cRoll.total + '</span>' : '') + '</button>';
+
   /* the post-strike closeout deliverable (recap pass) — badge = its status */
   var rec = recapForShow(show.id);
   var recTab = '<button data-t="recap">Recap' + (rec
@@ -190,6 +201,7 @@ function viewShow(show, opts) {
     schedTab +
     '<button data-t="pipeline">Pipeline <span class="n">' + r.total + '</span></button>' +
     specTab + gearTab +
+    contentTab +
     '<button data-t="files">Files <span class="n">' + docN + '</span></button>' +
     phTab +
     repTab +
@@ -208,6 +220,7 @@ function drawShowTab(show, t) {
     : t === 'pipeline' ? tabPipeline(show)
     : t === 'specs' ? tabSpecs(show)
     : t === 'gear' ? tabGear(show)
+    : t === 'content' ? tabContent(show)
     : t === 'files' ? tabFiles(show)
     : t === 'photos' ? tabPhotos(show)
     : t === 'reports' ? tabReports(show)
@@ -1258,6 +1271,10 @@ var ACTION_LABELS = {
   'need.seed': 'seeded the needs list',
   'proof.add': 'added a proof', 'proof.update': 'changed a proof',
   'proof.round.add': 'opened a proof round', 'proof.delete': 'deleted a proof',
+  'content.add': 'added a content piece', 'content.update': 'changed a content piece',
+  'content.status': 'moved a content piece', 'content.delete': 'deleted a content piece',
+  'content.version': 'filed a content version', 'content.send': 'sent a content round',
+  'content.feedback': 'recorded content feedback', 'content.seed': 'seeded pieces from the spec',
   'milestone.create': 'added a milestone', 'milestone.update': 'changed a milestone',
   'milestone.delete': 'removed a milestone',
   'template.instantiate': 'seeded the pipeline',
@@ -1485,6 +1502,231 @@ function tabProofs(show) {
     'locked and versioned — the approved file is what releases to the print floor, and it is what the ' +
     'Viewer prints. Approving it tells everyone on this show.</span></div>' +
     '<div class="proofs">' + proofs + '</div>';
+}
+
+/* ============================================================ content tab --
+   CONTENT PIECES — the graphic-design pipeline (Tom, 2026-09-10).
+   Every show owes a set of content pieces; this tab is where they live:
+   grouped by SOURCE (E360 builds / Client supplies / Third party — mixed
+   producers is the shape decision), a chase panel for what others still owe
+   us, and a per-piece version ladder where every round is a real uploaded
+   file. The measured-vs-spec verdict speaks the spec checker's language:
+   a "?" that ASKS, never an error — and a ✓ only when real measured pixels
+   agree with the spec.
+   ========================================================================== */
+var CONTENT_UI = { open: {}, filter: {} };   /* pieceId -> ladder open · showId -> source filter */
+
+function cpSpecLine(p) {
+  var parts = [];
+  if (p.spec_w != null && p.spec_h != null) parts.push(p.spec_w + ' × ' + p.spec_h + 'px');
+  if (p.duration_spec) parts.push(p.duration_spec);
+  if (p.print_spec) parts.push(p.print_spec);
+  return parts.join(' · ');
+}
+/* the verdict chip — the scope chip's "?" language, verbatim on purpose:
+   ask, don't accuse. Unmeasured stays QUIET (claiming nothing is the honest
+   state), a match earns the ✓, a divergence asks its question in the title. */
+function cpVerdictChip(p) {
+  var v = contentVerdict(p);
+  if (v.state === 'match') {
+    return '<span class="fresh-chip" title="' +
+      esc('The delivered file measures exactly what the spec asks — ' +
+          p.spec_w + ' × ' + p.spec_h + 'px, really measured, never assumed.') + '">✓ ' +
+      p.spec_w + '×' + p.spec_h + '</span>';
+  }
+  if (v.state === 'question' && v.question) {
+    return '<span class="stale-chip" title="' + esc(v.question.ask + ' ' + v.question.detail) + '">' +
+      icon('alert') + esc(v.question.values.measured_w + '×' + v.question.values.measured_h +
+      ' vs ' + v.question.values.spec_w + '×' + v.question.values.spec_h) + ' <b>?</b></span>';
+  }
+  return '';
+}
+/* who the piece waits on: an owner chip for our own work, the rolodex card's
+   name + mailto for a piece somebody owes us — the chase affordance. */
+function cpWhoCell(p) {
+  if (p.source === 'e360') return ownerChip(p.owner);
+  var c = p.contact_id ? (p.contact || CONTACTS_BY_ID[p.contact_id]) : null;
+  if (!c) return '<span class="mini dep" title="No contact linked — who owes this?">no contact</span>';
+  var mail = c.email
+    ? ' <a class="lnk" style="font-size:11px" href="mailto:' + esc(c.email) + '" title="' +
+      esc('Chase ' + c.name + ' — opens your own mail; this app sends nothing') + '">' +
+      inlineIcon('mail') + esc(c.email) + '</a>'
+    : '';
+  return '<span class="tag" style="cursor:pointer" title="' +
+    esc((c.org ? c.org + ' · ' : '') + 'open the rolodex card') + '" ' +
+    act('openContact', c.id) + '>' + esc(c.name) + '</span>' + mail;
+}
+function cpStatusCell(p, canWalk) {
+  var m = CONTENT_STATUS_META[p.status] || CONTENT_STATUS_META.needed;
+  var pill = '<span class="pill ' + esc(m.pill) + '"><span class="dot"></span>' + esc(m.label) + '</span>';
+  if (!canWalk || p.status === 'na') return pill;
+  var i = CONTENT_STAGE_WALK.indexOf(p.status);
+  var next = i >= 0 && i < CONTENT_STAGE_WALK.length - 1 ? CONTENT_STAGE_WALK[i + 1] : null;
+  return pill + (next
+    ? ' <button class="cchip" title="' + esc('Advance to ' + CONTENT_STATUS_META[next].label) + '" ' +
+      act('cpAdvance', p.id) + '>' + icon('chevR') + '</button>'
+    : '');
+}
+function cpVersionRow(v, p, editable) {
+  var f = v.file || (v.file_id ? FILES_BY_ID[v.file_id] : null);
+  var measured = f && f.width && f.height
+    ? f.width + ' × ' + f.height + 'px' + (f.duration_s ? ' · ' + f.duration_s + 's' : '')
+    : 'not measured';
+  var sup = v.status === 'superseded';
+  var acts = '';
+  if (f) acts += '<button class="btn sm ghost" ' + act('openViewer', f.id) + '>' + icon('eye') + 'View</button>';
+  if (editable && !v.sent_at) {
+    acts += '<button class="btn sm ghost" ' + act('cpSend', v.id) +
+      ' title="Records that this round went to the client — the send itself happens in your own mail">' +
+      icon('send') + 'Mark sent</button>';
+  }
+  if (editable) {
+    acts += '<button class="btn sm ghost" ' + act('cpFeedback', v.id) + '>' + icon('chat') +
+      (v.feedback ? 'Edit feedback' : 'Add feedback') + '</button>';
+  }
+  return '<div class="round"><div class="rn"' + (sup ? ' style="opacity:.55"' : '') + '>v' + v.version_n + '</div>' +
+    '<div class="rc">' +
+    '<div class="rnote"' + (sup ? ' style="text-decoration:line-through;color:var(--muted)"' : '') + '>' +
+    (f ? esc(f.name) : '<span style="color:var(--muted)">file removed — the round stands as history</span>') +
+    ' <span class="mono" style="font-size:10.5px;color:var(--muted)">' + esc(measured) + '</span>' +
+    (sup ? ' <span class="mini">superseded — kept, never deleted</span>' : '') + '</div>' +
+    (v.feedback ? '<div class="rnote" style="color:var(--text-2)">' + inlineIcon('chat') + ' ' + esc(v.feedback) +
+      (v.feedback_by ? ' <span class="mini">' + esc(firstName(v.feedback_by)) + '</span>' : '') + '</div>' : '') +
+    '<div class="rd">' +
+    (v.sent_at ? '<span class="mini auto">' + inlineIcon('send') + ' sent ' + esc(fmtDate(String(v.sent_at).slice(0, 10))) +
+      (v.sent_by ? ' · ' + esc(firstName(v.sent_by)) : '') + '</span>' : '<span class="mini">not sent yet</span>') +
+    '<span style="display:inline-flex;gap:6px;margin-left:8px">' + acts + '</span>' +
+    '</div></div></div>';
+}
+function cpPieceRows(p, show, editable) {
+  var na = p.status === 'na';
+  var struck = na ? 'text-decoration:line-through;color:var(--muted)' : '';
+  var canWalk = editable || (p.owner && p.owner === ME);
+  var vN = (p.versions || []).length;
+  var open = !!CONTENT_UI.open[p.id];
+  var main = '<tr>' +
+    '<td><b style="font-weight:600;' + struck + '">' + esc(p.name) + '</b>' +
+    (p.surface ? '<span style="display:block;color:var(--muted);font-size:11px;' +
+      (na ? 'text-decoration:line-through' : '') + '">' + esc(p.surface) + '</span>' : '') + '</td>' +
+    '<td><span class="tag">' + esc(p.kind) + '</span></td>' +
+    '<td class="mono" style="font-size:11.5px">' + esc(cpSpecLine(p) || '—') + ' ' + cpVerdictChip(p) + '</td>' +
+    '<td>' + cpWhoCell(p) + '</td>' +
+    '<td class="mono" style="font-size:12px">' + esc(fmtDate(p.due_date)) + '</td>' +
+    '<td>' + cpStatusCell(p, canWalk) + '</td>' +
+    '<td style="white-space:nowrap;text-align:right">' +
+    '<button class="btn sm ghost" ' + act('cpOpen', p.id) + '>' + icon(open ? 'chevL' : 'layers') +
+      (vN ? 'v' + vN : 'Rounds') + '</button> ' +
+    (canWalk ? '<button class="iconbtn" title="Upload the next version — the real file, measured on the way in" ' +
+      act('cpUpload', p.id) + '>' + icon('upload') + '</button> ' : '') +
+    (editable ? '<button class="iconbtn" title="' + (na ? 'Restore — it is needed after all' : 'Cut on purpose (n/a) — kept, struck through') + '" ' +
+      act('cpNa', p.id) + '>' + icon(na ? 'plus' : 'x') + '</button> ' +
+      '<button class="iconbtn" title="Edit this piece" ' + act('cpEdit', p.id, String(show.id)) + '>' + icon('pencil') + '</button> ' +
+      '<button class="iconbtn" title="Delete this piece — its files stay in Files" ' + act('cpDelete', p.id) + '>' + icon('trash') + '</button>'
+      : '') +
+    '</td></tr>';
+  if (!open) return main;
+  var v = contentVerdict(p);
+  var qBlock = v.state === 'question' && v.question
+    ? '<div class="scope-q">' + inlineIcon('alert') + '<div><b>' + esc(v.question.ask) + '</b>' +
+      '<span>' + esc(v.question.detail) + '</span></div></div>'
+    : '';
+  var ladder = (p.versions || []).map(function (vr) { return cpVersionRow(vr, p, canWalk); }).join('') ||
+    '<div class="empty" style="padding:12px">No rounds yet — upload v1 and the proof trail starts here.</div>';
+  return main + '<tr><td colspan="7" style="background:var(--surface-1);padding:10px 14px">' +
+    qBlock + '<div class="rounds">' + ladder + '</div>' +
+    (canWalk ? '<div style="margin-top:8px"><button class="btn sm ghost" ' + act('cpUpload', p.id) + '>' +
+      icon('upload') + 'Upload v' + (vN + 1) + '</button></div>' : '') +
+    '</td></tr>';
+}
+/* the chase panel — "waiting on others", one glance. Client and third-party
+   pieces not yet in hand, each with the contact's name and mailto off the
+   rolodex card. */
+function contentChasePanel(show) {
+  var waiting = contentWaitingOn(show.id);
+  if (!waiting.length) return '';
+  var rows = waiting.map(function (p) {
+    var overdue = p.due_date && p.due_date < TODAY_ISO;
+    return '<div class="next-item"><div class="txt">' + esc(p.name) +
+      '<span>' + esc(CONTENT_SOURCE_LABEL[p.source] || p.source) +
+      (p.due_date ? ' · due ' + fmtDate(p.due_date) : '') + '</span></div>' +
+      (overdue ? '<span class="pill crit"><span class="dot"></span>Overdue</span>' : '') +
+      cpWhoCell(p) + '</div>';
+  }).join('');
+  return '<div class="waiting-on">' + inlineIcon('alert') + '<div><b>Waiting on others · ' +
+    waiting.length + '</b><span>Pieces the client or a third party still owes this show.</span></div></div>' +
+    '<div class="panel" style="margin-bottom:16px"><div class="next-list">' + rows + '</div></div>';
+}
+function tabContent(show) {
+  var editable = canEditFolderOf(show);
+  var all = contentForShow(show.id);
+  var roll = contentRollup(show.id);
+
+  var head = '<div class="files-head"><h3>Content pieces · ' +
+    (roll.total ? roll.done + '/' + roll.total : '0') + '</h3>' +
+    '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
+    (editable ? '<button class="btn ghost" ' + act('cpSeed', show.id) +
+      ' title="One proposed piece per media-server zone of the bound content spec — stack-aware pixel sizes, a human picks which">' +
+      icon('layers') + 'Add pieces from spec</button>' +
+      '<button class="btn primary" ' + act('cpAdd', show.id) + '>' + icon('plus') + 'Add piece</button>'
+      : '') + '</div></div>';
+
+  if (!all.length) {
+    return head + '<div class="gear-empty">' + icon('palette') +
+      '<div style="font-weight:600;font-size:14px">No content pieces on this show yet</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:500px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+      'Every show owes a set of content pieces — “Sponsor loop — ribbon — 11520×90 — :30”, ' +
+      '“Court wrap print — 48′×8′”. Some E360 builds (assigned like tasks), some the client or a ' +
+      'third party supplies (chased off the rolodex). Each piece carries its pixel or print spec, and ' +
+      'every uploaded round is measured against it — a difference is a question, never a rejection.</div>' +
+      (editable
+        ? '<div style="display:flex;gap:9px;justify-content:center;margin-top:16px;flex-wrap:wrap">' +
+          '<button class="btn primary" ' + act('cpAdd', show.id) + '>' + icon('plus') + 'Add piece</button>' +
+          '<button class="btn ghost" ' + act('cpSeed', show.id) + '>' + icon('layers') + 'Add pieces from spec</button></div>'
+        : '') + '</div>';
+  }
+
+  var cur = CONTENT_UI.filter[show.id] || null;
+  var chips = '<button class="ph-chip' + (!cur ? ' on' : '') + '" ' + act('cpFilter', show.id, '*') +
+    '>All <span class="n">' + all.length + '</span></button>' +
+    CONTENT_SOURCES.map(function (src) {
+      var n = all.filter(function (p) { return p.source === src; }).length;
+      if (!n) return '';
+      return '<button class="ph-chip' + (cur === src ? ' on' : '') + '" ' + act('cpFilter', show.id, src) + '>' +
+        esc(CONTENT_SOURCE_LABEL[src]) + ' <span class="n">' + n + '</span></button>';
+    }).join('');
+  var bar = '<div class="ph-bar">' + chips + '</div>';
+
+  var groups = CONTENT_SOURCES.map(function (src) {
+    if (cur && cur !== src) return '';
+    var list = all.filter(function (p) { return p.source === src; });
+    if (!list.length) return '';
+    var rows = list.map(function (p) { return cpPieceRows(p, show, editable); }).join('');
+    return '<div class="card" style="margin-bottom:16px"><div class="card-h"><h3>' +
+      esc(CONTENT_SOURCE_LABEL[src]) + '</h3><span class="pill idle">' + list.length +
+      ' piece' + (list.length === 1 ? '' : 's') + '</span></div>' +
+      '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+      '<th>Piece</th><th>Kind</th><th>Spec</th><th>' + (src === 'e360' ? 'Owner' : 'Owed by') +
+      '</th><th>Due</th><th>Status</th><th></th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+  }).join('');
+
+  return head + contentChasePanel(show) + bar + groups +
+    '<div class="hint">' + icon('bolt') + '<span>Every uploaded round is a real file, <b>measured</b> in the ' +
+    'browser on the way up — the chip compares measured pixels to the spec and a difference is a ' +
+    '<b>question</b> (stacked zones change pixel maps), never a silent accept or a hard reject. New versions ' +
+    '<b>supersede</b> old ones — kept, never deleted — and “sent” is a record, not a send.</span></div>';
+}
+
+/* ---- season row chip: content 7/12, the photo-chip device ----------------- */
+function contentSeasonChip(s) {
+  var roll = contentRollup(s.id);
+  if (!roll.total) return '';
+  var wait = contentWaitingOn(s.id).length;
+  return '<span class="ph-count" title="' +
+    esc('Content pieces: ' + roll.done + ' of ' + roll.total + ' approved or delivered (n/a excluded)' +
+        (wait ? ' · waiting on others for ' + wait : '')) +
+    '"' + (wait ? ' style="color:var(--warn)"' : '') + '>' + inlineIcon('palette') +
+    roll.done + '/' + roll.total + '</span>';
 }
 
 /* ============================================================= photos tab --

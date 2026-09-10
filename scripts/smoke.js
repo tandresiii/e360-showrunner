@@ -3426,6 +3426,256 @@ const DEL = (p, o) => call('DELETE', p, o);
     { token: PMT });
   ok('15c: the vendor card rides into the cascade section linked', scWei.status === 200, scWei.body);
 
+  section('15d. content pieces — the graphic-design pipeline');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom (2026-09-10): every show owes a set of content pieces, three producers
+  // (e360 / client / third_party), full proof rounds where a new version
+  // SUPERSEDES and never deletes, and spec integration both ways — pixel
+  // sizes seeded stack-aware from the bound .e360's zones, and delivered
+  // files MEASURED against the spec with a QUESTION (never an error) on a
+  // mismatch. Measured dims normally land via PUT /files/:id/content?w=&h=
+  // (the browser's own measurement); this suite runs with no storage — the
+  // byte half is harness-upload.mjs's job — so the fixture writes the columns
+  // the byte route writes, directly, and everything downstream is the real
+  // read path.
+
+  // ── floors, both halves ───────────────────────────────────────────────────
+  ok('15d FLOOR: a tech may not create a piece (rank)',
+     (await POST(`/api/shows/${S}/content`, { name: TAG + ' sneak piece' }, { token: TECHT }))
+       .status === 403);
+  ok('15d FLOOR: a pm who owns nothing may not either (ownership)',
+     (await POST(`/api/shows/${S}/content`, { name: TAG + ' sneak piece' }, { token: PM2T }))
+       .status === 403);
+  ok('15d: ...and the refusals wrote nothing',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM content_pieces WHERE show_id=$1`, [S]))
+       .rows[0].n === 0);
+  const cpBadSrc = await POST(`/api/shows/${S}/content`,
+    { name: TAG + ' x', source: 'vendor' }, { token: PMT });
+  ok('15d: an unknown source is a 400 NAMING the whitelist',
+     cpBadSrc.status === 400 && /source must be one of/.test(cpBadSrc.body.error)
+     && /third_party/.test(cpBadSrc.body.error), cpBadSrc.body);
+  ok('15d: an unknown kind is refused the same way',
+     (await POST(`/api/shows/${S}/content`, { name: TAG + ' x', kind: 'gif' }, { token: PMT }))
+       .status === 400);
+  ok('15d: a nameless piece is a 400',
+     (await POST(`/api/shows/${S}/content`, { surface: 'ribbon' }, { token: PMT })).status === 400);
+
+  // ── the three producers ───────────────────────────────────────────────────
+  const cpLoop = await POST(`/api/shows/${S}/content`, {
+    name: TAG + ' Sponsor loop — ribbon', surface: 'Courtside ribbon', kind: 'video',
+    spec_w: 3840, spec_h: 96, duration_spec: ':30', source: 'e360',
+    owner: techUser, due_date: '2026-11-01'
+  }, { token: PMT });
+  ok('15d: the owning pm creates an e360 piece with an owner + due date',
+     cpLoop.status === 200 && cpLoop.body.owner === techUser && cpLoop.body.due_date === '2026-11-01'
+     && cpLoop.body.duration_spec === ':30', cpLoop.body);
+  const CPL = cpLoop.body.id;
+  ok('15d: durations are FREE TEXT — ":30" survives verbatim, never coerced',
+     cpLoop.body.duration_spec === ':30');
+
+  const cpContact = await POST('/api/contacts',
+    { name: TAG + ' Dana Fox', org: 'Fox & Co', kind: 'client', email: 'dana@foxandco.tv' },
+    { token: PMT });
+  const cpClient = await POST(`/api/shows/${S}/content`, {
+    name: TAG + ' Team intro sting', kind: 'video', spec_w: 1920, spec_h: 1080,
+    source: 'client', contact_id: cpContact.body.id, due_date: '2026-11-05'
+  }, { token: PMT });
+  ok('15d: a client piece is OWED TO US — it carries the rolodex contact, hydrated',
+     cpClient.status === 200 && cpClient.body.contact_id === cpContact.body.id
+     && cpClient.body.contact && cpClient.body.contact.email === 'dana@foxandco.tv', cpClient.body);
+  const cpPrint = await POST(`/api/shows/${S}/content`, {
+    name: TAG + ' Court wrap print', kind: 'print', print_spec: '48 ft × 8 ft · 150 dpi',
+    source: 'third_party', contact_id: cpContact.body.id
+  }, { token: PMT });
+  ok('15d: a third-party print piece carries its free-text print spec',
+     cpPrint.status === 200 && cpPrint.body.print_spec === '48 ft × 8 ft · 150 dpi', cpPrint.body);
+  ok('15d: an e360 piece never carries a contact (the source decides the column)',
+     cpLoop.body.contact_id === null);
+
+  // ── the status walk: folder editors OR the piece's own owner ─────────────
+  ok('15d GATE: a pm who owns nothing may not walk a status',
+     (await PUT(`/api/content/${CPL}/status`, { status: 'in_design' }, { token: PM2T }))
+       .status === 403);
+  const cpWalk = await PUT(`/api/content/${CPL}/status`, { status: 'in_design' }, { token: TECHT });
+  ok('15d GATE: the piece\'s OWNER walks its status — the step-owner rule',
+     cpWalk.status === 200 && cpWalk.body.status === 'in_design', cpWalk.body);
+  ok('15d: an unknown status is a 400 naming the list',
+     (await PUT(`/api/content/${CPL}/status`, { status: 'done' }, { token: TECHT })).status === 400);
+  // n/a is a decision, kept and excluded from the rollup — the needs-list rule
+  await PUT(`/api/content/${cpPrint.body.id}/status`, { status: 'na' }, { token: PMT });
+  const cpList0 = await GET(`/api/shows/${S}/content`, { token: TECHT });
+  ok('15d ROLLUP: n/a is excluded — 3 pieces, 2 counted, 0 done',
+     cpList0.status === 200 && cpList0.body.pieces.length === 3
+     && cpList0.body.rollup.total === 2 && cpList0.body.rollup.done === 0, cpList0.body.rollup);
+
+  // ── versions: v1, feedback, v2 — supersede, NEVER delete ─────────────────
+  const cvF1 = await POST('/api/files',
+    { show_id: S, name: TAG + ' sponsor-loop-v1', ext: 'mp4', kind: 'proof' }, { token: PMT });
+  const cvV1 = await POST(`/api/content/${CPL}/versions`, { file_id: cvF1.body.id }, { token: TECHT });
+  ok('15d: the piece\'s owner files v1 against a real files row',
+     cvV1.status === 200 && cvV1.body.version_n === 1 && cvV1.body.status === 'current'
+     && cvV1.body.file_id === cvF1.body.id, cvV1.body);
+  ok('15d: a version with no file is refused — a version IS an uploaded file',
+     (await POST(`/api/content/${CPL}/versions`, {}, { token: PMT })).status === 400);
+  const foreignFile = await POST('/api/files',
+    { project_id: P2, name: TAG + ' foreign', ext: 'pdf', kind: 'other' }, { token: A });
+  ok('15d: a file from another show is refused by name',
+     (await POST(`/api/content/${CPL}/versions`, { file_id: foreignFile.body.id }, { token: PMT }))
+       .status === 400);
+
+  const cvSend = await PUT(`/api/content/versions/${cvV1.body.id}/send`, {}, { token: TECHT });
+  ok('15d: v1 marked sent — a datestamp and a name, not an outbound path',
+     cvSend.status === 200 && !!cvSend.body.sent_at && cvSend.body.sent_by === techUser, cvSend.body);
+  ok('15d: re-marking keeps the FIRST stamp (already:true)',
+     (await PUT(`/api/content/versions/${cvV1.body.id}/send`, {}, { token: PMT })).body.already === true);
+  const cvFb = await PUT(`/api/content/versions/${cvV1.body.id}/feedback`,
+    { feedback: 'Logo too small from the camera side — bump 20%' }, { token: PMT });
+  ok('15d: client feedback lands on the round it belongs to',
+     cvFb.status === 200 && /bump 20%/.test(cvFb.body.feedback) && !!cvFb.body.feedback_at, cvFb.body);
+  ok('15d: empty feedback is a 400',
+     (await PUT(`/api/content/versions/${cvV1.body.id}/feedback`, { feedback: '' }, { token: PMT }))
+       .status === 400);
+
+  const cvF2 = await POST('/api/files',
+    { show_id: S, name: TAG + ' sponsor-loop-v2', ext: 'mp4', kind: 'proof' }, { token: PMT });
+  const cvV2 = await POST(`/api/content/${CPL}/versions`, { file_id: cvF2.body.id }, { token: PMT });
+  ok('15d: v2 lands as current', cvV2.status === 200 && cvV2.body.version_n === 2
+     && cvV2.body.status === 'current', cvV2.body);
+  const cvRows = await pool.query(
+    `SELECT version_n, status, feedback FROM content_versions WHERE piece_id=$1 ORDER BY version_n`, [CPL]);
+  ok('15d SUPERSEDE GATE: v2 SUPERSEDES v1 — v1 is KEPT, never deleted, feedback intact',
+     cvRows.rows.length === 2 && cvRows.rows[0].status === 'superseded'
+     && /bump 20%/.test(cvRows.rows[0].feedback) && cvRows.rows[1].status === 'current',
+     cvRows.rows);
+
+  // ── measured vs spec: the QUESTION chip's server half ────────────────────
+  // The byte route writes width/height from the browser's measurement; with
+  // no storage on this box the fixture writes the same columns directly.
+  await pool.query(`UPDATE files SET width=1000, height=200 WHERE id=$1`, [cvF2.body.id]);
+  const cpQ = await GET(`/api/shows/${S}/content`, { token: PMT });
+  const qPiece = cpQ.body.pieces.find((p) => p.id === CPL);
+  ok('15d QUESTION: a wrong-size file raises a question NAMING both dims — spec 3840×96, measured 1000×200',
+     !!qPiece && qPiece.measure_state === 'question' && !!qPiece.question
+     && /3840 × 96px/.test(qPiece.question.ask) && /1000 × 200px/.test(qPiece.question.ask)
+     && qPiece.question.values.spec_w === 3840 && qPiece.question.values.measured_w === 1000,
+     qPiece && qPiece.question);
+  ok('15d QUESTION: it ASKS, it never accuses — question language, no reject, match:false',
+     !!qPiece && (qPiece.question || {}).kind === 'question' && /\?/.test((qPiece.question || {}).ask || '')
+     && qPiece.match === false, qPiece && (qPiece.question || {}).ask);
+  await pool.query(`UPDATE files SET width=3840, height=192 WHERE id=$1`, [cvF2.body.id]);
+  const cpQ2 = await GET(`/api/shows/${S}/content`, { token: PMT });
+  const qPiece2 = cpQ2.body.pieces.find((p) => p.id === CPL);
+  ok('15d QUESTION: exactly double the height asks the STACKING question by name',
+     !!qPiece2 && qPiece2.measure_state === 'question'
+     && /double-stacked/.test((qPiece2.question || {}).ask || ''),
+     qPiece2 && (qPiece2.question || {}).ask);
+  await pool.query(`UPDATE files SET width=3840, height=96 WHERE id=$1`, [cvF2.body.id]);
+  const cpM = await GET(`/api/shows/${S}/content`, { token: PMT });
+  const mPiece = cpM.body.pieces.find((p) => p.id === CPL);
+  ok('15d MATCH: measured pixels that agree with the spec earn the ✓ — match:true, no question',
+     !!mPiece && mPiece.match === true && mPiece.question === null
+     && mPiece.measure_state === 'match', mPiece && { match: mPiece.match, state: mPiece.measure_state });
+
+  // ── approve → deliver, and the rollup moves ──────────────────────────────
+  await PUT(`/api/content/${CPL}/status`, { status: 'approved' }, { token: PMT });
+  await PUT(`/api/content/${CPL}/status`, { status: 'delivered' }, { token: TECHT });
+  const cpRoll = await GET(`/api/shows/${S}/content`, { token: PMT });
+  ok('15d ROLLUP: delivered counts — 1/2 with the n/a still excluded',
+     cpRoll.body.rollup.done === 1 && cpRoll.body.rollup.total === 2, cpRoll.body.rollup);
+  ok('15d: the walk is on the audit trail with a diff',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM activity
+                        WHERE action='content.status' AND show_id=$1`, [S])).rows[0].n >= 2);
+
+  // ── the contact-reference rule: refuse, name the piece, offer archive ─────
+  const ctOwedDel = await DEL('/api/contacts/' + cpContact.body.id, { token: A });
+  ok('15d: deleting a contact who OWES a piece is a 400 NAMING the piece and offering archive',
+     ctOwedDel.status === 400 && ctOwedDel.body.error.includes(TAG + ' Team intro sting')
+     && /archive/i.test(ctOwedDel.body.error)
+     && (ctOwedDel.body.pieces || [])[0]?.id === cpClient.body.id, ctOwedDel.body);
+  ok('15d: archive is never refused — the escape hatch the refusal names',
+     (await POST('/api/contacts/' + cpContact.body.id + '/archive', {}, { token: PMT }))
+       .status === 200);
+
+  // ── delete a piece: versions die, FILES SURVIVE ──────────────────────────
+  const cpDelGate = await DEL(`/api/content/${cpClient.body.id}`, { token: PM2T });
+  ok('15d GATE: a pm who owns nothing may not delete a piece', cpDelGate.status === 403);
+  const cpDel = await DEL(`/api/content/${cpClient.body.id}`, { token: PMT });
+  ok('15d: the owning pm deletes the client piece', cpDel.status === 200, cpDel.body);
+  // the print piece points at the same card — the refusal covers EVERY owed
+  // piece, so both must go before the delete stops being refused
+  await DEL(`/api/content/${cpPrint.body.id}`, { token: PMT });
+  ok('15d: ...and NOW the un-owed contact hard-deletes clean',
+     (await DEL('/api/contacts/' + cpContact.body.id, { token: A })).status === 200);
+  const cpDel2 = await DEL(`/api/content/${CPL}`, { token: PMT });
+  ok('15d CASCADE: deleting a piece takes its versions...',
+     cpDel2.status === 200 &&
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM content_versions WHERE piece_id=$1`, [CPL]))
+       .rows[0].n === 0);
+  ok('15d CASCADE: ...and the uploaded FILES SURVIVE — the file is the show\'s, not the piece\'s',
+     (await GET(`/api/files/${cvF1.body.id}`, { token: PMT })).status === 200
+     && (await GET(`/api/files/${cvF2.body.id}`, { token: PMT })).status === 200);
+
+  // ── spec seeding: stack-aware pixel maps from a bound .e360 ──────────────
+  const seedShow = await POST('/api/shows', {
+    project_id: P, name: TAG + ' Seed City', venue: 'Seed Arena',
+    load_in_date: '2026-12-01', event_date: '2026-12-03', stage: 'planning'
+  }, { token: A });
+  const S5 = seedShow.body.id;
+  const seedNone = await GET(`/api/shows/${S5}/content-seed`, { token: PMT });
+  ok('15d SEED: no bound spec answers HONESTLY — available:false with the reason in words',
+     seedNone.status === 200 && seedNone.body.available === false
+     && /No content spec/.test(seedNone.body.reason), seedNone.body);
+  // a zoned .e360: 30 flat cabinets of p391 (128×128px each) + a 4-cabinet
+  // double-stacked zone. zonePixels: A = 30×128 = 3840×128 · B = 512×256.
+  const zonedSpec = {
+    version: 1, layoutMode: 'complex', complexUnit: 'ft', compassBearing: 0,
+    sideStates: { south: true, north: true, east: false, west: false },
+    fields: { clientName: TAG + ' Seed', venueName: 'Seed Arena', cabinetType: 'p391',
+              fieldLength: '110', fieldWidth: '59', totalCabinets: '38', codecDuration: '30' },
+    complexSections: [
+      { name: 'South run', side: 'south', count: '30', offset: '0', fieldDist: '10', direction: 'ltr' },
+      { name: 'North stack', side: 'north', count: '4', offset: '0', fieldDist: '10', direction: 'ltr' }
+    ],
+    zones: [
+      { name: 'Ribbon A', color: '#59A9F0', first: 1, last: 30, doubleStacked: false },
+      { name: 'North stack', color: '#F0616B', first: 31, last: 34, doubleStacked: true }
+    ],
+    clientLogoDataUrl: null
+  };
+  const seedBind = await POST(`/api/shows/${S5}/spec-bind`,
+    { spec_type: 'e360', json: zonedSpec, suggestedName: TAG + ' seed spec' }, { token: A });
+  ok('15d SEED: the zoned .e360 binds', seedBind.status === 200, seedBind.body);
+  const seedGet = await GET(`/api/shows/${S5}/content-seed`, { token: TECHT });
+  const zA = (seedGet.body.zones || []).find((z) => z.name === 'Ribbon A');
+  const zB = (seedGet.body.zones || []).find((z) => z.name === 'North stack');
+  ok('15d SEED: one proposal per zone, pixel sizes from the tool\'s own math — 30 × 128 = 3840×128',
+     seedGet.body.available === true && !!zA && zA.spec_w === 3840 && zA.spec_h === 128
+     && zA.doubleStacked === false, seedGet.body.zones);
+  ok('15d SEED: the STACKED zone doubles its HEIGHT, not its width — 512×256, stack-aware',
+     !!zB && zB.spec_w === 512 && zB.spec_h === 256 && zB.doubleStacked === true, zB);
+  ok('15d SEED: the spec\'s codec duration prefills as ":30" free text',
+     seedGet.body.duration_spec === ':30', seedGet.body.duration_spec);
+  ok('15d SEED FLOOR: applying picks is a pm-with-ownership act',
+     (await POST(`/api/shows/${S5}/content-seed`, { picks: [0] }, { token: PM2T })).status === 403);
+  ok('15d SEED: a pick naming no zone poisons the whole call',
+     (await POST(`/api/shows/${S5}/content-seed`, { picks: [0, 9] }, { token: A })).status === 400
+     && (await pool.query(`SELECT COUNT(*)::int AS n FROM content_pieces WHERE show_id=$1`, [S5]))
+       .rows[0].n === 0);
+  const seedApply = await POST(`/api/shows/${S5}/content-seed`, { picks: [0, 1] }, { token: A });
+  ok('15d SEED: the chosen zones become pieces — server-derived numbers, kind video, needed',
+     seedApply.status === 200 && seedApply.body.created.length === 2
+     && seedApply.body.created.every((p) => p.kind === 'video' && p.status === 'needed'
+          && p.source === 'e360' && p.duration_spec === ':30')
+     && seedApply.body.created.find((p) => p.name === 'North stack').spec_h === 256,
+     seedApply.body.created.map((p) => p.name + ' ' + p.spec_w + 'x' + p.spec_h));
+  // seed pieces + one piece with a version stay on P for §6's cascade proof
+  const cpKeep = await POST(`/api/shows/${S}/content`, {
+    name: TAG + ' cascade rider', kind: 'video', spec_w: 512, spec_h: 256, source: 'e360'
+  }, { token: PMT });
+  const keepFile = await POST('/api/files',
+    { show_id: S, name: TAG + ' cascade-rider-v1', ext: 'mp4', kind: 'proof' }, { token: PMT });
+  await POST(`/api/content/${cpKeep.body.id}/versions`, { file_id: keepFile.body.id }, { token: PMT });
+
   section('16. Flex — the create-element route (stubbed; NO live Flex)');
 
   const flexLib = require('../lib/flex');
@@ -4743,6 +4993,7 @@ const DEL = (p, o) => call('DELETE', p, o);
      && before.activity > 0
      && before.tech_reports > 0 && before.notification_outbox > 0
      && before.show_contacts > 0
+     && before.content_pieces > 0 && before.content_versions > 0
      && before.gear_snapshots > 0,
      before);
   // add the remaining child types so the cascade is exercised in full
@@ -4914,6 +5165,11 @@ async function childCounts(projectId) {
     // the rolodex LINK is a show child; the contact row itself deliberately is
     // not counted here — it survives the cascade, and its own assertion says so
     show_contacts:    await q(`SELECT COUNT(*) n FROM show_contacts WHERE show_id ${inShows}`),
+    // content pass — the rule this list exists to enforce: a table that is
+    // not counted here leaks rows on every folder delete.
+    content_pieces:   await q(`SELECT COUNT(*) n FROM content_pieces WHERE show_id ${inShows}`),
+    content_versions: await q(`SELECT COUNT(*) n FROM content_versions WHERE piece_id IN
+                               (SELECT id FROM content_pieces WHERE show_id ${inShows})`),
     activity:         await q(`SELECT COUNT(*) n FROM activity WHERE project_id=$1 OR show_id ${inShows}`)
   };
 }

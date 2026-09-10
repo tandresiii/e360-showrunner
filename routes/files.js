@@ -408,11 +408,17 @@ router.put('/files/:id/content',
     const w = intOrNull(pick(req.query, 'w')) || intOrNull(pick(req.query, 'width'));
     const h = intOrNull(pick(req.query, 'h')) || intOrNull(pick(req.query, 'height'));
     const measured = w && h ? `${w} x ${h}` : null;
+    // Content pass: a video's duration, measured browser-side (loadedmetadata)
+    // exactly like the pixels. Same rule as dim — recorded when measured,
+    // never invented, and display-only against a piece's free-text spec.
+    const durRaw = Number(pick(req.query, 'dur'));
+    const dur = Number.isFinite(durRaw) && durRaw > 0 ? Math.round(durRaw * 100) / 100 : null;
     await pool.query(
       `UPDATE files SET size=$1, dim=$2,
-         width = COALESCE($3, width), height = COALESCE($4, height)
-       WHERE id=$5`,
-      [result.size, measured, w, h, cur.id]);
+         width = COALESCE($3, width), height = COALESCE($4, height),
+         duration_s = COALESCE($5, duration_s)
+       WHERE id=$6`,
+      [result.size, measured, w, h, dur, cur.id]);
 
     await logActivity(pool, {
       projectId: project ? project.id : null, showId: cur.show_id, actor: req.actor,
@@ -535,6 +541,10 @@ router.delete('/files/:id', asyncH(async (req, res) => {
     await c.query(`DELETE FROM note_mentions WHERE note_id NOT IN (SELECT id FROM notes)`);
     await c.query('UPDATE expenses SET file_id=NULL WHERE file_id=$1', [cur.id]);
     await c.query('UPDATE bookings SET file_id=NULL WHERE file_id=$1', [cur.id]);
+    // A content version whose file goes away keeps its ROW — "v2 was sent on
+    // the 12th" is history the piece must not lose — but the reference is
+    // unpicked, never left dangling at a dead id. Same rule as bookings.
+    await c.query('UPDATE content_versions SET file_id=NULL WHERE file_id=$1', [cur.id]);
     await c.query('UPDATE purchase_orders SET quote_file_id=NULL WHERE quote_file_id=$1', [cur.id]);
     await c.query('UPDATE purchase_orders SET invoice_file_id=NULL WHERE invoice_file_id=$1', [cur.id]);
     // HARDENING 7. A spec RENDER is a projection OF this file — its svg/html/png

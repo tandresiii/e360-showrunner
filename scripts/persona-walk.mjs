@@ -2187,6 +2187,200 @@ async function main() {
      SLB.crew.length === 1 && SLB.crew[0].name === 'Total Stranger',
      SLB.crew.map((g) => g.name));
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('41 · content pieces — the graphic-design pipeline  (Tom, 2026-09-10)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "A graphic design deliverables feature." Every show owes content pieces —
+  // "Sponsor loop — ribbon — 11520×90 — :30" — and nothing tracked them.
+  // Three shapes, walked end to end: MIXED PRODUCERS (e360 pieces assigned
+  // like tasks; client/third-party pieces OWED TO US and chased off the
+  // rolodex), FULL PROOF ROUNDS (v1 sent → feedback → v2 → approved, every
+  // version a real uploaded file, superseded and never deleted), and SPEC
+  // INTEGRATION (zones seed stack-aware pixel sizes; measured files raise a
+  // QUESTION on a mismatch — ask, don't accuse).
+
+  // ── every affordance reachable: data-act → ACTIONS → seam ────────────────
+  reach('Add / edit / delete a content piece', {
+    seam: ['listContent', 'createPiece', 'updatePiece', 'deletePiece'],
+    action: ['cpAdd', 'cpEdit', 'cpCommit', 'cpDelete'] });
+  reach('Walk a piece\'s status (advance + n/a strike)', {
+    seam: 'pieceStatus', action: ['cpAdvance', 'cpNa'] });
+  reach('Upload a version · the ladder · send · feedback', {
+    seam: ['addContentVersion', 'sendContentVersion', 'contentFeedback'],
+    action: ['cpUpload', 'cpOpen', 'cpSend', 'cpFeedback', 'cpFeedbackCommit'] });
+  reach('Seed pieces from the bound spec (the picker)', {
+    seam: ['contentSeed', 'contentSeedApply'], action: ['cpSeed', 'cpSeedCommit'] });
+  reach('Filter the tab by source', { action: 'cpFilter' });
+
+  // ── the mechanical half: measurement is REAL or absent ───────────────────
+  // measureVideo() is the browser's own answer — a <video> element's
+  // loadedmetadata gives videoWidth/videoHeight/duration off the actual
+  // bytes. The §12b size-stamp scan above already covers every api.addFile
+  // call site, so the upload path CANNOT invent a size; these pin the video
+  // half specifically.
+  ok('measureVideo() exists and reads loadedmetadata — videoWidth, videoHeight, duration',
+     /function measureVideo\([\s\S]{0,900}onloadedmetadata[\s\S]{0,400}videoWidth/.test(APP_JS) &&
+     /vid\.duration/.test(APP_JS));
+  ok('…and it revokes its object URL either way — no leaked blob pinning the file',
+     /function measureVideo\([\s\S]{0,2000}revokeObjectURL/.test(APP_JS));
+  ok('uploadRealFile() measures through measureMedia — image OR video, or nothing',
+     /function uploadRealFile\([\s\S]{0,400}measureMedia\(file\)/.test(APP_JS));
+  ok('the byte seam sends a duration ONLY when one was measured (dims.dur), never a default',
+     /dims && dims\.dur > 0/.test(API_JS));
+  ok('the version-upload action routes through uploadRealFile — the one honest byte path',
+     /function cpUploadAct\([\s\S]{0,900}uploadRealFile\(/.test(APP_JS));
+
+  // ── the QUESTION chip's face: ask, never accuse — and esc()ed ────────────
+  const cvChip = SRC['views-folder.js'].match(/function cpVerdictChip\([\s\S]*?\n\}/);
+  ok('the verdict chip renders the question with BOTH dims and a "?", escaped',
+     !!cvChip && /measured_w/.test(cvChip[0]) && /spec_w/.test(cvChip[0]) &&
+     /esc\(v\.question\.ask/.test(cvChip[0]) && /\?/.test(cvChip[0]), !!cvChip);
+  ok('…and the ✓ face only ever claims REALLY measured pixels',
+     !!cvChip && /really measured, never assumed/.test(cvChip[0]));
+  ok('the chase panel is one glance — "Waiting on others", contact name + mailto off the rolodex',
+     /Waiting on others/.test(SRC['views-folder.js']) &&
+     /mailto:' \+ esc\(c\.email\)/.test(SRC['views-folder.js']));
+  ok('the seed picker is checkboxes a human unchecks (the needs raise-PO shape)',
+     /class="cpPick"/.test(APP_JS) && /Uncheck what already exists/.test(APP_JS));
+  ok('superseded rounds say so on their face — kept, never deleted',
+     /superseded — kept, never deleted/.test(SRC['views-folder.js']));
+
+  // ── e360 piece: create → assign+due → rounds → approve → deliver ─────────
+  ok('GATE: a tech may not create a piece',
+     (await POST(`/api/shows/${SHOW}/content`, { name: 'sneak' }, { token: T.omar })).status === 403);
+  ok('GATE: a pm who owns nothing may not either',
+     (await POST(`/api/shows/${SHOW}/content`, { name: 'sneak' }, { token: T.pat })).status === 403);
+  const wcp = await POST(`/api/shows/${SHOW}/content`, {
+    name: 'Sponsor loop — ribbon', surface: 'Courtside ribbon', kind: 'video',
+    spec_w: 3840, spec_h: 96, duration_spec: ':30', source: 'e360',
+    owner: 'omar', due_date: plus(30)
+  }, { token: T.brenden });
+  ok('Brenden creates the e360 piece, assigned to Omar with a due date',
+     wcp.status === 200 && wcp.body.owner === 'omar' && wcp.body.due_date === plus(30), wcp.body);
+  const WCP = wcp.body.id;
+
+  // v1: register the file the way the modal does, then stand in for the byte
+  // route's measurement — this walk runs in production shape with NO storage
+  // (§12 celebrates that), and the byte half is harness-upload.mjs's job.
+  // The columns written here are exactly the ones PUT ?w=&h= writes.
+  const wf1 = await POST('/api/files',
+    { show_id: SHOW, name: 'sponsor-loop-v1', ext: 'mp4', kind: 'proof' }, { token: T.brenden });
+  await pool.query(`UPDATE files SET width=3840, height=192 WHERE id=$1`, [wf1.body.id]);
+  const wv1 = await POST(`/api/content/${WCP}/versions`, { file_id: wf1.body.id }, { token: T.omar });
+  ok('Omar — the piece\'s OWNER, a tech — files v1 himself', wv1.status === 200
+     && wv1.body.version_n === 1, wv1.body);
+  const wq = await GET(`/api/shows/${SHOW}/content`, { token: T.omar });
+  const wqp = (wq.body.pieces || []).find((p) => p.id === WCP);
+  ok('THE WRONG-SIZE FIXTURE RAISES A QUESTION — naming 3840×96 asked and 3840×192 measured',
+     !!wqp && wqp.measure_state === 'question'
+     && /3840 × 96px/.test((wqp.question || {}).ask || '')
+     && /3840 × 192px/.test((wqp.question || {}).ask || ''), wqp && wqp.question);
+  ok('…and double-height asks the STACKING question — stacked zones change pixel maps',
+     !!wqp && /double-stacked/.test((wqp.question || {}).ask || ''), wqp && (wqp.question || {}).ask);
+  ok('…as a question, never a reject: the version stands, nothing was refused',
+     !!wqp && wqp.versions.length === 1 && wqp.match === false);
+
+  const wsend = await PUT(`/api/content/versions/${wv1.body.id}/send`, {}, { token: T.omar });
+  ok('v1 goes to the client — a stamp with a name on it', wsend.status === 200 && !!wsend.body.sent_at);
+  await PUT(`/api/content/versions/${wv1.body.id}/feedback`,
+    { feedback: 'Wrong canvas — this zone is NOT stacked. Rebuild at 3840×96.' }, { token: T.brenden });
+  const wf2 = await POST('/api/files',
+    { show_id: SHOW, name: 'sponsor-loop-v2', ext: 'mp4', kind: 'proof' }, { token: T.brenden });
+  await pool.query(`UPDATE files SET width=3840, height=96, duration_s=30 WHERE id=$1`, [wf2.body.id]);
+  const wv2 = await POST(`/api/content/${WCP}/versions`, { file_id: wf2.body.id }, { token: T.omar });
+  ok('v2 supersedes v1 — and v1 is KEPT, its feedback intact',
+     wv2.status === 200 && (await pool.query(
+       `SELECT status, feedback FROM content_versions WHERE piece_id=$1 ORDER BY version_n`, [WCP]))
+       .rows.map((r) => r.status).join(',') === 'superseded,current');
+  const wm = await GET(`/api/shows/${SHOW}/content`, { token: T.omar });
+  const wmp = (wm.body.pieces || []).find((p) => p.id === WCP);
+  ok('the right-size rebuild earns the ✓ — measured 3840×96 matches, question gone',
+     !!wmp && wmp.match === true && wmp.question === null, wmp && wmp.measure_state);
+  ok('GATE: Pat may not walk the status',
+     (await PUT(`/api/content/${WCP}/status`, { status: 'approved' }, { token: T.pat })).status === 403);
+  await PUT(`/api/content/${WCP}/status`, { status: 'approved' }, { token: T.brenden });
+  const wdone = await PUT(`/api/content/${WCP}/status`, { status: 'delivered' }, { token: T.omar });
+  ok('approve → deliver, the owner walking the last mile',
+     wdone.status === 200 && wdone.body.status === 'delivered');
+
+  // ── the client piece: owed to us, chased off the rolodex ─────────────────
+  const wOwes = await POST('/api/contacts',
+    { name: 'Walk Dana Fox', org: 'Fox & Co', kind: 'client', email: 'dana@foxandco.tv' },
+    { token: T.brenden });
+  const wClientPiece = await POST(`/api/shows/${SHOW}/content`, {
+    name: 'Team intro sting — center hung', kind: 'video', spec_w: 1920, spec_h: 1080,
+    source: 'client', contact_id: wOwes.body.id, due_date: plus(5)
+  }, { token: T.brenden });
+  ok('the client piece carries WHO OWES IT — the rolodex card, email and all',
+     wClientPiece.status === 200 && wClientPiece.body.contact && wClientPiece.body.contact.email === 'dana@foxandco.tv', wClientPiece.body);
+  ok('…and it is exactly what the chase panel lists: client-sourced, not yet in hand',
+     wClientPiece.body.source === 'client' && ['approved', 'delivered', 'na'].indexOf(wClientPiece.body.status) < 0);
+  // the file arrives; mark it received
+  const wclF = await POST('/api/files',
+    { show_id: SHOW, name: 'team-intro-sting', ext: 'mp4', kind: 'proof' }, { token: T.brenden });
+  await POST(`/api/content/${wClientPiece.body.id}/versions`, { file_id: wclF.body.id }, { token: T.brenden });
+  const wclDone = await PUT(`/api/content/${wClientPiece.body.id}/status`, { status: 'delivered' },
+    { token: T.brenden });
+  ok('their file lands as v1 and the piece is marked received — off the chase list',
+     wclDone.status === 200 && wclDone.body.status === 'delivered');
+
+  // ── the contact-delete refusal names the piece ───────────────────────────
+  const wOwes2 = await POST(`/api/shows/${SHOW}/content`, {
+    name: 'Season thank-you card', kind: 'still', source: 'client', contact_id: wOwes.body.id
+  }, { token: T.brenden });
+  const wctDel = await DEL('/api/contacts/' + wOwes.body.id, { token: T.tom });
+  ok('deleting a contact who OWES a piece is refused, NAMING the piece and offering archive',
+     wctDel.status === 400 && /Season thank-you card/.test(wctDel.body.error)
+     && /archive/i.test(wctDel.body.error), wctDel.body);
+
+  // ── the spec-seed picker, against a REAL bound spec ──────────────────────
+  const walkZoned = {
+    version: 1, layoutMode: 'complex', complexUnit: 'ft', compassBearing: 0,
+    sideStates: { south: true, north: true, east: false, west: false },
+    fields: { clientName: 'AVCA', venueName: 'Fiserv Forum', cabinetType: 'p391',
+              fieldLength: '110', fieldWidth: '59', totalCabinets: '34', codecDuration: '30' },
+    complexSections: [
+      { name: 'South run', side: 'south', count: '30', offset: '0', fieldDist: '10', direction: 'ltr' },
+      { name: 'North stack', side: 'north', count: '4', offset: '0', fieldDist: '10', direction: 'ltr' }
+    ],
+    zones: [
+      { name: 'Ribbon A', color: '#59A9F0', first: 1, last: 30, doubleStacked: false },
+      { name: 'North stack', color: '#F0616B', first: 31, last: 34, doubleStacked: true }
+    ],
+    clientLogoDataUrl: null
+  };
+  // the bind rides §34's child-server device: THIS server runs with no
+  // storage on purpose, and spec-bind writes real bytes inside its
+  // transaction — a 501 here is the honest answer, so the bind happens where
+  // storage exists and everything downstream reads back on the main server.
+  const [wbind] = bindViaStorageServer([
+    { specType: 'e360', json: walkZoned, suggestedName: 'walk zoned spec' }
+  ]);
+  ok('a zoned .e360 binds (child server with storage — superseding §34\'s; history keeps every rev)',
+     wbind && wbind.status === 200, wbind && wbind.body);
+  const wZoneSeed = await GET(`/api/shows/${SHOW}/content-seed`, { token: T.omar });
+  const wzA = (wZoneSeed.body.zones || []).find((z) => z.name === 'Ribbon A');
+  const wzB = (wZoneSeed.body.zones || []).find((z) => z.name === 'North stack');
+  ok('the seed proposes one piece per zone with the tool\'s own pixel math — 30×128 = 3840×128',
+     wZoneSeed.body.available === true && !!wzA && wzA.spec_w === 3840 && wzA.spec_h === 128, wZoneSeed.body);
+  ok('…STACK-AWARE: the double-stacked zone is twice the HEIGHT — 512×256',
+     !!wzB && wzB.spec_w === 512 && wzB.spec_h === 256 && wzB.doubleStacked === true, wzB);
+  const wpick = await POST(`/api/shows/${SHOW}/content-seed`, { picks: [1] }, { token: T.brenden });
+  ok('a human PICKED one zone; only it became a piece, numbers server-derived',
+     wpick.status === 200 && wpick.body.created.length === 1
+     && wpick.body.created[0].name === 'North stack' && wpick.body.created[0].spec_h === 256
+     && wpick.body.created[0].duration_spec === ':30', wpick.body.created);
+
+  // ── delete: versions die, the FILES survive ──────────────────────────────
+  const wdel = await DEL(`/api/content/${WCP}`, { token: T.brenden });
+  ok('the pm deletes the delivered piece', wdel.status === 200);
+  ok('…its versions went with it',
+     (await pool.query(`SELECT COUNT(*)::int AS n FROM content_versions WHERE piece_id=$1`, [WCP]))
+       .rows[0].n === 0);
+  ok('…and the uploaded files SURVIVE — deleting a piece never eats a document',
+     (await GET(`/api/files/${wf1.body.id}`, { token: T.brenden })).status === 200 &&
+     (await GET(`/api/files/${wf2.body.id}`, { token: T.brenden })).status === 200);
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

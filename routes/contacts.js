@@ -217,6 +217,21 @@ router.delete('/contacts/:id', requireRole('admin'), asyncH(async (req, res) => 
       `(archiving keeps the record and always works).`,
       { shows: refs.rows.map((s) => ({ id: s.id, name: s.name })) });
   }
+  // Content pass: an OWED piece points at this card, and deleting the card
+  // would erase who owes it. Same refuse-while-referenced rule as the show
+  // links above, same escape hatch: archive is never refused.
+  const owed = await pool.query(
+    `SELECT cp.id, cp.name, s.name AS show_name, s.venue
+     FROM content_pieces cp JOIN shows s ON s.id = cp.show_id
+     WHERE cp.contact_id=$1 ORDER BY cp.id`, [cur.id]);
+  if (owed.rows.length) {
+    const names = owed.rows.map((p) => `${p.name} (${p.show_name || p.venue || 'a show'})`);
+    throw badRequest(
+      `${cur.name} owes ${owed.rows.length === 1 ? 'a content piece' : owed.rows.length + ' content pieces'} — ` +
+      `${names.join(', ')}. Reassign or delete them first, or archive the contact instead ` +
+      `(archiving keeps the record and always works).`,
+      { pieces: owed.rows.map((p) => ({ id: p.id, name: p.name })) });
+  }
 
   await withTx(async (c) => {
     // belt and braces: the refusal above means this deletes zero rows
