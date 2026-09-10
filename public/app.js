@@ -172,6 +172,12 @@ async function renderView(view, arg) {
     crumb([{ t: 'Settings', act: act('gotoTab', null, 'settings') }, { t: 'My notifications' }]);
     navOn('settings');
 
+  } else if (view === 'today') {
+    /* the morning digest's drill-down — computed live on every open, so the
+       panel is the truth and the daily bell row is only its summary. */
+    s.innerHTML = viewToday(await api.myDigest());
+    crumb([{ t: 'Today' }]);
+
   } else if (view === 'changes') {
     /* F4 — the cross-project changelog. `mine` is scoped to the shows I am ON
        (owner · folder owner · task owner · crew), which is the same membership
@@ -3577,6 +3583,24 @@ async function backupNowAct() {
   } else {
     toast('Backup FAILED', String((r && r.error) || 'no ledger row came back'), 'err');
   }
+  return render('settings');
+}
+
+/* Digest now — the manual half of the DIGEST_HOUR_UTC timer. The toast reads
+   back the server's own per-user arithmetic, so a second press honestly says
+   "everyone already had today's" instead of pretending it delivered again. */
+async function digestNowAct() {
+  var r;
+  try { r = await api.runDigest(); }
+  catch (e) { toast('Digest refused', String(e && e.message || e), 'err'); return; }
+  var bits = [];
+  if (r.notified) bits.push(r.notified + ' notified');
+  if (r.empty) bits.push(r.empty + ' all-clear (silent)');
+  if (r.opted_out) bits.push(r.opted_out + ' opted out');
+  if (r.already) bits.push(r.already + " already had today's");
+  toast('Morning digest', bits.length ? bits.join(' · ')
+    : 'nobody to consider — one row per person per day, and empty plates stay silent');
+  await updateBellBadge();
   return render('settings');
 }
 
@@ -7464,6 +7488,10 @@ var ACTIONS = {
   openOutbox:    function () { return render('outbox'); },
   runSweep:      function () { return runSweepAct(); },
   backupNow:     function () { return backupNowAct(); },
+  /* the morning digest — the Today panel and its admin trigger */
+  goToday:       function () { return render('today'); },
+  goSettings:    function () { return render('settings'); },
+  digestNow:     function () { return digestNowAct(); },
   /* people admin — the Team view's controls (admin-only, server-enforced) */
   userAdd:              function () { return openAddPerson(); },
   userAddCommit:        function () { return commitAddPerson(); },

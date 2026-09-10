@@ -5916,6 +5916,139 @@ const DEL = (p, o) => call('DELETE', p, o);
     else process.env.PG_DUMP_PATH = bkEnvSave.PG_DUMP_PATH;
   }
 
+  // ── 15f. THE MORNING DIGEST — one gathering, one row a day, silence ───────
+  section('15f. the morning digest — floors, dedupe-across-restart, silence');
+  // Tom's founding "falling through the cracks" ask, its daily surface
+  // (lib/digest.js). This section pins the four promises a digest can quietly
+  // break: the auth floors on both routes, the per-day dedupe (held in the
+  // digest_runs ledger, so it survives a restart), the canApprovePOs scoping
+  // on the approval item, and — the one that protects the feature from itself
+  // — SILENCE ON EMPTY. Two of these assertions are MUTATION GATES: loosen
+  // the ON CONFLICT ledger check and the dedupe assertion goes red with a
+  // duplicate row; drop the empty-plate guard and the silence assertion goes
+  // red naming the spam.
+  {
+    // floors, both halves of both routes
+    ok('GET /api/me/digest unauthenticated is 401',
+       (await GET('/api/me/digest')).status === 401);
+    ok('GET /api/me/digest refuses an agent key (route topology, §9)',
+       (await GET('/api/me/digest', { key: 'sk_bogus' })).status === 403);
+    ok('POST /api/admin/digest unauthenticated is 401',
+       (await POST('/api/admin/digest', {})).status === 401);
+    ok('POST /api/admin/digest is admin-only — a pm is refused',
+       (await POST('/api/admin/digest', {}, { token: PMT })).status === 403);
+    ok('...and so is a manager', (await POST('/api/admin/digest', {}, { token: MGRT })).status === 403);
+
+    // the pure seams
+    const dg = require('../lib/digest');
+    ok('digestSummary is pure and answers an empty plate with an empty string',
+       dg.digestSummary([]) === '' &&
+       dg.digestSummary([{ kind: 'task', age: 3 }]) === '1 overdue task');
+    ok('nextDigestRunAt anchors to the UTC hour and crosses midnight',
+       dg.nextDigestRunAt(new Date(Date.UTC(2026, 0, 1, 11)), 12).toISOString() === '2026-01-01T12:00:00.000Z' &&
+       dg.nextDigestRunAt(new Date(Date.UTC(2026, 0, 1, 13)), 12).toISOString() === '2026-01-02T12:00:00.000Z');
+
+    // a plate: one pm with an overdue task, one over-threshold quoted PO,
+    // one user with nothing at all
+    const digUser = TAG + 'dig', zeroUser = TAG + 'zero';
+    for (const [u, role] of [[digUser, 'pm'], [zeroUser, 'viewer']]) {
+      await POST('/api/users', { username: u, password: 'smokepass123', role, name: u }, { token: A });
+    }
+    const DIGT = (await POST('/api/auth/login', { username: digUser, password: 'smokepass123' })).body.token;
+    const dgProj = await POST('/api/projects',
+      { name: TAG + ' Digest Week', client: 'GLI', type: 'led', owner: digUser }, { token: A });
+    const dgP = dgProj.body.id, dgJ = dgProj.body.jobs[0].id;
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    await POST('/api/steps', { project_id: dgP, lane: 'gear', title: TAG + ' overdue thing',
+      owner: digUser, due_date: yesterday }, { token: A });
+    const dgPo = await POST('/api/pos', { project_id: dgP, job_id: dgJ, vendor: TAG + ' Rigging' },
+      { token: A });
+    await POST(`/api/pos/${dgPo.body.id}/lines`,
+      { item: 'towers', qty: 1, unit_cost: 7500, category: 'gear' }, { token: A });
+    await PUT(`/api/pos/${dgPo.body.id}/status`, { status: 'quoted' }, { token: A });
+
+    // the approval item appears ONLY for canApprovePOs holders — the same
+    // discriminating identities the PO gates themselves are tested with
+    const digOf = async (t) => (await GET('/api/me/digest', { token: t })).body;
+    const hasPo = (d) => (d.groups || []).some((g) => g.kind === 'po_approval' &&
+      g.items.some((i) => i.po_id === dgPo.body.id));
+    ok('the approval item reaches finance (Candice\'s shape)', hasPo(await digOf(FINT)));
+    // §17's lockout drills deactivated-and-reactivated this admin, which
+    // (correctly) destroyed his original session — sign in fresh.
+    const ADMNFT3 = (await POST('/api/auth/login',
+      { username: admNoFin, password: 'smokepass123' })).body.token;
+    ok('...and an admin WITHOUT the flag (Tony/Jim\'s shape)', hasPo(await digOf(ADMNFT3)));
+    const mgrDig = await digOf(MGRT);
+    ok('...and NEVER a manager without finance — canApprovePOs holders only',
+       !(mgrDig.groups || []).some((g) => g.kind === 'po_approval'),
+       (mgrDig.groups || []).map((g) => g.kind));
+    const mine = await digOf(DIGT);
+    ok('the pm\'s own digest carries the overdue task, grouped and labelled',
+       (mine.groups || []).some((g) => g.kind === 'task' &&
+         g.items.some((i) => i.label === TAG + ' overdue thing' && i.age === 1)), mine.groups);
+
+    // one sweep: delivered once, silent for the empty plate — through the
+    // SAME notify machinery as everything else (the flush marks the row)
+    const run1 = await POST('/api/admin/digest', {}, { token: A });
+    ok('the sweep delivers to the loaded plate and stays silent for the empty one',
+       run1.status === 200 && run1.body.users[digUser]?.outcome === 'notified' &&
+       run1.body.users[zeroUser]?.outcome === 'empty — silent',
+       { dig: run1.body.users[digUser], zero: run1.body.users[zeroUser] });
+    const digRows1 = await pool.query(
+      `SELECT * FROM notification_outbox WHERE username=$1 AND kind='daily_digest'`, [digUser]);
+    ok('exactly ONE daily_digest outbox row, subject = the compact summary',
+       digRows1.rows.length === 1 && /^Today — /.test(digRows1.rows[0].subject),
+       digRows1.rows.map((r) => r.subject));
+    ok('...and the HOUSE mail path handled it (no address on file -> honest skip, not a drop)',
+       digRows1.rows[0].status === 'skipped' && /no email/.test(digRows1.rows[0].skipped_reason || ''),
+       digRows1.rows[0]);
+    ok('SILENCE ON EMPTY (mutation gate): the empty plate got NO row — an empty digest that ' +
+       'notifies is "nothing to do!" spam and this assertion is what goes red',
+       parseInt((await pool.query(
+         `SELECT COUNT(*)::int AS n FROM notification_outbox WHERE username=$1 AND kind='daily_digest'`,
+         [zeroUser])).rows[0].n, 10) === 0);
+
+    // the dedupe, across a SIMULATED RESTART: a fresh module instance (the
+    // in-process state is gone, exactly as after a redeploy) re-arms and
+    // re-sweeps — the digest_runs ledger, not process memory, must refuse
+    // the duplicate.
+    delete require.cache[require.resolve('../lib/digest')];
+    const dgReborn = require('../lib/digest');
+    const rearmedFor = dgReborn.armDigestTimer();
+    ok('the reborn timer re-arms for a future UTC hour (unref\'d — a test boot never hangs)',
+       rearmedFor instanceof Date && rearmedFor.getTime() > Date.now(), rearmedFor);
+    const run2 = await dgReborn.runDigestSweep({ actor: 'system', flush: false });
+    const digRows2 = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM notification_outbox WHERE username=$1 AND kind='daily_digest'`,
+      [digUser]);
+    ok('PER-DAY DEDUPE (mutation gate): the same-day re-sweep from a fresh process writes ' +
+       'NOTHING — one row stands, because the LEDGER arbitrates, not module state',
+       run2.users[digUser]?.outcome === 'already sent today' &&
+       parseInt(digRows2.rows[0].n, 10) === 1,
+       { outcome: run2.users[digUser], rows: digRows2.rows[0].n });
+
+    // the admin extra: a stale backup posture surfaces as a digest item —
+    // ledger reads only, no probing. Shift the whole ledger 30h back, ask,
+    // then land a fresh ok row so the ledger ends the run healthy.
+    await pool.query(`UPDATE backup_runs SET finished_at = NOW() - interval '30 hours'`);
+    await pool.query(
+      `INSERT INTO backup_runs (started_at, finished_at, status, bytes, path, trigger)
+       VALUES (NOW() - interval '30 hours', NOW() - interval '30 hours', 'ok', 999, 'x', 'schedule')`);
+    const adminDig = await digOf(A);
+    ok('an admin\'s digest carries the stale-backup flag (cheap ledger read, config presence only)',
+       (adminDig.groups || []).some((g) => g.kind === 'backup_stale'),
+       (adminDig.groups || []).map((g) => g.kind));
+    await pool.query(
+      `INSERT INTO backup_runs (started_at, finished_at, status, bytes, path, trigger)
+       VALUES (NOW(), NOW(), 'ok', 999, 'x', 'manual')`);
+
+    // tidy: the per-day ledger and this section's folder. The ledger is
+    // deleted whole — it is a scratch database and a (user, day) row left
+    // behind would make TOMORROW'S run of this suite read "already sent".
+    await DEL(`/api/projects/${dgP}`, { token: A });
+    await pool.query(`DELETE FROM digest_runs`);
+  }
+
   // ── cleanup ───────────────────────────────────────────────────────────────
   section('cleanup');
   await DEL(`/api/projects/${P2}`, { token: A });

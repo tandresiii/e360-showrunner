@@ -4521,6 +4521,21 @@ var api = (function () {
       if (!API()) return ok(flushNotifications({ digest: !!o.digest, username: o.username || null }));
       return SR.post('/api/admin/notifications/flush', o);
     },
+    /* the morning digest — the Today panel's one read. Computed LIVE both
+       sides of the seam: the server gathers with the predicates each domain
+       already owns (lib/digest.js), the demo mirrors them over the local
+       store (digestFor, data.js). Never a cached copy of the morning row. */
+    myDigest: function () {
+      if (!API()) return ok(digestFor(ME));
+      return SR.get('/api/me/digest');
+    },
+    /* the manual trigger — admin runs the daily sweep NOW. Idempotent per
+       user per UTC day (the digest_runs ledger server-side; the session
+       DIGEST_SENT set in the demo twin), silent for every empty plate. */
+    runDigest: function () {
+      if (!API()) return ok(runDigestSweepDemo());
+      return SR.post('/api/admin/digest', {});
+    },
 
     /* ══════════════════════════════════════════════════════════════════════
        F6 · CLOSEOUT · ARCHIVING · THE SWEEP

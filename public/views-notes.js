@@ -171,6 +171,20 @@ function renderInbox(d) {
   var head = '<div class="bp-h"><b>Inbox</b>' +
     (unread ? '<span class="pill acc" style="padding:1px 8px;font-size:10px"><span class="dot"></span>' + unread + ' unread</span>' : '') +
     (unread ? '<button class="btn sm ghost" ' + act('bellMarkAll') + '>Mark all read</button>' : '') + '</div>';
+  /* THE MORNING DIGEST'S BELL DOOR. Computed live (never the outbox row), and
+     rendered ONLY when the plate has items: an empty digest is silence here
+     exactly as it is silence in the daily notification — the panel must not
+     become the "nothing to do!" ping the sweep refuses to send. */
+  var dig = d ? d.digest : digestFor(ME);
+  var todayStrip = (dig && dig.total)
+    ? '<div class="bp-sec">Today</div>' +
+      '<button class="ib-item unread" ' + act('goToday') + '>' +
+      '<div class="ib-tx"><div class="ib-l"><b>' + dig.total + ' item' + (dig.total === 1 ? '' : 's') +
+      ' need' + (dig.total === 1 ? 's' : '') + ' you</b></div>' +
+      '<div class="ib-body">' + esc(dig.summary) + '</div></div>' +
+      '<span class="ib-dot"></span></button>'
+    : '';
+  head += todayStrip;
   /* E8's front door: the bell caps at 8 and shows only MINE — the review page
      is the uncapped, everyone's-agents backlog. Linked from both branches so
      "where did that proposal go" always has an answer on screen. */
@@ -263,11 +277,16 @@ function viewProposals(rows) {
     '<div class="panel"><h3>Resolved · ' + resolved.length + '</h3><div class="next-list">' + resolvedRows + '</div>' + more + '</div>';
 }
 
-/* one fetch pair, shared by the panel and its refresh */
+/* one fetch pair, shared by the panel and its refresh. The digest ride-along
+   is best-effort: a morning the digest read fails is a bell that still shows
+   mentions and proposals, never a blank popover. */
 async function inboxData() {
   var r = await api.myInbox();
   var recaps = await api.recapsAwaitingReview();
-  return { items: r.items || [], proposals: r.proposals || [], recaps: recaps || [] };
+  var digest = null;
+  try { digest = await api.myDigest(); } catch (_) { digest = null; }
+  return { items: r.items || [], proposals: r.proposals || [], recaps: recaps || [],
+           digest: digest };
 }
 
 async function toggleBellPanel(anchor) {
@@ -288,7 +307,7 @@ async function toggleBellPanel(anchor) {
   pop.addEventListener('click', function (ev) {
     var t2 = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
     var a2 = t2 && t2.getAttribute('data-act');
-    if (a2 === 'openViewer' || a2 === 'goProposals') closeBellPanel();
+    if (a2 === 'openViewer' || a2 === 'goProposals' || a2 === 'goToday') closeBellPanel();
   });
   setTimeout(function () { document.addEventListener('mousedown', bellOutside); }, 0);
   return refreshBellPanel();

@@ -27,6 +27,7 @@ const { NOTIFY_KINDS, NOTIFY_MODES, NOTIFY_DEFAULT_MODE, NOTIFY_STATUSES } = req
 const notify = require('../lib/notify');
 const mail = require('../lib/mail');
 const lifecycle = require('../lib/lifecycle');
+const digest = require('../lib/digest');
 
 const router = express.Router();
 router.use(requireAuth);
@@ -41,7 +42,8 @@ router.get('/notification-kinds', asyncH(async (req, res) => {
       assignment: 'Work assigned to me',
       mention: '@mentions of me',
       notify: 'Someone chose to notify me',
-      report_nag: 'Show reports I still owe'
+      report_nag: 'Show reports I still owe',
+      daily_digest: 'My morning digest'
     },
     // A person deciding how much mail to get deserves to know whether any of it
     // can actually leave the building.
@@ -92,6 +94,26 @@ router.get('/me/notifications', asyncH(async (req, res) => {
   const rows = await notify.listFor(req.session.username,
     { limit: limitOf(req, 50, 200), status: status ? String(status) : null });
   res.json(rows.map(dbToNotification));
+}));
+
+// ── MY DIGEST — the Today panel's one read ──────────────────────────────────
+// The signed-in user's CURRENT plate, computed live on every ask — never the
+// morning's cached copy. This is the bell half of the morning digest: the
+// outbox row is the day's record and the mail vehicle; this is what a person
+// actually looks at. Yours alone, like the queue above — there is no route to
+// read anyone else's morning.
+router.get('/me/digest', asyncH(async (req, res) => {
+  res.json(await digest.buildDigestFor(req.session.username));
+}));
+
+// ── ADMIN: run the digest sweep NOW ─────────────────────────────────────────
+// The manual half of the DIGEST_HOUR_UTC timer (lib/digest.js) — for a demo,
+// a test, or "the dyno slept through this morning". Idempotent per user per
+// UTC day via the digest_runs ledger, so pressing it twice costs nothing and
+// duplicates nothing; the per-user counts in the answer say exactly which way
+// each person went (notified · empty — silent · opted out · already sent).
+router.post('/admin/digest', requireRole('admin'), asyncH(async (req, res) => {
+  res.json({ ok: true, ...(await digest.runDigestSweep({ actor: req.actor })) });
 }));
 
 // ── ADMIN: the whole outbox ─────────────────────────────────────────────────

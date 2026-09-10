@@ -848,9 +848,28 @@ function viewSettings(ctx) {
           '<span class="v"><span class="seg sm">' + seg + '</span></span></div>';
       }).join('');
       var q = mail.queued || 0;
+      /* the morning digest's opt-out lives HERE, with the other delivery
+         preferences — default ON, and a two-state control on purpose: the
+         digest IS the batch, so "in a digest" would be circular. Off means
+         the daily row is never written at all (silence, not a skipped row);
+         the Today panel keeps answering either way. */
+      var dcur = prefs.daily_digest || NOTIFY_DEFAULT_MODE.daily_digest || 'immediate';
+      var dseg = [['immediate', 'On'], ['off', 'Off']].map(function (pair) {
+        return '<button class="' + (dcur === pair[0] ? 'on' : '') + '" ' +
+          act('notifPref', null, 'daily_digest:' + pair[0]) +
+          ' title="' + esc(pair[0] === 'off'
+            ? 'No morning row — the Today panel still answers whenever you open it.'
+            : 'One bell row each morning there is anything on your plate. Empty mornings stay silent.') + '">' +
+          pair[1] + '</button>';
+      }).join('');
+      var digestRow = '<div class="set-row notif-row"><span class="k">' +
+        esc(NOTIFY_KIND_LABEL.daily_digest) + '</span>' +
+        '<span class="v"><span class="seg sm">' + dseg + '</span>' +
+        '<button class="btn sm ghost" ' + act('goToday') + ' style="margin-left:8px">' +
+        icon('checkC') + 'Open Today</button></span></div>';
       return '<p>Every notification reaches you in the <b>bell</b> — that never changes and cannot be ' +
         'switched off here. These control the <b>second channel</b>: whether the same event also lands ' +
-        'in your inbox, and how quickly.</p>' + rows2 +
+        'in your inbox, and how quickly.</p>' + rows2 + digestRow +
         row('Delivery', mail.configured
           ? '<span style="color:var(--go)">' + esc(mail.driver) + '</span>' +
             (mail.driver === 'log' ? ' <small style="color:var(--muted)">recorded, not mailed</small>' : '')
@@ -863,8 +882,9 @@ function viewSettings(ctx) {
         '<div class="perm-note" style="margin-top:10px">' + inlineIcon('bolt') +
         ' Defaults are assignments and @mentions right away, everything else digested. ' +
         '<b>Bell only</b> silences the email, never the app. A message you already read in-app is ' +
-        'skipped rather than mailed. There is no scheduler here yet, so digests flush when someone ' +
-        'asks — an honest gap, not a hidden cron.</div>';
+        'skipped rather than mailed. Batched (“in a digest”) rows still flush only when someone ' +
+        'asks — an honest gap. The <b>morning digest</b> is different: a real daily timer ' +
+        '(DIGEST_HOUR_UTC), one row per day, and empty mornings send nothing at all.</div>';
     })()) +
     /* ══ F6 · the operator's card — the sweep and the archive ══════════════ */
     (CURRENT_USER.role === 'admin' ? card('box', 'Archive &amp; the sweep', (function () {
@@ -882,6 +902,9 @@ function viewSettings(ctx) {
         row('Auto-archive after', ARCHIVE_AFTER_DAYS + ' days') +
         '<div class="set-row"><span class="k">Run it now</span><span class="v">' +
         '<button class="btn sm ghost" ' + act('runSweep') + '>' + icon('refresh') + 'Sweep</button>' +
+        '<button class="btn sm ghost" ' + act('digestNow') + ' style="margin-left:8px" ' +
+        'title="Run the morning-digest sweep now — one bell row per person with items, idempotent per day, silent on empty plates">' +
+        icon('bell') + 'Digest now</button>' +
         '</span></div>' +
         '<div class="perm-note" style="margin-top:10px">' + inlineIcon('alert') +
         ' <b>There is no scheduler.</b> The sweep runs once on boot and whenever an admin asks — it ' +
@@ -1009,6 +1032,66 @@ function viewOutbox(rows) {
     '<div class="hint">' + icon('lock') + '<span>Yours alone — nobody else can read your queue. ' +
     '<b>Skipped</b> is a deliberate outcome, not a failure: a message you had already read in the app ' +
     'is not mailed to you afterwards.</span></div>';
+}
+
+/* ============================================================================
+   TODAY — the morning digest's drill-down panel
+   ----------------------------------------------------------------------------
+   The founding ask ("keep things from falling through the cracks"), rendered:
+   the grouped list behind the one-line daily notification, computed LIVE by
+   the seam (api.myDigest) so it is never the morning's stale copy. Every row
+   is a working door to the thing itself — a show, a PO, a file, Settings —
+   because a digest you cannot click is a to-do list you retype. Deliberately
+   a modest panel, not a dashboard: groups in a fixed order, one row per item,
+   and an empty state that celebrates silence instead of apologising for it.
+   ========================================================================== */
+function digestItemAct(i) {
+  if (i.kind === 'po_approval' && i.po_id) return act('openPO', i.po_id);
+  if (i.kind === 'byteless' && i.file_id) return act('openViewer', i.file_id);
+  if (i.kind === 'backup_stale' || i.kind === 'health') return act('goSettings');
+  if (i.show_id) return act('openShow', i.show_id);
+  if (i.project_id) return act('openFolder', i.project_id);
+  return act('goToday');
+}
+var DIGEST_KIND_PILL = {
+  task: 'Task', po_approval: 'Approval', push_stale: 'Push behind', crewless: 'No crew',
+  report: 'Report', content: 'Content', chase: 'Chase', byteless: 'No bytes',
+  backup_stale: 'Backups', health: 'Health'
+};
+function viewToday(d) {
+  d = d || { groups: [], total: 0, summary: '' };
+  var groups = (d.groups || []).map(function (g) {
+    var rows = g.items.map(function (i) {
+      var meta = [];
+      if (i.where) meta.push(i.where);
+      if (i.source) meta.push(i.source === 'client' ? 'client supplies' : 'third party');
+      if (i.due) meta.push('due ' + fmtDate(i.due));
+      if (i.age != null && i.age > 0) meta.push(i.age + 'd late');
+      if (i.amount != null) meta.push(fmtMoney(i.amount));
+      var late = i.age != null && i.age > 0;
+      return '<div class="next-item" ' + digestItemAct(i) + ' style="cursor:pointer">' +
+        '<div class="txt">' + esc(i.label) +
+        (meta.length ? '<span>' + esc(meta.join(' · ')) + '</span>' : '') + '</div>' +
+        '<span class="pill ' + (late ? 'crit' : 'warn') + '"><span class="dot"></span>' +
+        esc(DIGEST_KIND_PILL[i.kind] || i.kind) + '</span></div>';
+    }).join('');
+    return '<div class="panel"><h3>' + esc(g.title) + ' · ' + g.items.length + '</h3>' +
+      '<div class="next-list">' + rows + '</div></div>';
+  }).join('');
+  var body = d.total
+    ? '<div class="card" style="margin-bottom:16px;padding:12px 16px"><b style="font-weight:600">' +
+      esc(d.summary) + '</b></div>' + groups
+    : '<div class="empty" style="padding:48px 20px">' + icon('checkC') +
+      '<b style="display:block;margin:10px 0 4px">All clear</b>' +
+      'Nothing needs you right now. Mornings like this one send no digest at all — ' +
+      'silence is the success state, never a “nothing to do!” ping.</div>';
+  return '<div class="page-h"><div><h1>Today</h1><div class="sub">Everything that needs you, ' +
+    'gathered from every corner of the app — tasks, approvals, stale pushes, crewless load-ins, ' +
+    'reports, content, files. Computed fresh each time you look; the daily bell row is its ' +
+    'once-a-morning summary.</div></div></div>' + body +
+    '<div class="hint">' + icon('bell') + '<span>One notification a day, only on days with ' +
+    'items, and never twice — opt out where notification settings live. Every row here opens ' +
+    'the thing itself.</span></div>';
 }
 
 /* ============================================================================

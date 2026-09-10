@@ -2876,6 +2876,189 @@ async function main() {
   delete process.env.DROPBOX_API_BASE;
   delete process.env.DROPBOX_CONTENT_BASE;
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('44 · the morning digest — the founding ask gets its daily surface');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom, day one: "we have a big problem with people who talk to the client
+  // not informing everyone of what needs to happen... it needs to keep things
+  // from falling through the cracks." Every piece existed — tasks, approvals,
+  // stale pushes, report obligations, chase lists, byteless files — and
+  // nothing gathered what needs a PERSON into one place at the start of their
+  // day. This section seeds one person with one of EVERY item kind and walks
+  // the gathering, the once-a-day bell row, the silence rules and the panel.
+  reach('Today panel', { seam: 'myDigest', action: 'goToday' });
+  reach('Digest now (the admin trigger)', { seam: 'runDigest', action: 'digestNow' });
+
+  // three more people: the loaded plate, the empty plate, the opted-out plate
+  for (const [u, role, finance, name] of [
+    ['dawn',  'pm',     true,  'Dawn Okafor'],    // pm + finance — one of each kind
+    ['quinn', 'viewer', false, 'Quinn Marsh'],    // empty plate — the silence proof
+    ['reed',  'tech',   false, 'Reed Calloway']   // opted out, WITH a plate
+  ]) {
+    const r = await POST('/api/users', { username: u, password: PW, role, finance, name }, { token: A });
+    ok(`digest cast · ${name} (${role}${finance ? ' + finance' : ''})`, r.status === 200, r.body);
+    T[u] = (await POST('/api/auth/login', { username: u, password: PW })).body.token;
+  }
+
+  // ── Dawn's plate, one item of every kind, through the product ────────────
+  const dgEv = await POST('/api/events', {
+    name: 'Great Lakes Invitational', type: 'led', client: 'GLI',
+    venue: 'Van Andel Arena', load_in_date: plus(3), event_date: plus(5),
+    strike_date: plus(6), cabinets: 60, owner: 'dawn'
+  }, { token: T.tom });
+  ok('Tom opens Dawn\'s event — load-in in 3 days, not one crew line yet', dgEv.status === 200, dgEv.body);
+  const DGSHOW = dgEv.body.show.id, DGPROJ = dgEv.body.show.project_id, DGJOB = dgEv.body.job.id;
+
+  // 1 · a task, overdue on her
+  const dgStep = await POST('/api/steps', {
+    show_id: DGSHOW, lane: 'venue', title: 'Confirm rigging plot with Van Andel',
+    owner: 'dawn', due_date: plus(-1)
+  }, { token: T.dawn });
+  ok('an overdue task lands on Dawn', dgStep.status === 200, dgStep.body);
+
+  // 2 · a PO over the threshold, quoted, unapproved — waits on canApprovePOs holders
+  const dgPo = await POST('/api/pos', { project_id: DGPROJ, job_id: DGJOB, vendor: 'Upstage Rigging' },
+    { token: T.dawn });
+  ok('Dawn opens a PO', dgPo.status === 200, dgPo.body);
+  await POST(`/api/pos/${dgPo.body.id}/lines`,
+    { item: 'Ground support towers', qty: 1, unit_cost: 6200, category: 'gear' }, { token: T.dawn });
+  const dgQuoted = await PUT(`/api/pos/${dgPo.body.id}/status`, { status: 'quoted' }, { token: T.dawn });
+  ok('…quoted at $6,200 — over the $5,000 threshold, nobody has approved it',
+     dgQuoted.status === 200, dgQuoted.body);
+
+  // 3 · a stale push. The pushed-at stamp is the infrastructure state a real
+  // push writes (§12b owns that wire, against the fake scheduler); the thing
+  // under test here is the CHANGE AFTER the push, and that goes through the
+  // product: Dawn edits the show, and the staffing copy is now behind.
+  await pool.query(
+    `UPDATE shows SET scheduler_event_id=90144,
+            scheduler_pushed_at = NOW() - interval '1 hour', scheduler_pushed_by='dawn'
+      WHERE id=$1`, [DGSHOW]);
+  const dgEdit = await PUT(`/api/shows/${DGSHOW}`, { venue: 'Van Andel Arena — Hall B', owner: 'dawn' },
+    { token: T.dawn });
+  ok('Dawn edits the pushed show — the scheduler copy is now behind',
+     dgEdit.status === 200 && dgEdit.body.scheduler_stale === true, dgEdit.body.scheduler_stale);
+
+  // 4 · a struck second show she crewed — the report obligation
+  const dgShow2 = await POST('/api/shows', {
+    project_id: DGPROJ, name: 'GLI — media day', venue: 'Van Andel Arena',
+    load_in_date: plus(10), event_date: plus(20), owner: 'dawn'
+  }, { token: T.dawn });
+  ok('a second show joins the folder', dgShow2.status === 200, dgShow2.body);
+  const DGSHOW2 = dgShow2.body.id;
+  await POST(`/api/shows/${DGSHOW2}/crew`, { username: 'dawn', role_on_site: 'LED lead' }, { token: T.dawn });
+  const dgStruck = await POST(`/api/shows/${DGSHOW2}/struck`, {}, { token: T.tom });
+  ok('Tom marks it struck — Dawn now owes her show report',
+     dgStruck.status === 200 && dgStruck.body.created === 1, dgStruck.body);
+
+  // 5 · a content piece due on her, and 6 · a client piece past due (the chase)
+  const dgCp = await POST(`/api/shows/${DGSHOW}/content`, {
+    name: 'Center-hung intro sting', source: 'e360', owner: 'dawn',
+    due_date: plus(1), status: 'in_design'
+  }, { token: T.dawn });
+  ok('a content piece is due on Dawn tomorrow', dgCp.status === 200, dgCp.body);
+  const dgChase = await POST(`/api/shows/${DGSHOW}/content`, {
+    name: 'Sponsor logo pack', source: 'client', due_date: plus(-2), status: 'needed'
+  }, { token: T.dawn });
+  ok('…and the client\'s logo pack is two days late — her folder, her chase',
+     dgChase.status === 200, dgChase.body);
+
+  // 7 · a byteless file she filed (Brendon's Rhino doc, §39's shape)
+  const dgFile = await POST('/api/files', {
+    show_id: DGSHOW, name: 'GLI rigging waiver', ext: 'pdf', kind: 'contract'
+  }, { token: T.dawn });
+  ok('a metadata-only file row — filed, no bytes ever landed', dgFile.status === 200, dgFile.body);
+
+  // Reed gets a plate too (an overdue task), then opts out where prefs live.
+  await POST('/api/steps', { show_id: DGSHOW, lane: 'gear', title: 'Prep spare PSU caddy',
+    owner: 'reed', due_date: plus(-1) }, { token: T.dawn });
+  const dgOptOut = await PUT('/api/me/notification-prefs', { daily_digest: 'off' }, { token: T.reed });
+  ok('Reed opts out of the morning digest — the toggle lives with the other prefs',
+     dgOptOut.status === 200 && dgOptOut.body.prefs.daily_digest === 'off', dgOptOut.body.prefs);
+
+  // ── GET /api/me/digest — exactly her items, grouped, in the fixed order ──
+  const dgMine = await GET('/api/me/digest', { token: T.dawn });
+  const dgKinds = (dgMine.body.groups || []).map((g) => g.kind);
+  ok('Dawn\'s digest carries one group of EVERY personal kind, in the fixed order',
+     dgMine.status === 200 &&
+     dgKinds.join(',') === 'task,po_approval,push_stale,crewless,report,content,chase,byteless',
+     dgKinds);
+  const dgGroup = (k) => (dgMine.body.groups.find((g) => g.kind === k) || { items: [] }).items;
+  ok('…the task group holds the rigging plot, a day late',
+     dgGroup('task').some((i) => i.label === 'Confirm rigging plot with Van Andel' && i.age === 1
+       && i.show_id === DGSHOW), dgGroup('task'));
+  ok('…the approval group holds HER po (canApprovePOs — she carries finance)',
+     dgGroup('po_approval').some((i) => i.po_id === dgPo.body.id && i.amount === 6200),
+     dgGroup('po_approval'));
+  ok('…the stale push names the show and anchors to it',
+     dgGroup('push_stale').some((i) => i.show_id === DGSHOW), dgGroup('push_stale'));
+  ok('…the crewless load-in is the 3-days-out show with nobody on it',
+     dgGroup('crewless').some((i) => i.show_id === DGSHOW && i.due === plus(3)), dgGroup('crewless'));
+  ok('…the report group is the struck media day', dgGroup('report').some((i) => i.show_id === DGSHOW2),
+     dgGroup('report'));
+  ok('…content due + the chase are both hers, separately grouped',
+     dgGroup('content').some((i) => i.label === 'Center-hung intro sting') &&
+     dgGroup('chase').some((i) => i.label === 'Sponsor logo pack' && i.age === 2),
+     { content: dgGroup('content'), chase: dgGroup('chase') });
+  ok('…the byteless row rides with its file id for the viewer anchor',
+     dgGroup('byteless').some((i) => i.file_id === dgFile.body.id), dgGroup('byteless'));
+  ok('…and the one-line summary reads like a morning, not a query plan',
+     /1 overdue task/.test(dgMine.body.summary) && /POs? wait/.test(dgMine.body.summary) &&
+     /push(es)? (is|are) stale/.test(dgMine.body.summary), dgMine.body.summary);
+
+  // the discriminators: Morgan (manager, NO finance) never sees the approval
+  // group; Tom (admin) additionally sees the operator's corner — this walk
+  // server has no storage configured, and his digest says so.
+  const dgMorgan = await GET('/api/me/digest', { token: T.morgan });
+  ok('Morgan\'s digest has NO approval group — canApprovePOs holders only',
+     dgMorgan.status === 200 && !dgMorgan.body.groups.some((g) => g.kind === 'po_approval'),
+     dgMorgan.body.groups.map((g) => g.kind));
+  const dgTom = await GET('/api/me/digest', { token: T.tom });
+  ok('Tom (admin) additionally carries the health warning — storage unconfigured, config-read only',
+     dgTom.status === 200 && dgTom.body.groups.some((g) => g.kind === 'health'),
+     dgTom.body.groups.map((g) => g.kind));
+
+  // ── the admin trigger: once delivers, twice is a no-op, silence holds ────
+  const dgRun1 = await POST('/api/admin/digest', {}, { token: A });
+  ok('the sweep runs — Dawn notified, Quinn silent (empty), Reed silent (opted out)',
+     dgRun1.status === 200 &&
+     dgRun1.body.users.dawn?.outcome === 'notified' &&
+     dgRun1.body.users.quinn?.outcome === 'empty — silent' &&
+     dgRun1.body.users.reed?.outcome === 'opted out',
+     { dawn: dgRun1.body.users.dawn, quinn: dgRun1.body.users.quinn, reed: dgRun1.body.users.reed });
+  const dawnRows1 = await outboxFor('dawn', 'daily_digest');
+  ok('ONE bell row for Dawn — subject is the compact summary',
+     dawnRows1.length === 1 && /^Today — /.test(dawnRows1[0].subject), dawnRows1.map((r) => r.subject));
+  const dgRun2 = await POST('/api/admin/digest', {}, { token: A });
+  ok('IDEMPOTENCY · a same-day re-trigger creates NOTHING — the ledger arbitrates',
+     dgRun2.status === 200 && dgRun2.body.users.dawn?.outcome === 'already sent today' &&
+     (await outboxFor('dawn', 'daily_digest')).length === 1, dgRun2.body.users.dawn);
+  ok('SILENCE · Quinn\'s empty plate produced no notification at all',
+     (await outboxFor('quinn', 'daily_digest')).length === 0);
+  const reedDigest = await GET('/api/me/digest', { token: T.reed });
+  ok('OPT-OUT · Reed HAS items yet got no row — the pref silenced the ping, not the panel',
+     reedDigest.body.total >= 1 && (await outboxFor('reed', 'daily_digest')).length === 0,
+     { items: reedDigest.body.total });
+
+  // ── the panel front: every kind renders with a working navigate anchor ───
+  const vg = SRC['views-global.js'];
+  const todayFn = (vg.match(/function digestItemAct[\s\S]*?function viewToday[\s\S]*?\n}/) || [''])[0];
+  ok('viewToday renders and digestItemAct doors every kind — PO, file viewer, show, folder, Settings',
+     /act\('openPO', i\.po_id\)/.test(todayFn) && /act\('openViewer', i\.file_id\)/.test(todayFn) &&
+     /act\('goSettings'\)/.test(todayFn) && /act\('openShow', i\.show_id\)/.test(todayFn) &&
+     /act\('openFolder', i\.project_id\)/.test(todayFn));
+  ok('…and the pill vocabulary names every digest kind the server can emit',
+     ['task', 'po_approval', 'push_stale', 'crewless', 'report', 'content', 'chase', 'byteless',
+      'backup_stale', 'health'].every((k) => new RegExp(`${k}: '`).test(vg)));
+  ok('the bell popover carries the Today door — live digest, rendered ONLY when items exist',
+     /bp-sec">Today</.test(SRC['views-notes.js']) &&
+     /dig && dig\.total/.test(SRC['views-notes.js']) &&
+     /act\('goToday'\)/.test(SRC['views-notes.js']));
+  ok('the Settings card renders the digest opt-out beside the other prefs',
+     SRC['views-global.js'].includes("'daily_digest:' + pair[0]"));
+  ok('an empty Today panel celebrates silence instead of paging anyone',
+     /silence is the success state/.test(vg));
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

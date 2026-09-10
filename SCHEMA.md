@@ -42,6 +42,7 @@ with **Jobs** (the commercial dimension) alongside the shows in the folder.
 | `lib/notify.js` | 284 | **F3** — the notification outbox: preferences, enqueue, the digest row, skip-if-read, flush |
 | `lib/mail.js` | 165 | **F3** — the two delivery drivers (`log` default · `graph` skeleton) |
 | `lib/reports.js` | 170 | **F2** — tech show reports: the obligation, the nag, the two gates |
+| `lib/digest.js` | 470 | **the morning digest** — one gathering of what needs a PERSON today: build, sweep, per-day ledger, timer |
 | `lib/lifecycle.js` | 284 | **F5/F6** — the confirm gate, the machine-checked closeout, archiving, the sweep |
 | `routes/auth.js` | 248 | login, roster, **api keys (human-only)** |
 | `routes/core.js` | 1361 | projects, shows, steps, templates, milestones, activity, push-to-scheduler |
@@ -94,7 +95,8 @@ with **Jobs** (the commercial dimension) alongside the shows in the folder.
 | recap stat keys | `cabinets` · `panels` · `crew` · `days` · `attendance` · `date` **· F4, widened deliberately: `scope` · `linear_feet` · `cabinet_count` · `cabinet_type` · `pitch` · `print_pieces` · `print_sqft`** — physical facts about what the client bought, none of which is derivable into a cost, a rate or a margin |
 | **F4** scope `kind` / `source` | `led` · `print` · `both` / `manual` · `spec` |
 | **F2** tech report `status` | `owed` -> `filed` -> `reviewed`. **Filing completes the obligation**; `reviewed` is optional pm bookkeeping and closeout counts *filed*, never *reviewed* |
-| **F3** notification `kind` | `assignment` · `mention` · `notify` · `report_nag` · `change` · `digest` |
+| **F3** notification `kind` | `assignment` · `mention` · `notify` · `report_nag` · `change` · `digest` · `daily_digest` |
+| morning-digest kind | `daily_digest` — the computed once-a-morning summary (`lib/digest.js`). Deliberately NOT the outbox's `digest` batching row: one is content, the other is a delivery mode's bookkeeping. Defaults to **immediate** (the morning digest IS the batch); `off` is the opt-out and means **no row at all**, not a skipped one |
 | **F5** subscription kind | `change` — "you are on this show, so a material change to it reaches you." Defaults to **digest**, deliberately: it is the highest-volume kind and the one most able to train people to ignore their mail (`lib/audience.js`). |
 | **F3** notification `mode` | `immediate` · `digest` · `off` — the per-(user, kind) preference. **`off` silences the EMAIL, never the bell** |
 | **F3** notification `status` | `queued` · `sent` · `skipped` · `failed`. `skipped` is a deliberate outcome with a reason (`read in-app` · `preference off` · `no email address on file`), not a failure |
@@ -533,12 +535,13 @@ key **by FK, not by regex**.
 > `queued` — the difference between "not yet" and "never".
 >
 > **The digest** is literally one open `kind='digest'` row per person, whose
-> subject counts what is waiting behind it. **HONEST TODO: nothing in this app
-> runs on a timer.** Immediate rows flush on the boot/admin sweep; digest rows
-> flush only when a caller asks explicitly (`POST /api/admin/notifications/flush`
-> with `{digest:true}`). A real daily digest needs Railway cron or the per-user
-> agents of `ARCHITECTURE.md`, and this app will not fake one with `setInterval`
-> and hope the dyno stays up.
+> subject counts what is waiting behind it. **HONEST TODO, narrowed:** batched
+> (`mode='digest'`) rows still flush only when a caller asks explicitly
+> (`POST /api/admin/notifications/flush` with `{digest:true}`) — that gap
+> stands. What DOES run on a timer now is the **morning digest**
+> (`lib/digest.js`, kind `daily_digest`): the same self-rearming `setTimeout`
+> chain the backup uses, firing at `DIGEST_HOUR_UTC`, one computed row per
+> person per UTC day, silent on empty plates — see "The morning digest" below.
 
 **`notification_prefs`** (F3) *(unique `(username, kind)`)* — `id · username · kind · mode · updated_at`
 
@@ -988,9 +991,13 @@ Contacts    GET  /api/contacts                (any signed-in · ?q= name/org ·
 Notify      GET  /api/notification-kinds
             GET/PUT /api/me/notification-prefs           (F3 · your own only)
             GET  /api/me/notifications                   (your own queue)
+            GET  /api/me/digest                          (the Today panel —
+            YOUR current plate, computed live; lib/digest.js)
             GET  /api/admin/notification-outbox          (admin)
             GET  /api/admin/mail-status                  (admin)
             POST /api/admin/notifications/flush          (admin; {digest:true})
+            POST /api/admin/digest                       (admin · run the
+            morning-digest sweep now; idempotent per user per UTC day)
             POST /api/admin/sweep                        (admin · F2+F6, and the
             honest answer to "no cron": boot + on demand, idempotent)
 
@@ -1536,12 +1543,17 @@ surfaces the one real operator edit (field width 225 vs 222).
 > Dev and CI are unaffected — `scripts/smoke.js`, `scripts/storage-test.js` and
 > the scratchpad harnesses all set it explicitly.
 | `SHOWRUNNER_NAS_ROOT` | `\\E360-NAS\Showrunner` | the logical root every `nas_path` is expressed against. A **label**, not a route — operators read it out of the UI and paste it into Explorer; nothing dials it |
-<<<<<<< HEAD
 | `BACKUP_ENABLED` | *(unset = on)* | `0` disables the **scheduled** nightly dump; the manual `POST /api/admin/backup` still works |
 | `BACKUP_HOUR_UTC` | `8` | when the nightly fires. 08:00 UTC ≈ 3am Central; being a UTC anchor it drifts an hour across DST, deliberately |
 | `BACKUP_KEEP` | `14` | retention: the newest N daily dumps kept on the NAS |
 | `BACKUP_KEEP_MONTHLY` | `6` | retention: additionally the FIRST dump of each of the last M calendar months |
 | `PG_DUMP_PATH` | *(unset = `pg_dump` on PATH)* | test seam + escape hatch; the production image installs `postgresql-client-18` from pgdg (Dockerfile) |
+| `DIGEST_ENABLED` | *(unset = on)* | `0` disables the **scheduled** morning digest; `POST /api/admin/digest` (admin) still works |
+| `DIGEST_HOUR_UTC` | `12` | when the morning digest fires. 12:00 UTC ≈ 7am Central; a UTC anchor, so the wall-clock hour drifts across DST like `BACKUP_HOUR_UTC` — and the per-day ledger means the shift can never double-deliver |
+| `DROPBOX_APP_KEY` / `DROPBOX_APP_SECRET` | *(unset)* | the server-side Dropbox app credentials. All three unset ⇒ `features.dropbox` false and every Dropbox route is an honest 501 naming them |
+| `DROPBOX_REFRESH_TOKEN` | *(unset)* | the offline refresh token; exchanged at `/oauth2/token` for ~4 h access tokens, cached in-process (their TTL − 5 min) with one retry on 401. **Scopes are the team admin's grant and are handled DYNAMICALLY** — a capability the token lacks answers a named 501 built from Dropbox's own `missing_scope` error, and starts working on re-authorize with no deploy |
+| `DROPBOX_TIMEOUT_MS` / `DROPBOX_CONTENT_TIMEOUT_MS` | `20000` / `120000` | per-request budgets, RPC vs byte-moving |
+| `DROPBOX_API_BASE` / `DROPBOX_CONTENT_BASE` | *(the real hosts)* | **tests only** — point `lib/dropbox.js` at `scripts/fake-dropbox.js`. Production never sets them |
 
 ### Backups — the nightly pg_dump (`lib/backup.js`, `RESTORE.md`)
 
@@ -1567,12 +1579,40 @@ database being backed up on purpose: it is operational telemetry, it rides
 inside every dump, and the NAS listing is the recovery-time source of truth.
 Hangs off no project/show — deliberately **not** in the delete cascades.
 Trimmed to the newest 500 rows.
-=======
-| `DROPBOX_APP_KEY` / `DROPBOX_APP_SECRET` | *(unset)* | the server-side Dropbox app credentials. All three unset ⇒ `features.dropbox` false and every Dropbox route is an honest 501 naming them |
-| `DROPBOX_REFRESH_TOKEN` | *(unset)* | the offline refresh token; exchanged at `/oauth2/token` for ~4 h access tokens, cached in-process (their TTL − 5 min) with one retry on 401. **Scopes are the team admin's grant and are handled DYNAMICALLY** — a capability the token lacks answers a named 501 built from Dropbox's own `missing_scope` error, and starts working on re-authorize with no deploy |
-| `DROPBOX_TIMEOUT_MS` / `DROPBOX_CONTENT_TIMEOUT_MS` | `20000` / `120000` | per-request budgets, RPC vs byte-moving |
-| `DROPBOX_API_BASE` / `DROPBOX_CONTENT_BASE` | *(the real hosts)* | **tests only** — point `lib/dropbox.js` at `scripts/fake-dropbox.js`. Production never sets them |
->>>>>>> 10a2b29 (Dropbox folders on a show: track in place, file requests, the media probe)
+
+*(A committed merge left conflict markers in this file between the backup and
+Dropbox passes — resolved here by keeping BOTH: the env rows above are one
+table again, and this prose section survives intact.)*
+
+### The morning digest (`lib/digest.js`)
+
+Tom's founding requirement, the day this app was born: *"it needs to keep
+things from falling through the cracks."* Every morning at `DIGEST_HOUR_UTC`
+(and on `POST /api/admin/digest`) the app gathers, per person, **what needs
+them** — overdue/due-soon tasks, quoted POs waiting on a `canApprovePO`
+holder, stale scheduler pushes on shows they own, load-ins inside 7 days with
+no crew, tech reports they owe, content pieces due on them plus the past-due
+client chase list for folders they own, byteless files they filed, and (for
+admins) the stale-backup flag and config-presence health warnings. Every
+question is answered by the predicate that already owns it — `/my-steps`'
+filter, `poNeedsApproval`, `hydrateShow`'s stale SQL, `reports.owedFor`, the
+chase filter, `fileIsByteless`'s size rule — never a second derivation.
+
+Delivery is **one `notification_outbox` row of kind `daily_digest` per user
+per UTC day**, through the house `notify.enqueue` (so the mail half rides the
+existing drivers untouched); the bell half is the live **Today panel**
+(`GET /api/me/digest`), computed fresh on every open. Three hard rules, all
+mutation-gated in the suites: **silence on empty** (an empty plate sends
+nothing, ever), **one per day** (the `digest_runs` ledger arbitrates, in the
+same transaction as the row it covers, so it holds across restarts and racing
+triggers), and **opt-out means nothing at all** (the `daily_digest` pref
+`off`, set where notification prefs live, writes no row — not a skipped one).
+
+**`digest_runs`** — `id · username · day · items · summary · created_at`,
+unique `(username, day)`. One row per DELIVERED digest; an empty day writes
+none, so work landing at 14:00 can still digest that afternoon. Hangs off no
+project/show — like `backup_runs`, deliberately **not** in the delete
+cascades. Trimmed to the last 120 days.
 
 ### Storage — the NAS byte layer (`lib/storage.js`)
 

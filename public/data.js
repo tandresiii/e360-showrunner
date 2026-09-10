@@ -4426,13 +4426,19 @@ function reportlessCrew(showId) {
    answers a 501-shaped "mail not configured" and THE ITEM STAYS QUEUED, so the
    day the mailbox exists the backlog delivers instead of having been discarded.
    ========================================================================== */
-var NOTIFY_KINDS = ['assignment', 'mention', 'notify', 'report_nag', 'digest'];
+/* 'daily_digest' is the MORNING digest (lib/digest.js) — a computed summary of
+   what needs a person today. Distinct from 'digest', the outbox's batching
+   row. Defaults to immediate (the morning digest IS the batch); 'off' is the
+   opt-out, honoured by the sweep with silence, not a skipped row. */
+var NOTIFY_KINDS = ['assignment', 'mention', 'notify', 'report_nag', 'digest', 'daily_digest'];
 var NOTIFY_MODES = ['immediate', 'digest', 'off'];
 var NOTIFY_DEFAULT_MODE = { assignment: 'immediate', mention: 'immediate',
-                            notify: 'digest', report_nag: 'digest', digest: 'digest' };
+                            notify: 'digest', report_nag: 'digest', digest: 'digest',
+                            daily_digest: 'immediate' };
 var NOTIFY_KIND_LABEL = {
   assignment: 'Work assigned to me', mention: '@mentions of me',
-  notify: 'Someone chose to notify me', report_nag: 'Show reports I still owe'
+  notify: 'Someone chose to notify me', report_nag: 'Show reports I still owe',
+  daily_digest: 'My morning digest'
 };
 var NOTIFY_MODE_LABEL = { immediate: 'Right away', digest: 'In a digest', off: 'Bell only' };
 var NOTIFY_STATUS_META = {
@@ -4597,6 +4603,199 @@ function flushNotifications(opts) {
     off: -4, time: '16:30', show_id: 2, project_id: 2, actor: 'jhawk',
     body: 'jhawk set the scope to Print · 18 pcs · 2,140 sq ft — @lfarkos',
     link: '/#show/2' });
+})();
+
+/* ============================================================================
+   THE MORNING DIGEST — the demo twin of lib/digest.js
+   ----------------------------------------------------------------------------
+   Tom's founding ask ("it needs to keep things from falling through the
+   cracks"), gathered: one pass over the local store with the SAME predicates
+   the screens already use — myOpenSteps' open filter, poNeedsApproval +
+   canApprovePOs, the scheduler_stale flag, reportsOwedBy, contentWaitingOn's
+   open set, the byteless size rule. Silence is the success state: an empty
+   plate produces no groups, no summary, and (in the sweep twin) no
+   notification row — ever.
+   ========================================================================== */
+var DIGEST_GROUPS = [
+  { kind: 'task',        title: 'Tasks overdue or due soon' },
+  { kind: 'po_approval', title: 'Purchase orders waiting on your approval' },
+  { kind: 'push_stale',  title: 'Scheduler pushes running behind' },
+  { kind: 'crewless',    title: 'Load-ins inside 7 days with no crew' },
+  { kind: 'report',      title: 'Show reports you owe' },
+  { kind: 'content',     title: 'Content pieces due on you' },
+  { kind: 'chase',       title: 'Content owed to us, past due' },
+  { kind: 'byteless',    title: 'Files you filed with no document behind them' },
+  { kind: 'backup_stale', title: 'Backups' },
+  { kind: 'health',      title: 'System health' }
+];
+function digestGroupItems(items) {
+  return DIGEST_GROUPS.map(function (g) {
+    return { kind: g.kind, title: g.title,
+             items: items.filter(function (i) { return i.kind === g.kind; }) };
+  }).filter(function (g) { return g.items.length; });
+}
+/* "3 overdue tasks · a PO waits on you · Big Ten push is stale" — the server's
+   digestSummary (lib/digest.js), phrase for phrase. */
+function digestSummary(items) {
+  var by = {};
+  items.forEach(function (i) { (by[i.kind] = by[i.kind] || []).push(i); });
+  var s = function (n) { return n === 1 ? '' : 's'; };
+  var parts = [];
+  var tasks = by.task || [];
+  var late = tasks.filter(function (i) { return i.age != null && i.age > 0; }).length;
+  var dueSoon = tasks.length - late;
+  if (late) parts.push(late + ' overdue task' + s(late));
+  if (dueSoon) parts.push(dueSoon + ' task' + s(dueSoon) + ' due soon');
+  var po = by.po_approval || [];
+  if (po.length) parts.push(po.length === 1 ? 'a PO waits on you' : po.length + ' POs wait on you');
+  var st = by.push_stale || [];
+  if (st.length) parts.push(st.length === 1 ? st[0].label + ' push is stale' : st.length + ' pushes are stale');
+  var cw = by.crewless || [];
+  if (cw.length) parts.push(cw.length === 1
+    ? cw[0].label + ' loads in with no crew' : cw.length + ' load-ins have no crew');
+  var rep = by.report || [];
+  if (rep.length) parts.push(rep.length === 1 ? 'a show report is owed' : rep.length + ' show reports owed');
+  var ct = by.content || [];
+  if (ct.length) parts.push(ct.length + ' content piece' + s(ct.length) + ' due');
+  var ch = by.chase || [];
+  if (ch.length) parts.push(ch.length === 1 ? 'a client piece is past due' : ch.length + ' client pieces past due');
+  var bl = by.byteless || [];
+  if (bl.length) parts.push(bl.length + ' file' + s(bl.length) + ' with no bytes');
+  if ((by.backup_stale || []).length) parts.push('backups are stale');
+  if ((by.health || []).length) parts.push('storage needs attention');
+  return parts.join(' · ');
+}
+function digestFor(username) {
+  var user = ROSTER[username];
+  var out = { username: username, date: TODAY_ISO, items: [], groups: [], total: 0,
+              summary: '', errors: [] };
+  if (!user || user.active === false) return out;
+  var items = out.items;
+  var soon = dayISO(2);
+  var pmPlus = ['pm', 'manager', 'admin'].indexOf(user.role) >= 0;
+  var label = function (s2) { return s2 ? (s2.name || s2.venue || 'show ' + s2.id) : null; };
+
+  /* tasks — myOpenSteps' filter, narrowed to dated steps inside the window */
+  activeShows().forEach(function (sh) {
+    (sh.steps || []).forEach(function (st) {
+      if (st.owner !== username) return;
+      var ns = normStatus(st.status);
+      if (ns === 'done' || ns === 'na') return;
+      if (!st.due_date || st.due_date > soon) return;
+      items.push({ kind: 'task', label: st.title, where: label(sh),
+                   due: st.due_date, age: dayAge(st.due_date),
+                   show_id: sh.id, project_id: sh.project_id });
+    });
+  });
+  /* PO approvals — canApprovePOs holders ONLY, poNeedsApproval's own answer */
+  if (canApprovePOs(user)) {
+    ALL_POS.forEach(function (po) {
+      if (po.status !== 'quoted' || !poNeedsApproval(po)) return;
+      items.push({ kind: 'po_approval', label: po.po_number + ' · ' + (po.vendor || 'no vendor'),
+                   amount: poTotal(po), po_id: po.id, project_id: po.project_id || null,
+                   age: null });
+    });
+  }
+  /* stale pushes + crewless load-ins — shows this person OWNS */
+  activeShows().forEach(function (sh) {
+    if (sh.owner !== username) return;
+    if (sh.scheduler_stale) {
+      items.push({ kind: 'push_stale', label: label(sh), due: sh.event_date || null,
+                   age: null, show_id: sh.id, project_id: sh.project_id });
+    }
+    if (sh.load_in_date && sh.load_in_date >= TODAY_ISO && sh.load_in_date <= dayISO(7) &&
+        !(sh.crew_assignments || []).length) {
+      items.push({ kind: 'crewless', label: label(sh), due: sh.load_in_date,
+                   age: dayAge(sh.load_in_date), show_id: sh.id, project_id: sh.project_id });
+    }
+  });
+  /* reports — reportsOwedBy, the My Tasks nag's own list */
+  reportsOwedBy(username).forEach(function (r) {
+    var sh = SHOWS_BY_ID[r.show_id];
+    items.push({ kind: 'report', label: label(sh) || 'show ' + r.show_id,
+                 due: r.due_date || null, age: r.due_date ? dayAge(r.due_date) : null,
+                 show_id: r.show_id, project_id: sh ? sh.project_id : null });
+  });
+  /* content due on me (own e360 pieces) + the chase list (folders I own) */
+  ALL_CONTENT.forEach(function (p) {
+    if (['approved', 'delivered', 'na'].indexOf(p.status) >= 0) return;
+    var sh = SHOWS_BY_ID[p.show_id];
+    if (!sh || sh.archived_at) return;
+    if (p.source === 'e360' && p.owner === username &&
+        p.due_date && p.due_date <= soon) {
+      items.push({ kind: 'content', label: p.name, where: label(sh),
+                   due: p.due_date, age: dayAge(p.due_date),
+                   show_id: p.show_id, project_id: sh.project_id });
+    }
+    var folderOwner = (sh.project && sh.project.owner) || sh.owner;
+    if (p.source !== 'e360' && pmPlus && folderOwner === username &&
+        p.due_date && p.due_date < TODAY_ISO) {
+      items.push({ kind: 'chase', label: p.name, where: label(sh), source: p.source,
+                   due: p.due_date, age: dayAge(p.due_date),
+                   show_id: p.show_id, project_id: sh.project_id });
+    }
+  });
+  /* byteless — rows I filed whose bytes never landed (never a remote row) */
+  activeShows().forEach(function (sh) {
+    (sh.files || []).forEach(function (f) {
+      if (f.uploaded_by !== username || f.status !== 'filed') return;
+      if (Number(f.size) > 0 || f.external_store) return;
+      items.push({ kind: 'byteless', label: f.name, age: dayAge(f.created_at),
+                   file_id: f.id, show_id: sh.id, project_id: sh.project_id });
+    });
+  });
+  /* the admin extras (backup posture, storage config) are LIVE-SERVER truths —
+     the demo models a healthy bench and honestly contributes neither */
+  out.total = items.length;
+  out.groups = digestGroupItems(items);
+  out.summary = digestSummary(items);
+  return out;
+}
+/* the sweep twin — per-day idempotency held in DIGEST_SENT for the session,
+   the way digest_runs holds it in the database across restarts */
+var DIGEST_SENT = {};
+function runDigestSweepDemo() {
+  var out = { day: TODAY_ISO, considered: 0, notified: 0, empty: 0, opted_out: 0,
+              already: 0, users: {} };
+  USERS.forEach(function (u) {
+    if (u.active === false) return;
+    out.considered++;
+    if (notifyModeFor(u.username, 'daily_digest') === 'off') {
+      out.opted_out++; out.users[u.username] = { items: 0, outcome: 'opted out' }; return;
+    }
+    var d = digestFor(u.username);
+    if (!d.total) {
+      out.empty++; out.users[u.username] = { items: 0, outcome: 'empty — silent' }; return;
+    }
+    if (DIGEST_SENT[u.username] === TODAY_ISO) {
+      out.already++; out.users[u.username] = { items: d.total, outcome: 'already sent today' }; return;
+    }
+    DIGEST_SENT[u.username] = TODAY_ISO;
+    mkNotif(u.username, 'daily_digest', 'Today — ' + d.summary, {
+      actor: 'system',
+      body: d.groups.map(function (g) {
+        return g.title + ': ' + g.items.map(function (i) { return i.label; }).join(', ');
+      }).join(' · ')
+    });
+    out.notified++; out.users[u.username] = { items: d.total, outcome: 'notified' };
+  });
+  return out;
+}
+
+(function seedDigestFixtures() {
+  /* file:// opens on Tom, and his morning should read like a real one: the
+     store already owes him overdue tasks, awaiting-approval POs (he is an
+     admin) and a show report — these two rows add a due content piece and a
+     byteless file so the Today panel demos most of its groups without
+     inventing a state the store cannot back. */
+  var S = SHOWS_BY_ID[1];
+  if (S) {
+    mkContentPiece({ show: S.id, project: S.project_id,
+      name: 'Court-wrap sponsor loop — final :30', surface: 'Courtside ribbon',
+      kind: 'video', due_off: -1, status: 'in_design', owner: 'tandres', by: 'tandres' });
+    mkDoc(S, { name: 'Fiserv rigging waiver — countersigned', ext: 'pdf',
+      kind: 'contract', size: 0, by: 'tandres', off: -2 });
+  }
 })();
 
 /* ============================================================================

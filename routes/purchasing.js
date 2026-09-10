@@ -1233,3 +1233,11 @@ module.exports = router;
 // (hardening 4). See routes/agent.js POST /purchase-requests.
 module.exports.nextPoNumber = nextPoNumber;
 module.exports.insertPO = insertPO;
+// The morning digest (lib/digest.js) asks "which quoted POs wait on an
+// approver" with THESE functions rather than a second SQL derivation of the
+// same rule — the exact drift the notifyTargets consolidation (hardening 10)
+// exists to warn about. poTotal/poNeedsApproval stay defined here, beside the
+// gate they serve; the digest imports them.
+module.exports.poTotal = poTotal;
+module.exports.poNeedsApproval = poNeedsApproval;
+module.exports.poThreshold = poThreshold;

@@ -393,6 +393,15 @@ async function boot() {
   const backup = require('./lib/backup');
   const backupNextAt = backup.armBackupTimer();
 
+  // The morning digest — the one gathering of "what needs a PERSON today"
+  // (Tom's founding "falling through the cracks" ask, its daily surface).
+  // Same self-rearming chain as the backup above, same honesty: the timer
+  // always arms; whether a firing RUNS is gated at fire time (DIGEST_ENABLED,
+  // DATABASE_URL), and the digest_runs ledger makes each day idempotent per
+  // user however many times a restart re-arms it.
+  const digestLib = require('./lib/digest');
+  const digestNextAt = digestLib.armDigestTimer();
+
   return new Promise((resolve) => {
     const server = app.listen(PORT, () => {
       console.log(`E360 Showrunner ${APP_VERSION} running on port ${PORT}`);
@@ -415,6 +424,9 @@ async function boot() {
       console.log(`  backup timer   : armed for ${backupNextAt.toISOString()} ` +
                   `(BACKUP_HOUR_UTC=${process.env.BACKUP_HOUR_UTC || '8'}; gated at fire time — ` +
                   `see /api/health "backup")`);
+      console.log(`  digest timer   : armed for ${digestNextAt.toISOString()} ` +
+                  `(DIGEST_HOUR_UTC=${process.env.DIGEST_HOUR_UTC || '12'}; gated at fire time — ` +
+                  `one digest per person per UTC day, silent when a plate is empty)`);
       resolve(server);
     });
   });
