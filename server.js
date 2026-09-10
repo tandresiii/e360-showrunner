@@ -214,7 +214,13 @@ app.get('/api/health', async (req, res) => {
                // the storage* keys above: a warm cache in front of a dead NAS
                // is still a dead NAS, and an operator reading this at 2am must
                // not be able to mistake one for the other.
-               fileCache: fileCache.info() });
+               fileCache: fileCache.info(),
+               // The nightly pg_dump, in the same doctrine as the storage and
+               // scheduler blocks: booleans + timestamps + sizes, never a URL
+               // or a credential. `stale` is the silently-rotting detector —
+               // enabled with no verified landing in 26h. An ADDITIVE key, so
+               // other health blocks can land beside it without a merge fight.
+               backup: await require('./lib/backup').healthBlock() });
   } catch (e) {
     res.status(503).json({ ok: false, error: e.message });
   }
@@ -362,6 +368,14 @@ async function boot() {
   // treats a disabled cache as an error, because it is not one.
   fileCache.init();
 
+  // The nightly dump. A self-rearming setTimeout chain (no cron, no new dep —
+  // the same honesty the sweep's TODO demands, except a backup cannot wait
+  // for "a real scheduler someday"). The timer always arms; whether a firing
+  // actually RUNS is gated at fire time (BACKUP_ENABLED, DATABASE_URL,
+  // storageReady) and /api/health's backup block says which way it went.
+  const backup = require('./lib/backup');
+  const backupNextAt = backup.armBackupTimer();
+
   return new Promise((resolve) => {
     const server = app.listen(PORT, () => {
       console.log(`E360 Showrunner ${APP_VERSION} running on port ${PORT}`);
@@ -381,6 +395,9 @@ async function boot() {
         ? `on  ->  ${fc.dir}  (cap ${Math.round(fc.maxBytes / 1048576)} MB, cache-only)`
         : `off (${fc.reason})`}`);
       console.log(`  CORS origins   : ${ORIGINS.length ? ORIGINS.join(', ') : '(same-origin only)'}`);
+      console.log(`  backup timer   : armed for ${backupNextAt.toISOString()} ` +
+                  `(BACKUP_HOUR_UTC=${process.env.BACKUP_HOUR_UTC || '8'}; gated at fire time — ` +
+                  `see /api/health "backup")`);
       resolve(server);
     });
   });

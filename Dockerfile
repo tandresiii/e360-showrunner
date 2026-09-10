@@ -59,6 +59,32 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
+# ── pg_dump, for the nightly backup (lib/backup.js) ───────────────────────────
+# The Node base image has no postgres client, and Debian bookworm's own repo
+# carries only postgresql-client-15. The pgdg repo (PostgreSQL's own apt) is
+# added so the NEWEST client major can be installed — pinned EXPLICITLY as
+# postgresql-client-18 and to the `bookworm-pgdg` suite, never `$(lsb_release)`
+# or a bare `postgresql-client` metapackage, because the whole point is
+# version-directional: a NEWER pg_dump dumps any OLDER server, while an older
+# pg_dump refuses a newer server outright. Whatever major Railway's Postgres
+# runs today or upgrades to tomorrow (up to 18), this client can dump it; when
+# 19 ships, bumping this one line is the upgrade. Client tools ONLY (~no
+# server), and the apt lists are cleaned — the image stays lean.
+#
+# The repo key is ADDed straight from postgresql.org (apt in bookworm reads
+# armored .asc keyrings natively — no gnupg needed); chmod 644 because ADD
+# lands URLs as 0600 and apt's sandboxed fetcher must be able to read it.
+# VERIFIED BY THE RAILWAY DEPLOY: no Docker runs where this file is edited, so
+# the first deploy is the build test — and /api/health's backup block turning
+# up is the proof the image built and shipped.
+ADD https://www.postgresql.org/media/keys/ACCC4CF8.asc /usr/share/keyrings/pgdg.asc
+RUN chmod 644 /usr/share/keyrings/pgdg.asc \
+ && echo "deb [signed-by=/usr/share/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-client-18 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY --from=tailscale /usr/local/bin/tailscaled /usr/local/bin/tailscaled
 COPY --from=tailscale /usr/local/bin/tailscale  /usr/local/bin/tailscale
 

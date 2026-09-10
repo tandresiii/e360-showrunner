@@ -889,6 +889,84 @@ function viewSettings(ctx) {
         'closeout, archives what is ripe and flushes the queue. It is idempotent, so running it twice ' +
         'costs nothing. A real daily job needs Railway cron or the per-user agents.</div>';
     })()) : '') +
+    /* ══ BACKUPS — the off-platform copy, measured (admin) ══════════════════
+       Railway hosts the only Postgres; the nightly pg_dump to the NAS is the
+       recovery story and this card is where it is WATCHED. Same doctrine as
+       the NAS card above it: posture from /api/health's backup block (config
+       + the last MEASURED landing), the ledger from the admin route, and the
+       stale flag rendered loud — a backup system's one job is to never rot
+       in silence. The demo models a ledger and says so. */
+    (CURRENT_USER.role === 'admin' ? card('server', 'Backups', (function () {
+      if (demo) {
+        var mrows = ((ctx.backups && ctx.backups.runs) || []).slice(0, 3).map(function (r) {
+          return row(fmtDate(String(r.started_at).slice(0, 10)),
+            '<span class="pill go"><span class="dot"></span>ok</span> <span class="mini">' +
+            esc(fmtSize(r.bytes)) + ' · ' + esc(r.trigger) + '</span>');
+        }).join('');
+        return '<p>Nightly <b>pg_dump</b> of the whole database, shipped to the NAS at ' +
+          '<span class="mono" style="font-size:11px">_backups\\</span> and size-verified after landing. ' +
+          'RESTORE.md is the bad-day script.</p>' +
+          row('Mode', '<span style="color:var(--warn)">modeled — demo ledger, nothing was dumped</span>') +
+          mrows +
+          '<div class="perm-note" style="margin-top:10px">' + inlineIcon('lock') +
+          ' A real backup needs the live server and its database. Sign in against the live app to see ' +
+          'the true ledger and the NAS pile.</div>';
+      }
+      var b = (ctx.health && ctx.health.backup) || null;
+      if (!b) {
+        return '<p>Nightly <b>pg_dump</b> to the NAS.</p>' +
+          row('Status', '<span style="color:var(--crit)">health probe did not answer — posture unknown</span>');
+      }
+      var led = ctx.backups || null;
+      var last;
+      if (!b.lastRun) {
+        last = '<span style="color:var(--warn)">never ran on this database</span>';
+      } else if (b.lastRun.status === 'ok') {
+        last = '<span style="color:var(--go)">ok · ' + esc(fmtSize(b.lastRun.bytes)) + ' · ' +
+               esc(fmtAgo(b.lastRun.at)) + ' ago</span>';
+      } else {
+        last = '<span style="color:var(--crit)">FAILED ' + esc(fmtAgo(b.lastRun.at)) + ' ago</span>';
+      }
+      var pile = led && led.nas
+        ? (led.nas.error
+          ? '<span style="color:var(--crit)">could not list — ' + esc(String(led.nas.error).slice(0, 80)) + '</span>'
+          : (led.nas.configured
+            ? String((led.nas.objects || []).length) + ' dump' + ((led.nas.objects || []).length === 1 ? '' : 's') + ' on the NAS'
+            : '<span style="color:var(--warn)">storage not configured — nowhere to land</span>'))
+        : '—';
+      var recent = ((led && led.runs) || []).slice(0, 4).map(function (r) {
+        var pill = r.status === 'ok'
+          ? '<span class="pill go"><span class="dot"></span>ok</span>'
+          : '<span class="pill crit"><span class="dot"></span>failed</span>';
+        return row(fmtDate(String(r.started_at).slice(0, 10)) + ' ' +
+                   esc(String(r.started_at).slice(11, 16)),
+          pill + ' <span class="mini">' +
+          (r.status === 'ok' ? esc(fmtSize(r.bytes)) + ' · ' : '') + esc(r.trigger || '') +
+          (r.error ? ' · ' + esc(String(r.error).slice(0, 60)) : '') + '</span>');
+      }).join('');
+      return '<p>Nightly <b>pg_dump -Fc</b> of the whole database, shipped through the storage driver ' +
+        'to <span class="mono" style="font-size:11px">_backups\\</span> on the NAS and <b>read back and ' +
+        'size-verified</b> before a run may call itself ok. RESTORE.md is the bad-day script.</p>' +
+        row('Nightly', b.enabled
+          ? '<span style="color:var(--go)">armed · ' + String(b.hourUtc).padStart(2, '0') + ':00 UTC</span>'
+          : '<span style="color:var(--warn)">not running — ' +
+            (ctx.health && ctx.health.storageReady ? 'disabled by BACKUP_ENABLED' : 'storage is not configured') +
+            '</span>') +
+        row('Last dump', last) +
+        (b.nextRunAt ? row('Next run', esc(fmtDate(String(b.nextRunAt).slice(0, 10))) + ' ' +
+                           esc(String(b.nextRunAt).slice(11, 16)) + ' UTC') : '') +
+        row('Retention', 'newest ' + esc(String(b.keep)) + ' + first of ' + esc(String(b.keepMonthly)) + ' months') +
+        row('NAS pile', pile) +
+        '<div class="set-row"><span class="k">Run it now</span><span class="v">' +
+        '<button class="btn sm ghost" ' + act('backupNow') + '>' + icon('server') + 'Back up now</button>' +
+        '</span></div>' +
+        (b.stale
+          ? '<div class="perm-note" style="margin-top:10px;color:var(--crit)">' + inlineIcon('alert') +
+            ' <b>STALE — no verified dump in 26h.</b> The nightly failed, stopped, or never started. ' +
+            'The ledger rows below say which; fix it today, not on the bad day.</div>'
+          : '') +
+        recent;
+    })()) : '') +
     card('users', 'Roles &amp; access', '<p>Five canonical roles gate edit + assignment rights across the workspace.</p>' + row('Roles', 'admin · manager · pm · tech · viewer') + row('Default', 'viewer')) +
     '</div>';
 }

@@ -2381,6 +2381,42 @@ async function main() {
      (await GET(`/api/files/${wf1.body.id}`, { token: T.brenden })).status === 200 &&
      (await GET(`/api/files/${wf2.body.id}`, { token: T.brenden })).status === 200);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('42 · the nightly backup — honest when it cannot run, reachable when it can');
+  // ══════════════════════════════════════════════════════════════════════════
+  // THIS server runs with no storage ON PURPOSE (§12's production-default
+  // shape), which makes it the perfect stage for the backup's honesty rules:
+  // the health block must say "not enabled" and WHY, and a manual trigger
+  // must land a FAILED ledger row that names the missing storage — never a
+  // fake ok, never a dump parked on the ephemeral disk. The full landed-and-
+  // restored proof lives in smoke, where a real STORAGE_ROOT exists.
+  reach('Back up now (Settings → Backups card)',
+    { seam: ['runBackup', 'listBackups'], action: 'backupNow' });
+
+  const bkHealth = await GET('/api/health');
+  const bkBlock = bkHealth.body.backup;
+  ok('health carries the ADDITIVE backup block, booleans + timestamps, no URL',
+     !!bkBlock && bkBlock.enabled === false && /26h/.test(bkBlock.staleMeans || '') &&
+     !/postgres(ql)?:\/\//i.test(JSON.stringify(bkBlock)), bkBlock);
+  ok('…and with storage unconfigured it does not pretend a next run is coming',
+     bkBlock.nextRunAt === null && bkBlock.stale === false, bkBlock);
+
+  const bkTom = await POST('/api/admin/backup', {}, { token: T.tom });
+  ok('a manual backup with nowhere durable to land answers a FAILED ledger row, naming storage',
+     bkTom.status === 200 && bkTom.body.status === 'failed' &&
+     /storage/i.test(bkTom.body.error || '') && bkTom.body.trigger === 'manual', bkTom.body);
+  const bkLedger = await GET('/api/admin/backups', { token: T.tom });
+  ok('…and the refusal is IN the ledger beside an honest empty NAS answer',
+     bkLedger.status === 200 && bkLedger.body.runs[0].status === 'failed' &&
+     bkLedger.body.nas.configured === false, bkLedger.body);
+  ok('the trigger holds the admin floor — a pm is 403',
+     (await POST('/api/admin/backup', {}, { token: T.pat })).status === 403);
+  ok('…and so does the ledger read',
+     (await GET('/api/admin/backups', { token: T.pat })).status === 403);
+  const bkStale = (await GET('/api/health')).body.backup;
+  ok('a failing-only ledger while DISABLED stays stale:false — stale is an ENABLED-system alarm',
+     bkStale.stale === false && bkStale.lastRun && bkStale.lastRun.status === 'failed', bkStale);
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

@@ -5079,6 +5079,30 @@ var api = (function () {
       return SR.get('/api/health', { quiet: true }).then(null, function () { return null; });
     },
 
+    /* ---- the nightly backup — ledger + Back-up-now (admin) --------------- */
+    /* The Backups card reads /api/health's `backup` block for posture (via
+       api.health above) and this pair for the ledger + the button. The demo
+       answers a MODELED ledger, clearly labelled — a fictional NAS does not
+       get a real recovery story, and the card says so instead of pretending. */
+    listBackups: function () {
+      if (!API()) {
+        var day = 24 * 60 * 60 * 1000;
+        var mk = function (i) {
+          var d = new Date(Date.now() - i * day);
+          return { id: 100 - i, started_at: d.toISOString(), finished_at: d.toISOString(),
+                   status: 'ok', bytes: 8300000 + i * 1200, path: '\\\\E360-NAS\\Showrunner\\_backups\\(modeled)',
+                   error: null, trigger: i === 0 ? 'manual' : 'schedule' };
+        };
+        return ok({ demo: true, runs: [mk(0), mk(1), mk(2), mk(3)],
+                    nas: { configured: false, prefix: '_backups', objects: [] } });
+      }
+      return SR.get('/api/admin/backups');
+    },
+    runBackup: function () {
+      if (!API()) return fail('Backing up needs the live Showrunner server — the demo has no database to dump');
+      return SR.post('/api/admin/backup', {});
+    },
+
     /* ---- A8. the served feature flags, consumed at last ------------------ */
     /* GET /api/config reports features.schedulerPush and the README says the UI
        greys the button; the UI never read it. Demo has no server, so it answers

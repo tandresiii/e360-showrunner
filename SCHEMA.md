@@ -1454,6 +1454,36 @@ surfaces the one real operator edit (field width 225 vs 222).
 > Dev and CI are unaffected — `scripts/smoke.js`, `scripts/storage-test.js` and
 > the scratchpad harnesses all set it explicitly.
 | `SHOWRUNNER_NAS_ROOT` | `\\E360-NAS\Showrunner` | the logical root every `nas_path` is expressed against. A **label**, not a route — operators read it out of the UI and paste it into Explorer; nothing dials it |
+| `BACKUP_ENABLED` | *(unset = on)* | `0` disables the **scheduled** nightly dump; the manual `POST /api/admin/backup` still works |
+| `BACKUP_HOUR_UTC` | `8` | when the nightly fires. 08:00 UTC ≈ 3am Central; being a UTC anchor it drifts an hour across DST, deliberately |
+| `BACKUP_KEEP` | `14` | retention: the newest N daily dumps kept on the NAS |
+| `BACKUP_KEEP_MONTHLY` | `6` | retention: additionally the FIRST dump of each of the last M calendar months |
+| `PG_DUMP_PATH` | *(unset = `pg_dump` on PATH)* | test seam + escape hatch; the production image installs `postgresql-client-18` from pgdg (Dockerfile) |
+
+### Backups — the nightly pg_dump (`lib/backup.js`, `RESTORE.md`)
+
+Every night at `BACKUP_HOUR_UTC` the app runs `pg_dump -Fc` on its own
+`DATABASE_URL` and ships the file **through the storage driver** to
+`_backups/showrunner-YYYY-MM-DDTHHmm.dump` — a **reserved prefix** no file
+row, cascade or UI browser ever touches. The landing is **read back and
+size-verified** before the run may record `ok`. Scheduling is a self-rearming
+`setTimeout` chain armed at boot (no cron, no new dependency); overlapping
+runs are refused (409); retention (`BACKUP_KEEP` + `BACKUP_KEEP_MONTHLY`)
+deletes **only** names matching the backup pattern under the `_backups/`
+prefix, and only after a verified landing — both locks are mutation-tested in
+smoke. `/api/health` carries an additive `backup` block whose `stale: true`
+means *no verified dump in 26h while enabled*. `POST /api/admin/backup` and
+`GET /api/admin/backups` (both admin) are the manual trigger and the
+ledger-beside-NAS-listing view; the Settings **Backups** card renders them.
+`RESTORE.md` is the bad-day script (restore first, then point the app).
+
+**`backup_runs`** — `id · started_at · finished_at · status ('ok'|'failed') ·
+bytes · path · error · trigger ('schedule'|'manual')`
+One row per attempt, `ok` only after read-back verification. Lives in the
+database being backed up on purpose: it is operational telemetry, it rides
+inside every dump, and the NAS listing is the recovery-time source of truth.
+Hangs off no project/show — deliberately **not** in the delete cascades.
+Trimmed to the newest 500 rows.
 
 ### Storage — the NAS byte layer (`lib/storage.js`)
 

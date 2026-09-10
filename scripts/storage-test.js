@@ -149,16 +149,19 @@ function makeDavServer({ root, base = '/showrunner', user, pass: password, tls: 
     const [u, p] = Buffer.from(h.slice(6), 'base64').toString('utf8').split(':');
     return u === user && p === password;
   }
-  function propfindXml(href, st) {
+  function responseXml(href, st) {
     const isDir = st.isDirectory();
-    return '<?xml version="1.0" encoding="utf-8"?>\n' +
-      '<D:multistatus xmlns:D="DAV:"><D:response>' +
+    return '<D:response>' +
       `<D:href>${href}</D:href><D:propstat><D:prop>` +
       `<D:resourcetype>${isDir ? '<D:collection/>' : ''}</D:resourcetype>` +
       (isDir ? '' : `<D:getcontentlength>${st.size}</D:getcontentlength>`) +
       `<D:getlastmodified>${st.mtime.toUTCString()}</D:getlastmodified>` +
       '</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>' +
-      '</D:response></D:multistatus>';
+      '</D:response>';
+  }
+  function propfindXml(href, st) {
+    return '<?xml version="1.0" encoding="utf-8"?>\n' +
+      '<D:multistatus xmlns:D="DAV:">' + responseXml(href, st) + '</D:multistatus>';
   }
 
   const handler = async (req, res) => {
@@ -184,6 +187,21 @@ function makeDavServer({ root, base = '/showrunner', user, pass: password, tls: 
           await drain(req);
           let st;
           try { st = await fsp.stat(t.disk); } catch { return send(404, 'not found'); }
+          // Depth:1 on a collection answers self + children, per RFC 4918 —
+          // the shape Synology sends and the driver's list() parses. Depth:0
+          // (and Depth:1 on a plain file) keeps the single-response answer.
+          const depth = String(req.headers.depth || '0');
+          if (depth === '1' && st.isDirectory()) {
+            const kids = await fsp.readdir(t.disk);
+            let body = '<?xml version="1.0" encoding="utf-8"?>\n<D:multistatus xmlns:D="DAV:">' +
+              responseXml(req.url, st);
+            for (const k of kids) {
+              const kst = await fsp.stat(path.join(t.disk, k));
+              body += responseXml(req.url.split('?')[0].replace(/\/+$/, '') + '/' + encodeURIComponent(k), kst);
+            }
+            body += '</D:multistatus>';
+            return send(207, body, { 'Content-Type': 'application/xml; charset=utf-8' });
+          }
           return send(207, propfindXml(req.url, st),
             { 'Content-Type': 'application/xml; charset=utf-8' });
         }
@@ -498,6 +516,38 @@ async function call(method, p, { token, body, raw, headers = {} } = {}) {
   ok('...and the bytes are gone', (await storage.exists(delPath)) === false);
   const rmGhost = await storage.remove(P('P9-deep', 'S9-nest', 'other', 'never.txt'));
   ok('remove() of nothing is a soft no, never a throw', rmGhost.ok === false, rmGhost);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('6b. PROPFIND Depth:1 — the backup pile, listed through the driver');
+  // list() exists for exactly one caller family: the nightly backup's
+  // retention sweep and its admin eyeball view (lib/backup.js). The contract
+  // that matters is the asymmetry at the bottom: an ABSENT collection is an
+  // empty answer (nothing to delete — the safe zero), but a TRANSPORT/AUTH
+  // failure THROWS, because a retention pass that mistakes "could not list"
+  // for "empty pile" would simply do nothing forever while reporting fine.
+  const pile = P('_backups');
+  await storage.put(P('_backups', 'showrunner-2026-09-01T0800.dump'), Buffer.from('dump one'));
+  await storage.put(P('_backups', 'showrunner-2026-09-02T0800.dump'), Buffer.from('dump two ..'));
+  await storage.put(P('_backups', 'notes.txt'), Buffer.from('decoy'));
+  await storage.put(P('_backups', 'oldpile', 'x.txt'), Buffer.from('x'));
+  const pileList = await storage.list(pile);
+  ok('list() sees the whole pile — two dumps, a decoy, a subfolder',
+     pileList.length === 4, pileList.map((o) => o.name));
+  const pd1 = pileList.find((o) => o.name === 'showrunner-2026-09-01T0800.dump');
+  const pd2 = pileList.find((o) => o.name === 'showrunner-2026-09-02T0800.dump');
+  ok('...with true names and TRUE SIZES parsed out of the 207',
+     pd1 && pd1.size === 8 && pd2 && pd2.size === 11, { pd1, pd2 });
+  ok('...mtimes that parse', pileList.every((o) => !o.directory ? (o.mtime instanceof Date && !isNaN(o.mtime)) : true));
+  ok('...and the subfolder flagged as a directory, files not',
+     pileList.find((o) => o.name === 'oldpile').directory === true &&
+     pd1.directory === false && pileList.find((o) => o.name === 'notes.txt').directory === false);
+  ok('a collection that does not exist yet lists EMPTY, not a throw (the first nightly creates it)',
+     (await storage.list(P('_backups-never'))).length === 0);
+  dav.state.rejectAuth = true;
+  const pileAuth = await throws(() => storage.list(pile));
+  ok('...but a refused credential THROWS — retention must never read an error as an empty pile',
+     pileAuth.threw && pileAuth.status === 502, pileAuth);
+  dav.state.rejectAuth = false;
 
   // ══════════════════════════════════════════════════════════════════════════
   section('7. honest failures — a 404 is not a 502 is not a 501');

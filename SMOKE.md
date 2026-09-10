@@ -160,3 +160,23 @@ usually obvious from the assertion text alone.
 The run is self-cleaning: everything it creates is tagged `smoke<base36>` and
 removed at the end, and the final assertion verifies that nothing tagged
 survived.
+
+## The backup section's one extra prerequisite (2026-09-10)
+
+Smoke's `B · the backup promise` section proves the nightly dump end to end —
+`pg_dump` through `lib/backup.js`, landed in storage, **read back through the
+driver and `pg_restore`d into a second database**, row counts compared. That
+needs real `pg_dump`/`pg_restore` binaries of major ≥ 18, and the
+`embedded-postgres` npm distribution ships **only** `initdb`/`pg_ctl`/`postgres`
+(checked 18.4.0-beta.17, every platform). One-time fix per `node_modules`:
+
+```bash
+node scripts/fetch-pg-tools.mjs   # Windows: fetches EDB 18.4 client tools into node_modules/.sr-pg-tools
+                                  # Linux/macOS: prints the package-manager one-liner instead
+```
+
+`scripts/pg-tools.js` resolves in order: `PG_DUMP_PATH`/`PG_RESTORE_PATH` env →
+embedded-postgres `native/bin` (future-proofing) → `node_modules/.sr-pg-tools`
+→ `PATH` (version-gated ≥ 18). If none answer, the section **fails loudly**
+naming this fix — it never skips, because a restore proof that silently stops
+running is the exact rot the backup system exists to prevent.

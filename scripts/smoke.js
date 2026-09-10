@@ -5020,6 +5020,219 @@ const DEL = (p, o) => call('DELETE', p, o);
      (await pool.query(`SELECT COUNT(*)::int AS n FROM contacts WHERE name=$1`, [TAG + ' Wei Lin']))
        .rows[0].n === 1);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // THE BACKUP PROMISE — dump, land, VERIFY, and a REAL restore
+  // ──────────────────────────────────────────────────────────────────────────
+  // The app told IT "a nightly pg_dump ships to the NAS". This section is what
+  // keeps that from being a file with a .dump name: it runs lib/backup.js's
+  // whole pipeline against this suite's real database and the local storage
+  // driver, then pg_restore's the LANDED file (fetched back through the
+  // driver, not off the side) into a SECOND database and compares row counts.
+  // Plus the sharp edges: ledger truthfulness, retention scoping (mutation-
+  // tested — widen the glob and decoys die), read-back honesty (a store that
+  // drops the write must yield 'failed', never 'ok'), overlap refusal, the
+  // 26h stale flip, and the admin floors on both routes.
+  section('B · the backup promise — pg_dump, the NAS pile, and a REAL restore');
+  const bkTools = require('./pg-tools').resolvePgTools();
+  ok('real pg_dump/pg_restore located for the proof (embedded-postgres ships none)',
+     !!bkTools, require('./pg-tools').HOW_TO_GET_THEM);
+  if (bkTools) {
+    const bkFs = require('fs');
+    const bkPath = require('path');
+    const bkS = require('../lib/storage');
+    const backup = require('../lib/backup');
+    const { execFileSync } = require('child_process');
+    const BK_DIR = bkPath.join(process.env.STORAGE_ROOT, '_backups');
+    const bkNas = (name) => [bkS.NAS_ROOT, '_backups', name].join('\\');
+    // a clean pile: STORAGE_ROOT persists across smoke runs on a dev machine
+    bkFs.rmSync(BK_DIR, { recursive: true, force: true });
+    const bkEnvSave = { PG_DUMP_PATH: process.env.PG_DUMP_PATH,
+                        BACKUP_KEEP: process.env.BACKUP_KEEP,
+                        BACKUP_KEEP_MONTHLY: process.env.BACKUP_KEEP_MONTHLY };
+    process.env.PG_DUMP_PATH = bkTools.pgDump;
+
+    // ── the run, through the ADMIN ROUTE (floor + pipeline in one motion) ──
+    const bkNo = await POST('/api/admin/backup', {});
+    ok('POST /api/admin/backup without a session is refused', bkNo.status === 401, bkNo.status);
+    await POST('/api/users', { username: TAG + 'bkviewer', password: 'bk-pass-12345',
+                               role: 'viewer', name: 'BK Viewer' }, { token: A });
+    const BKV = (await POST('/api/auth/login',
+      { username: TAG + 'bkviewer', password: 'bk-pass-12345' })).body.token;
+    ok('...and a viewer is 403 — admin floor, same as the storage probe',
+       (await POST('/api/admin/backup', {}, { token: BKV })).status === 403);
+    ok('GET /api/admin/backups holds the same floor',
+       (await GET('/api/admin/backups', { token: BKV })).status === 403 &&
+       (await GET('/api/admin/backups')).status === 401);
+
+    // ── READ-BACK HONESTY — the mutation gates, run FIRST so they leave a
+    // clean pile behind. Skip the read-back in runBackup and both of these
+    // report 'ok' for a backup that never landed: red. The store is made to
+    // lie two ways: drop the write entirely, and mis-size what landed. ──
+    const bkRealPut = bkS.storage.put;
+    const bkRealStat = bkS.storage.stat;
+    bkS.storage.put = async (p, b) => ({ ok: true, size: 999999, path: p });   // writes NOTHING
+    const bkDropped = await backup.runBackup({ trigger: 'manual' });
+    bkS.storage.put = bkRealPut;
+    ok('MUTATION GATE — a store that DROPS the write yields a FAILED row, never ok',
+       bkDropped.status === 'failed' && /read-back/i.test(bkDropped.error || ''), bkDropped);
+    bkS.storage.stat = async () => ({ size: 7, mtime: new Date() });           // lies about size
+    const bkShort = await backup.runBackup({ trigger: 'manual' });
+    bkS.storage.stat = bkRealStat;
+    ok('MUTATION GATE — a size mismatch on read-back is FAILED too, naming both numbers',
+       bkShort.status === 'failed' && /7 bytes/.test(bkShort.error || ''), bkShort);
+    ok('...and a failed landing is torn back out — the pile holds NO dump after two failures',
+       !bkFs.existsSync(BK_DIR) ||
+       bkFs.readdirSync(BK_DIR).every((n) => !/^showrunner-.*\.dump$/.test(n)),
+       bkFs.existsSync(BK_DIR) ? bkFs.readdirSync(BK_DIR) : '(no dir)');
+
+    const bkRun = await POST('/api/admin/backup', {}, { token: A });
+    ok('an admin backup runs and answers the ledger row', bkRun.status === 200 &&
+       bkRun.body && bkRun.body.status === 'ok', bkRun.body);
+    const bkRow = bkRun.body;
+    ok('...trigger says manual, path is under _backups/, name matches the pattern',
+       bkRow.trigger === 'manual' && /\\_backups\\showrunner-\d{4}-\d{2}-\d{2}T\d{4}\.dump$/.test(bkRow.path),
+       bkRow);
+    const bkName = String(bkRow.path).split('\\').pop();
+    const bkDisk = bkFs.statSync(bkPath.join(BK_DIR, bkName));
+    ok('LEDGER TRUTHFULNESS — bytes is the size actually on disk, and it is not trivial',
+       bkRow.bytes === bkDisk.size && bkRow.bytes > 10000, { ledger: bkRow.bytes, disk: bkDisk.size });
+    ok('the ledger row and the health block carry NO connection URL',
+       !/postgres(ql)?:\/\//i.test(JSON.stringify(bkRow)), bkRow);
+
+    const bkBoth = await GET('/api/admin/backups', { token: A });
+    ok('GET /api/admin/backups returns ledger + live NAS listing, eyeball-able against each other',
+       bkBoth.status === 200 && bkBoth.body.runs[0].id === bkRow.id &&
+       bkBoth.body.nas.configured === true &&
+       bkBoth.body.nas.objects.some((o) => o.name === bkName && o.size === bkRow.bytes),
+       bkBoth.body && bkBoth.body.nas);
+
+    // ── THE RESTORE PROOF — the landed file, back through the driver, into
+    // a second database with real pg_restore, counted table by table ──
+    const bkBuf = await bkS.storage.get(bkRow.path);
+    ok('the dump reads back through the driver byte-complete', bkBuf.length === bkRow.bytes);
+    const bkTmp = bkPath.join(require('os').tmpdir(), `sr-smoke-restore-${TAG}.dump`);
+    bkFs.writeFileSync(bkTmp, bkBuf);
+    await pool.query('DROP DATABASE IF EXISTS smoke_restore_proof');
+    await pool.query('CREATE DATABASE smoke_restore_proof');
+    const bkDbUrl = new URL(process.env.DATABASE_URL);
+    let bkRestoreOk = true, bkRestoreErr = null;
+    try {
+      execFileSync(bkTools.pgRestore, ['--no-owner', '-d', 'smoke_restore_proof', bkTmp], {
+        env: { ...process.env, PGHOST: bkDbUrl.hostname, PGPORT: bkDbUrl.port || '5432',
+               PGUSER: decodeURIComponent(bkDbUrl.username || 'postgres'),
+               PGPASSWORD: decodeURIComponent(bkDbUrl.password || '') },
+        stdio: 'pipe', timeout: 120000
+      });
+    } catch (e) { bkRestoreOk = false; bkRestoreErr = String(e.stderr || e.message).slice(0, 300); }
+    ok('pg_restore accepts the landed dump into a fresh database', bkRestoreOk, bkRestoreErr);
+    const { Client: BkClient } = require('pg');
+    const bkC2 = new BkClient({ connectionString:
+      `postgres://${bkDbUrl.username}:${bkDbUrl.password}@${bkDbUrl.hostname}:${bkDbUrl.port || 5432}/smoke_restore_proof?sslmode=disable` });
+    await bkC2.connect();
+    const bkTables = ['users', 'projects', 'shows', 'steps', 'files', 'activity'];
+    const bkCounts = {};
+    let bkAllMatch = true;
+    for (const t of bkTables) {
+      const live = (await pool.query(`SELECT COUNT(*)::int AS n FROM ${t}`)).rows[0].n;
+      const restored = (await bkC2.query(`SELECT COUNT(*)::int AS n FROM ${t}`)).rows[0].n;
+      bkCounts[t] = { live, restored };
+      if (live !== restored) bkAllMatch = false;
+    }
+    await bkC2.end();
+    ok('ROW COUNTS MATCH across all six tables — the dump is a working backup, not a named file',
+       bkAllMatch, bkCounts);
+    ok('...and the comparison is not vacuous (real rows on both sides)',
+       bkCounts.users.live > 0 && bkCounts.activity.live > 0 && bkCounts.projects.live > 0, bkCounts);
+    await pool.query('DROP DATABASE smoke_restore_proof');
+    bkFs.rmSync(bkTmp, { force: true });
+
+    // ── retention math, pure — exactly N, N+1, and the month boundary ──
+    const bkMk = (s) => `showrunner-${s}.dump`;
+    const bkPlan = (names, o) => backup.planRetention(names, o);
+    const p1 = bkPlan([bkMk('2026-09-01T0800'), bkMk('2026-09-02T0800'), bkMk('2026-09-03T0800')],
+      { keep: 3, keepMonthly: 0, now: new Date('2026-09-03T12:00:00Z') });
+    ok('retention: exactly N dumps at KEEP=N drops nothing', p1.drop.length === 0, p1);
+    const p2 = bkPlan([bkMk('2026-09-01T0800'), bkMk('2026-09-02T0800'), bkMk('2026-09-03T0800'),
+                       bkMk('2026-09-04T0800')],
+      { keep: 3, keepMonthly: 0, now: new Date('2026-09-04T12:00:00Z') });
+    ok('retention: N+1 drops exactly the oldest',
+       p2.drop.length === 1 && p2.drop[0] === bkMk('2026-09-01T0800'), p2);
+    const p3 = bkPlan([bkMk('2026-08-01T0800'), bkMk('2026-08-15T0800'),
+                       bkMk('2026-09-01T0800'), bkMk('2026-09-02T0800')],
+      { keep: 2, keepMonthly: 2, now: new Date('2026-09-02T12:00:00Z') });
+    ok('retention: the FIRST dump of each kept month survives across the boundary',
+       p3.keep.includes(bkMk('2026-08-01T0800')) && p3.drop.length === 1 &&
+       p3.drop[0] === bkMk('2026-08-15T0800'), p3);
+    const p4 = bkPlan([bkMk('2026-08-01T0800'), bkMk('2026-09-01T0800'), bkMk('2026-09-02T0800')],
+      { keep: 2, keepMonthly: 1, now: new Date('2026-09-02T12:00:00Z') });
+    ok('retention: a month outside the KEEP_MONTHLY window is let go',
+       p4.drop.length === 1 && p4.drop[0] === bkMk('2026-08-01T0800'), p4);
+
+    // ── PREFIX + PATTERN SCOPING — the mutation test. Widen the glob in
+    // pruneBackups (or let planRetention judge foreign names) and the decoys
+    // below die: this goes red. ──
+    const bkOld = ['2026-01-05T0800', '2026-01-06T0800', '2026-02-05T0800'].map(bkMk);
+    for (const n of bkOld) await bkS.storage.put(bkNas(n), Buffer.from('old dump ' + n));
+    const bkDecoys = ['notes-do-not-touch.txt', 'showrunner-latest.dump',
+                      'showrunner-2026-01-01T0000.dump.bak'];
+    for (const n of bkDecoys) await bkS.storage.put(bkNas(n), Buffer.from('decoy ' + n));
+    const bkOutside = [bkS.NAS_ROOT, 'P77-decoy', 'spec', 'keep-me.pdf'].join('\\');
+    await bkS.storage.put(bkOutside, Buffer.from('a show file near the mower'));
+    process.env.BACKUP_KEEP = '1';
+    process.env.BACKUP_KEEP_MONTHLY = '0';
+    const bkPruned = await backup.pruneBackups();
+    ok('retention deletes the stale REAL dumps and reports them',
+       bkOld.every((n) => bkPruned.removed.includes(n)) &&
+       !bkFs.existsSync(bkPath.join(BK_DIR, bkOld[0])), bkPruned);
+    ok('...keeping the newest dump (KEEP=1)', bkFs.existsSync(bkPath.join(BK_DIR, bkName)));
+    ok('MUTATION GATE — every non-pattern file in _backups/ SURVIVES the sweep',
+       bkDecoys.every((n) => bkFs.existsSync(bkPath.join(BK_DIR, n))),
+       bkDecoys.filter((n) => !bkFs.existsSync(bkPath.join(BK_DIR, n))));
+    ok('MUTATION GATE — a file OUTSIDE the _backups/ prefix is untouchable by retention',
+       (await bkS.storage.exists(bkOutside)) === true);
+    ok('...and nothing it removed fails the name pattern',
+       bkPruned.removed.every((n) => /^showrunner-\d{4}-\d{2}-\d{2}T\d{4}\.dump$/.test(n)), bkPruned.removed);
+    await bkS.storage.remove(bkOutside);
+    process.env.BACKUP_KEEP = bkEnvSave.BACKUP_KEEP || '14';
+    process.env.BACKUP_KEEP_MONTHLY = bkEnvSave.BACKUP_KEEP_MONTHLY || '6';
+
+    // ── overlap refusal — deterministic: the latch is set before first await ──
+    const bkPair = await Promise.allSettled([
+      backup.runBackup({ trigger: 'manual' }), backup.runBackup({ trigger: 'manual' })]);
+    const bkOkRuns = bkPair.filter((r) => r.status === 'fulfilled');
+    const bkRefused = bkPair.filter((r) => r.status === 'rejected');
+    ok('two simultaneous runs: exactly one runs, the other is a 409, no second ledger row',
+       bkOkRuns.length === 1 && bkOkRuns[0].value.status === 'ok' &&
+       bkRefused.length === 1 && bkRefused[0].reason.status === 409,
+       bkPair.map((r) => r.status));
+
+    // ── the health block — present, honest, additive, and the stale flip ──
+    const bkH1 = await GET('/api/health');
+    const hb1 = bkH1.body.backup;
+    ok('/api/health gains an ADDITIVE backup block: enabled + lastRun + nextRunAt + staleMeans',
+       hb1 && hb1.enabled === true && hb1.lastRun && hb1.lastRun.status === 'ok' &&
+       typeof hb1.lastRun.bytes === 'number' && /26h/.test(hb1.staleMeans || ''), hb1);
+    ok('...nextRunAt is a real future instant at BACKUP_HOUR_UTC',
+       !!hb1.nextRunAt && new Date(hb1.nextRunAt) > new Date() &&
+       new Date(hb1.nextRunAt).getUTCHours() === hb1.hourUtc, hb1.nextRunAt);
+    ok('...and it carries no URL and no credential',
+       !/postgres(ql)?:\/\//i.test(JSON.stringify(hb1)), hb1);
+    ok('fresh dump < 26h old → stale:false', hb1.stale === false, hb1);
+    await pool.query(`UPDATE backup_runs SET finished_at = NOW() - INTERVAL '27 hours' WHERE status='ok'`);
+    const hb2 = (await GET('/api/health')).body.backup;
+    ok('THE ROT DETECTOR — the newest success pushed past 26h flips stale:true', hb2.stale === true, hb2);
+    await pool.query(
+      `INSERT INTO backup_runs (started_at, finished_at, status, bytes, path, trigger)
+       VALUES (NOW(), NOW(), 'ok', 12345, $1, 'schedule')`, [bkNas(bkName)]);
+    const hb3 = (await GET('/api/health')).body.backup;
+    ok('...and a fresh verified landing flips it back', hb3.stale === false, hb3);
+
+    // tidy: the pile dir and the tool env, so a re-run starts clean
+    bkFs.rmSync(BK_DIR, { recursive: true, force: true });
+    if (bkEnvSave.PG_DUMP_PATH === undefined) delete process.env.PG_DUMP_PATH;
+    else process.env.PG_DUMP_PATH = bkEnvSave.PG_DUMP_PATH;
+  }
+
   // ── cleanup ───────────────────────────────────────────────────────────────
   section('cleanup');
   await DEL(`/api/projects/${P2}`, { token: A });

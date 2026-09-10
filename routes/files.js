@@ -138,6 +138,44 @@ router.post('/admin/storage-probe', requireRole('admin'), asyncH(async (req, res
   res.json(out);
 }));
 
+// ════════════════════════════════════════════════════════════════════════════
+// ADMIN: THE BACKUP — the nightly promise, triggerable and auditable by hand
+// ────────────────────────────────────────────────────────────────────────────
+// POST /api/admin/backup — run one now (trigger 'manual'). Same shape as the
+// storage probe above: admin floor, and the response is the RESULT whatever
+// the verdict — a run that lands a 'failed' ledger row answers 200 carrying
+// that row, because the row IS the instrument and a non-2xx would hide it.
+// The only non-200 is 409 when a run is already in flight (lib/backup.js
+// refuses overlap; that in-flight run will write the row for this moment).
+//
+// GET /api/admin/backups — the ledger AND the live NAS listing of _backups/,
+// side by side, so "the database says nightly ran" and "the NAS actually
+// holds a pile of dumps" can be eyeballed against each other. The listing is
+// read through the storage driver at request time; when it cannot be read the
+// response says so instead of rendering a false empty.
+router.post('/admin/backup', requireRole('admin'), asyncH(async (req, res) => {
+  const backup = require('../lib/backup');
+  if (backup.isRunning()) throw conflict('A backup is already running — one at a time, by design.');
+  const row = await backup.runBackup({ trigger: 'manual' });
+  res.json(row);
+}));
+router.get('/admin/backups', requireRole('admin'), asyncH(async (req, res) => {
+  const backup = require('../lib/backup');
+  const { storageReady } = require('../lib/storage');
+  const runs = await backup.listRuns(50);
+  let nas;
+  try {
+    const objects = await storage.list(
+      [require('../lib/storage').NAS_ROOT, backup.BACKUP_PREFIX].join('\\'));
+    nas = { configured: storageReady(), prefix: backup.BACKUP_PREFIX,
+            objects: objects.filter((o) => !o.directory) };
+  } catch (e) {
+    nas = { configured: storageReady(), prefix: backup.BACKUP_PREFIX,
+            objects: [], error: e.message };
+  }
+  res.json({ runs, nas });
+}));
+
 // ── GET/POST /api/admin/byte-cache ──────────────────────────────────────────
 // Read the warm copy's state, or throw it away.
 //

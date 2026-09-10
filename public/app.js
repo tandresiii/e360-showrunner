@@ -272,10 +272,14 @@ async function renderView(view, arg) {
     var myKeys = await api.listApiKeys().catch(function () { return []; });
     /* 36 — the NAS card renders the PROBE, not a hardcoded green */
     var health = await api.health().catch(function () { return null; });
+    /* the Backups card — admin-only, and asked for rather than assumed: the
+       ledger is an admin route, so everyone else's Settings never even asks */
+    var backups = CURRENT_USER.role === 'admin'
+      ? await api.listBackups().catch(function () { return null; }) : null;
     s.innerHTML = viewSettings({ fin: fov.stats, pur: pov.stats, jobs: fov.jobs,
                                  notifyPrefs: np && np.prefs, mail: ms,
                                  archivedCount: arch.length, keys: myKeys,
-                                 health: health });
+                                 health: health, backups: backups });
     crumb([{ t: 'Settings' }]);
     applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark');
   }
@@ -3559,6 +3563,23 @@ async function notifPrefAct(spec) {
       : 'Batched into your digest');
   return render('settings');
 }
+/* Back up now — the manual half of the nightly promise. The server runs the
+   whole verified pipeline (pg_dump → NAS → read-back → ledger) and answers
+   with the LEDGER ROW whatever the verdict, so the toast tells the truth the
+   row tells: a landed size, or the failure verbatim. */
+async function backupNowAct() {
+  toast('Backing up…', 'pg_dump → NAS → read-back verification');
+  var r;
+  try { r = await api.runBackup(); }
+  catch (e) { toast('Backup refused', String(e && e.message || e), 'err'); return; }
+  if (r && r.status === 'ok') {
+    toast('Backup landed and verified', fmtBytes(r.bytes) + ' → ' + String(r.path || '').split('\\').pop());
+  } else {
+    toast('Backup FAILED', String((r && r.error) || 'no ledger row came back'), 'err');
+  }
+  return render('settings');
+}
+
 async function runSweepAct() {
   var r;
   try { r = await api.sweep(); }
@@ -6735,6 +6756,7 @@ var ACTIONS = {
   notifPref:     function (t, id, k) { return notifPrefAct(k); },
   openOutbox:    function () { return render('outbox'); },
   runSweep:      function () { return runSweepAct(); },
+  backupNow:     function () { return backupNowAct(); },
   /* people admin — the Team view's controls (admin-only, server-enforced) */
   userAdd:              function () { return openAddPerson(); },
   userAddCommit:        function () { return commitAddPerson(); },
