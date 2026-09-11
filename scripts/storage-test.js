@@ -132,6 +132,7 @@ function makeDavServer({ root, base = '/showrunner', user, pass: password, tls: 
     stallMs: 0,              // hold the response open (timeout path)
     failMkcol: false,        // refuse MKCOL with 409 (no permission to create)
     dsmMkcol500: false,      // DSM dialect: 500 (not 405) for MKCOL on an existing collection (live, 9/11)
+    dsmPut500: false,        // DSM dialect: 500 (not 409) for PUT into a missing collection (live, 9/11, act three)
     outOfSpace: false        // answer 507 to PUT (share full)
   };
 
@@ -220,7 +221,7 @@ function makeDavServer({ root, base = '/showrunner', user, pass: password, tls: 
           // RFC 4918 §9.7.1 — a PUT to a path whose collection does not exist
           // is 409, which is what makes the driver's "PUT, then MKCOL, then
           // PUT again" retry the right shape.
-          if (!fs.existsSync(parent)) return send(409, 'no collection');
+          if (!fs.existsSync(parent)) return send(state.dsmPut500 ? 500 : 409, 'no collection');
           const existed = fs.existsSync(t.disk);
           await fsp.writeFile(t.disk, body);
           return send(existed ? 204 : 201, '');
@@ -491,6 +492,25 @@ async function call(method, p, { token, body, raw, headers = {} } = {}) {
      dsmRefused && /MKCOL|refused|409/.test(String(dsmRefused.message)), String(dsmRefused && dsmRefused.message));
   dav.state.failMkcol = false;
   dav.state.dsmMkcol500 = false;
+
+  // ── the PUT edition (live, 9/11, the rugby bind's third act): PUT into a
+  // missing collection answered 500, not 409, so create-and-retry never fired
+  // and the raw 500 reached the person binding. The driver now asks whether
+  // the PARENT exists before believing any PUT failure.
+  dav.state.dsmPut500 = true;
+  const putDsm2 = await storage.put(P('P9-deep', 'S9-put500', 'spec', 'w.txt'), Buffer.from('dsm-put'));
+  ok('DSM DIALECT, PUT EDITION: 500-into-missing-collection still creates and lands the file',
+     putDsm2.ok === true &&
+     fs.readFileSync(path.join(davRoot, 'P9-deep', 'S9-put500', 'spec', 'w.txt'), 'utf8') === 'dsm-put', putDsm2);
+  // Discrimination: a 500 with the parent PRESENT is a real error and throws.
+  dav.state.outOfSpace = true;
+  let putReal500 = null;
+  try { await storage.put(P('P9-deep', 'S9-put500', 'spec', 'w2.txt'), Buffer.from('x')); }
+  catch (e) { putReal500 = e; }
+  ok('...while a 5xx with the parent PRESENT still throws (existence is forgiven, failure is not)',
+     putReal500 && /507|PUT/.test(String(putReal500.message)), String(putReal500 && putReal500.message));
+  dav.state.outOfSpace = false;
+  dav.state.dsmPut500 = false;
 
   // ══════════════════════════════════════════════════════════════════════════
   section('4. PUT / GET / stream / exists / stat');
