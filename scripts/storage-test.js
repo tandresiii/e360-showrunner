@@ -131,6 +131,7 @@ function makeDavServer({ root, base = '/showrunner', user, pass: password, tls: 
     rejectAuth: false,       // answer 401 to everything (bad credentials)
     stallMs: 0,              // hold the response open (timeout path)
     failMkcol: false,        // refuse MKCOL with 409 (no permission to create)
+    dsmMkcol500: false,      // DSM dialect: 500 (not 405) for MKCOL on an existing collection (live, 9/11)
     outOfSpace: false        // answer 507 to PUT (share full)
   };
 
@@ -208,7 +209,7 @@ function makeDavServer({ root, base = '/showrunner', user, pass: password, tls: 
         case 'MKCOL': {
           await drain(req);
           if (state.failMkcol) return send(409, 'refused');
-          if (fs.existsSync(t.disk)) return send(405, 'exists');
+          if (fs.existsSync(t.disk)) return send(state.dsmMkcol500 ? 500 : 405, 'exists');
           if (!fs.existsSync(parent)) return send(409, 'parent missing');
           await fsp.mkdir(t.disk);
           return send(201, '');
@@ -457,6 +458,29 @@ async function call(method, p, { token, body, raw, headers = {} } = {}) {
      dav.state.requests.map((r) => r.method).join(','));
   const mk = await storage.mkdirs(P('P9-deep', 'S9-other', 'photo', 'x.jpg'));
   ok('mkdirs() creates only what is missing', mk.ok && mk.created.join(',') === 'S9-other,photo', mk);
+
+  // ── the DSM dialect (live, 9/11): binding the rugby show, the real NAS
+  // answered 500 — not 405 — to MKCOL on a folder that already existed, while
+  // PUTs worked fine (the 08:00 backup had landed). The driver now asks
+  // PROPFIND whether the path exists before believing any MKCOL error.
+  dav.state.dsmMkcol500 = true;
+  const mkDsm = await storage.mkdirs(P('P9-deep', 'S9-nest', 'spec', 'y.jpg'));
+  ok('DSM DIALECT: MKCOL-on-existing answering 500 is still success (PROPFIND says it is there)',
+     mkDsm.ok === true && mkDsm.created.length === 0, mkDsm);
+  const putDsm = await storage.put(P('P9-deep', 'S9-dsm', 'spec', 'z.txt'), Buffer.from('dsm'));
+  ok('...and a deep PUT that creates NEW folders under the dialect still succeeds',
+     putDsm.ok === true &&
+     fs.readFileSync(path.join(davRoot, 'P9-deep', 'S9-dsm', 'spec', 'z.txt'), 'utf8') === 'dsm', putDsm);
+  // Discrimination: a genuinely un-creatable path must still FAIL under the
+  // dialect — the PROPFIND fallback forgives only folders that exist.
+  dav.state.failMkcol = true;
+  let dsmRefused = null;
+  try { await storage.mkdirs(P('P9-nope', 'S9-x', 'spec', 'q.txt')); }
+  catch (e) { dsmRefused = e; }
+  ok('...while a REAL refusal still throws (the fallback forgives existence, not failure)',
+     dsmRefused && /MKCOL|refused|409/.test(String(dsmRefused.message)), String(dsmRefused && dsmRefused.message));
+  dav.state.failMkcol = false;
+  dav.state.dsmMkcol500 = false;
 
   // ══════════════════════════════════════════════════════════════════════════
   section('4. PUT / GET / stream / exists / stat');
