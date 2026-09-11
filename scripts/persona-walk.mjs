@@ -3169,6 +3169,12 @@ async function main() {
   // go red, not just a scan.
   reach('Download / print the banked spec render',
     { seam: ['specRenderForFile', 'getSpecRender'], action: ['specDownloadRender', 'specPrintRender'] });
+  // 9/11 follow-up: the FILE DETAILS panel's own Print/Download speak the
+  // SHEET when a render is staged — the smart download is reachable, and
+  // printFile()'s render branch exists in source (the two-print-buttons trap).
+  reach('Panel download hands the render for a bound spec', { action: 'downloadFileSmart' });
+  ok('printFile() prints the staged render first — the panel print can never mean the card while a sheet is on stage',
+     /function printFile\(\)[\s\S]{0,400}VIEWER\.specRender/.test(APP_JS), 'app.js printFile');
   ok('the viewer stages the render above the record card — and keeps the honest fallback',
      /drawSpecRender\(show, f, sheet\)/.test(SRC['views-global.js'])
      && /id="vSpecR"/.test(SRC['views-global.js'])

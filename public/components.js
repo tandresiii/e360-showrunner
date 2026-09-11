@@ -1123,17 +1123,21 @@ function specRenderEmbedHTML(r, opts) {
   }
   if (!body) return null;
   var acts = [];
+  /* 9/11, Tom, holding a downloaded field diagram he expected to be the
+     sheet: the bundle's only IMAGE is the top-down diagram — the FULL sheet
+     travels as a live page (pageHtml). So the page path leads (Print → Save
+     as PDF is how the sheet reaches an email), and the image buttons say
+     what they actually hand over. */
+  if (r.html) {
+    acts.push('<button class="btn sm primary" ' + act('specPrintRender', opts.showId, key) + '>' +
+      icon('print') + 'Sheet → Print / Save as PDF</button>');
+  }
   if (r.png) {
     acts.push('<button class="btn sm" ' + act('specDownloadRender', opts.showId, key) + '>' +
-      icon('download') + 'Download image</button>');
+      icon('download') + 'Field diagram (PNG)</button>');
   } else if (r.svg) {
-    /* only the SVG exists — hand that over instead, and say which it is */
     acts.push('<button class="btn sm" ' + act('specDownloadRender', opts.showId, key) + '>' +
-      icon('download') + 'Download SVG</button>');
-  }
-  if (r.html) {
-    acts.push('<button class="btn sm" ' + act('specPrintRender', opts.showId, key) + '>' +
-      icon('print') + 'Print / PDF</button>');
+      icon('download') + 'Field diagram (SVG)</button>');
   }
   return '<div class="specr">' + body +
     '<div class="specr-acts">' + acts.join('') +

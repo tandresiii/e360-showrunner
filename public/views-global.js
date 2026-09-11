@@ -1164,6 +1164,7 @@ function drawViewer(show) {
   if (!files.length) return;
   var i = viewerIndex(show), f = files[i];
   VIEWER.fileId = f.id;
+  VIEWER.specRender = null;   /* re-set by drawSpecRender iff THIS file stages one */
   /* EVERY navigation path lands here — openViewer -> render, vSet from the
      strip, vGo from the arrows and the keyboard. So this is the one place the
      previous file's object URL can be released, and one flip cannot leak. */
@@ -1264,7 +1265,7 @@ function drawViewer(show) {
       ? '<button class="btn" ' + act('uploadMissingBytes', f.id) + '>' + icon('upload') +
         'Upload the missing document</button>'
       : '') +
-    '<button class="btn" ' + act('downloadFile', f.id) + '>' + icon('download') + 'Download</button>' +
+    '<button class="btn" ' + act('downloadFileSmart', f.id) + '>' + icon('download') + 'Download</button>' +
     /* THE DELETE, where a person is already looking at the thing they want
        gone. The viewer is the screen that TOLD Brendon the bytes were missing,
        and until now it was also the screen with no way to act on that. Offered
@@ -1481,7 +1482,17 @@ async function drawSpecRender(show, f, sheet) {
   host = $('#vSpecR');
   if (!host) return;
   var embed = r ? specRenderEmbedHTML(r, { showId: show.id }) : null;
-  if (embed) { host.innerHTML = embed; return; }
+  if (embed) {
+    host.innerHTML = embed;
+    /* 9/11, Tom: the FILE DETAILS panel's Print/Download spoke raw-file (the
+       card, the .e360 json) while the buttons under the render spoke sheet.
+       For a bound spec with a staged render, the panel means the SHEET too —
+       printFile()/downloadFileSmart() read this. Cleared on every file
+       switch (drawViewer), so it can never describe the wrong file. */
+    VIEWER.specRender = { fileId: f.id, showId: show.id, key: r.node + ':' + r.rev,
+                          hasHtml: !!r.html, hasPng: !!r.png, hasSvg: !!r.svg };
+    return;
+  }
   /* no banked bundle answers for this row (a legacy or hand bind): the stage
      goes back to the honest card, with the reason said out loud — and the
      record mount below is cleared so the card is not printed twice. The

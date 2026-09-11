@@ -1588,9 +1588,44 @@ async function vGo(d) {
   drawViewer(show);
 }
 async function printFile() {
+  /* A bound spec with a staged render prints THE SHEET — from every button.
+     9/11: two print buttons on one screen, and the prominent one printed the
+     metadata card. Never again: when the render is on stage, print means it. */
+  var sr = VIEWER.specRender;
+  if (sr && sr.fileId === VIEWER.fileId) {
+    if (sr.hasHtml) return specPrintRenderAct(sr.showId, sr.key);
+    var r2 = null;
+    try { r2 = await api.getSpecRender(sr.showId, sr.key.split(':')[0], parseInt(sr.key.split(':')[1], 10)); }
+    catch (_) { r2 = null; }
+    if (r2 && (r2.png || r2.svg)) {
+      $('#printArea').innerHTML = r2.png
+        ? '<img src="' + esc(r2.png) + '" style="max-width:100%">'
+        : r2.svg;
+      window.print();
+      return;
+    }
+  }
   var show = await api.getShow(VIEWER.showId);
   var f = show.files.filter(function (x) { return x.id === VIEWER.fileId; })[0] || show.files[0];
   if (f) printSheet(show, f, show.gear);
+}
+
+/* The FILE DETAILS panel's Download: the rendered image when this file is a
+   bound spec with a staged render, the original bytes otherwise. The files
+   list's "Download original" keeps its own action and its promise. */
+function downloadFileSmart(fileId) {
+  var sr = VIEWER.specRender;
+  /* For a bound spec, "Download" means THE SHEET — and the sheet travels as
+     a page, so the honest route to a file-in-hand is the print dialog's Save
+     as PDF. The field diagram stays available under its own true name. */
+  if (sr && sr.fileId === Number(fileId) && sr.hasHtml) {
+    toast('The sheet prints to PDF', 'Choose “Save as PDF” in the dialog — that file is the full sheet, ready to email.');
+    return specPrintRenderAct(sr.showId, sr.key);
+  }
+  if (sr && sr.fileId === Number(fileId) && (sr.hasPng || sr.hasSvg)) {
+    return specDownloadRenderAct(sr.showId, sr.key);
+  }
+  return downloadFile(fileId);
 }
 
 /* ---- misc modeled actions (toast-only — scope discipline) ------------------ */
@@ -7342,6 +7377,7 @@ var ACTIONS = {
   commitAddFile: function (t, id) { return commitAddFile(id); },
   commitUpload:  function () { return commitUpload(); },
   downloadFile:  function (t, id) { return downloadFile(id); },
+  downloadFileSmart: function (t, id) { return downloadFileSmart(id); },
   uploadMissingBytes: function (t, id) { return uploadMissingBytesAct(id); },
   deleteFile:    function (t, id) { return deleteFileAct(id); },
   vOpenTab:      function (t, id) { return vOpenTab(id); },
