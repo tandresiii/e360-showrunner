@@ -178,6 +178,10 @@ app.get('/api/health', async (req, res) => {
     // reach the app can read this.
     const si = storageInfo();
     res.json({ ok: r.rows[0].ok === 1, app: 'e360-showrunner', version: APP_VERSION,
+               // The commit this process was BUILT from (Railway injects it).
+               // 9/11: a lib-only fix had nothing servable to verify against,
+               // and "is my fix actually deployed" was unanswerable. Never again.
+               build: process.env.RAILWAY_GIT_COMMIT_SHA || null,
                storage: storage.name, nasRoot: NAS_ROOT,
                storageReady: si.ready, storageTarget: si.target,
                storageVia: si.via, storageTls: si.tls || null,
