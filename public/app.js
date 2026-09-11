@@ -638,47 +638,12 @@ async function specViewRevAct(showId, key) {
    into the sandboxed render frame's harness so window.print() runs INSIDE
    the frame — the only place the pageHtml prints complete. Both work in demo
    too: the demo bundle is a locally-generated SVG and downloads as itself. */
-function specRenderFileName(base, rev, extn) {
-  var clean = String(base || 'spec').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
-  /* a bound file is usually already named "…v2" — do not stutter "-v2-v2" */
-  clean = clean.replace(/[\s-]*v\d+$/i, '');
-  return (clean || 'spec') + '-v' + rev + extn;
-}
-function pngDataUrlToBlob(dataUrl) {
-  var b64 = String(dataUrl).split(',')[1] || '';
-  var bin = atob(b64);
-  var bytes = new Uint8Array(bin.length);
-  for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Blob([bytes], { type: 'image/png' });
-}
-function triggerBlobDownload(blob, name) {
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement('a');
-  a.href = url; a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  /* revoke on a tick — revoking synchronously races the download in Safari */
-  setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (_) {} }, 2000);
-}
-async function specDownloadRenderAct(showId, key) {
-  var parts = String(key || '').split(':');
-  var node = parts[0], rev = parseInt(parts[1], 10);
-  var r;
-  try { r = await api.getSpecRender(showId, node, rev); }
-  catch (e) { toast('Could not fetch the banked render', String((e && e.message) || e), 'err'); return; }
-  var blob, extn, label;
-  if (r && r.png) { blob = pngDataUrlToBlob(r.png); extn = '.png'; label = 'PNG'; }
-  else if (r && r.svg) { blob = new Blob([r.svg], { type: 'image/svg+xml' }); extn = '.svg'; label = 'SVG'; }
-  else { toast('No image banked for this bind', 'Only the page render exists — use Print / PDF.', 'err'); return; }
-  /* name it after the bound file when the record knows it; the node otherwise */
-  var base = CHAIN_LABEL[node] ? CHAIN_LABEL[node].replace(/^\.\w+\s*/, '') : node;
-  if (r.fileId) {
-    try { var f = await api.getFile(r.fileId); if (f && f.name) base = f.name; } catch (_) {}
-  }
-  var name = specRenderFileName(base, rev, extn);
-  triggerBlobDownload(blob, name);
-  toast('Downloading', name + ' · ' + label + (r.demo ? ' — demo render, generated locally' : ''));
-}
+/* 9/11, Tom: the field-diagram downloads are GONE ("i cant have people
+   downloading unsanctioned diagrams"). The top-down SVG/PNG in the bundle
+   is an internal drawing, not a client artifact. The ONLY thing a bound
+   spec hands out is the full sheet, via the print dialog's Save as PDF.
+   A sanctioned one-click sheet image, if ever wanted, gets BUILT (a full-
+   page capture banked at bind), not faked from the diagram. */
 function specPrintRenderAct(showId, key) {
   var parts = String(key || '').split(':');
   var frames = document.querySelectorAll('#' + specRenderFrameId(parts[0], parts[1]));
@@ -1621,9 +1586,6 @@ function downloadFileSmart(fileId) {
   if (sr && sr.fileId === Number(fileId) && sr.hasHtml) {
     toast('The sheet prints to PDF', 'Choose “Save as PDF” in the dialog — that file is the full sheet, ready to email.');
     return specPrintRenderAct(sr.showId, sr.key);
-  }
-  if (sr && sr.fileId === Number(fileId) && (sr.hasPng || sr.hasSvg)) {
-    return specDownloadRenderAct(sr.showId, sr.key);
   }
   return downloadFile(fileId);
 }
@@ -7388,7 +7350,6 @@ var ACTIONS = {
   specHistory:   function (t, id) { return specHistoryAct(id); },
   specViewRev:   function (t, id, k) { return specViewRevAct(id, k); },
   /* 9/11 — the banked render's export affordances (viewer + chain View) */
-  specDownloadRender: function (t, id, k) { return specDownloadRenderAct(id, k); },
   specPrintRender:    function (t, id, k) { return specPrintRenderAct(id, k); },
   /* 9/11 — the NAS folder backfill (Settings · E360 NAS card) */
   storageFolderSweep: function () { return storageFolderSweepAct(); },

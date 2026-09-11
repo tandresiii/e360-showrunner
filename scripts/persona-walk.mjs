@@ -3168,7 +3168,7 @@ async function main() {
   // vm against this walk's live server — break the bundle lookup and these
   // go red, not just a scan.
   reach('Download / print the banked spec render',
-    { seam: ['specRenderForFile', 'getSpecRender'], action: ['specDownloadRender', 'specPrintRender'] });
+    { seam: ['specRenderForFile', 'getSpecRender'], action: ['specPrintRender'] });
   // 9/11 follow-up: the FILE DETAILS panel's own Print/Download speak the
   // SHEET when a render is staged — the smart download is reachable, and
   // printFile()'s render branch exists in source (the two-print-buttons trap).
@@ -3213,24 +3213,25 @@ async function main() {
   const fEmHtml = comp.specRenderEmbedHTML(
     { node: 'content', rev: 2, html: '<div>page</div>', png: 'data:image/png;base64,AAAA' },
     { showId: SHOW });
-  // 9/11 follow-up: Tom downloaded "the image" and got a field diagram he
-  // took for a broken render. The sheet path LEADS and the image buttons
-  // carry their true name.
-  ok('THE EMBED · pageHtml wins the stage: sandboxed iframe + print harness, sheet path leading',
+  // 9/11, Tom, final ruling: "i cant have people downloading shitty
+  // unsanctioned diagrams." The bundle's only image is the top-down field
+  // diagram — an internal drawing. The SHEET (via the print dialog's Save as
+  // PDF) is the ONE artifact a bound spec offers; no image download exists.
+  ok('THE EMBED · pageHtml wins the stage: sandboxed iframe + print harness, and the sheet is the ONLY artifact offered',
      /sandbox="allow-scripts allow-modals"/.test(fEmHtml) && /sr-print/.test(fEmHtml)
-     && /Field diagram \(PNG\)/.test(fEmHtml) && /Sheet → Print \/ Save as PDF/.test(fEmHtml)
-     && fEmHtml.indexOf('Sheet →') < fEmHtml.indexOf('Field diagram'));
+     && /Sheet → Print \/ Save as PDF/.test(fEmHtml)
+     && !/Field diagram/.test(fEmHtml) && !/specDownloadRender/.test(fEmHtml));
   const fEmPng = comp.specRenderEmbedHTML({ node: 'content', rev: 1, png: 'data:image/png;base64,AAAA' },
     { showId: SHOW });
-  ok('…the PNG stands in when pageHtml is absent — image staged, sheet path honestly absent',
-     /specr-img/.test(fEmPng) && /Field diagram \(PNG\)/.test(fEmPng) && !/Sheet → Print/.test(fEmPng));
-  ok('…an SVG-only bundle (the demo twin\'s shape) downloads AS the SVG, under its true name',
-     /Field diagram \(SVG\)/.test(comp.specRenderEmbedHTML({ node: 'content', rev: 1, svg: '<svg/>' }, { showId: SHOW })));
+  ok('…the PNG stands in ON STAGE when pageHtml is absent — viewable, never downloadable',
+     /specr-img/.test(fEmPng) && !/specDownloadRender/.test(fEmPng) && !/Sheet → Print/.test(fEmPng));
+  ok('…an SVG-only bundle stages the drawing and offers no download either',
+     (function (h) { return /specr-frame/.test(h) && !/specDownloadRender/.test(h); })(
+       comp.specRenderEmbedHTML({ node: 'content', rev: 1, svg: '<svg/>' }, { showId: SHOW })));
   ok('…and a bundle with nothing drawable is NULL — the surfaces say so instead of drawing',
      comp.specRenderEmbedHTML({ node: 'content', rev: 1 }, { showId: SHOW }) === null);
-  ok('the download action hands over real bytes under a sensible name',
-     /function specRenderFileName/.test(APP_JS) && /image\/svg\+xml/.test(APP_JS)
-     && /pngDataUrlToBlob/.test(APP_JS));
+  ok('the diagram-download machinery is GONE from the source, not just unmounted',
+     !/specDownloadRenderAct/.test(APP_JS) && !/specRenderFileName/.test(APP_JS));
 
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);

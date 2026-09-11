@@ -1132,13 +1132,10 @@ function specRenderEmbedHTML(r, opts) {
     acts.push('<button class="btn sm primary" ' + act('specPrintRender', opts.showId, key) + '>' +
       icon('print') + 'Sheet → Print / Save as PDF</button>');
   }
-  if (r.png) {
-    acts.push('<button class="btn sm" ' + act('specDownloadRender', opts.showId, key) + '>' +
-      icon('download') + 'Field diagram (PNG)</button>');
-  } else if (r.svg) {
-    acts.push('<button class="btn sm" ' + act('specDownloadRender', opts.showId, key) + '>' +
-      icon('download') + 'Field diagram (SVG)</button>');
-  }
+  /* No image downloads. 9/11, Tom: "i cant have people downloading shitty
+     unsanctioned diagrams" — the bundle's only image is the top-down field
+     diagram, an internal drawing. The sheet, via Save as PDF above, is the
+     one artifact that leaves the app. */
   return '<div class="specr">' + body +
     '<div class="specr-acts">' + acts.join('') +
     '<span class="cs" style="font-size:11px">v' + esc(r.rev) +
