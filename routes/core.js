@@ -40,6 +40,10 @@ const {
 const lifecycle = require('../lib/lifecycle');
 const reports = require('../lib/reports');
 const notify = require('../lib/notify');
+// 9/11 (Tom). Minting a project or show also mints its NAS folder — eagerly,
+// AFTER the commit, fire-and-forget: a dead NAS may not slow or fail the API
+// call, only record the miss. lib/folders.js carries the whole argument.
+const { eagerCreate } = require('../lib/folders');
 const { scopeFromDocs, scopeQuestions } = require('../lib/speccheck');
 // The staffing-app client. The field mapping (M1–M14) lives there, not here,
 // so the dry run and the live push can never drift.
@@ -273,6 +277,8 @@ router.post('/projects', requireRole('pm'), asyncH(async (req, res) => {
       showId: null, actor: req.actor, summary: `opened the folder “${name}” —` });
     return p;
   });
+  // the folder, the minute the project exists — never in the response's path
+  eagerCreate({ project: row, actor: req.actor });
   res.json(await hydrateProject(row, pool, { session: req.session }));
 }));
 
@@ -395,6 +401,8 @@ router.post('/shows', requireRole('pm'), asyncH(async (req, res) => {
       showId: show.id, actor: req.actor, summary: `added the show “${name || show.venue}” —` });
     return { show, instantiated };
   });
+  // the show's NAS folder, the minute the show exists (9/11) — off the hot path
+  eagerCreate({ project, show: result.show, actor: req.actor });
   const out = await hydrateShow(result.show, pool, { withSteps: true });
   out.instantiated_steps = result.instantiated;
   res.json(out);
@@ -641,6 +649,9 @@ router.post('/events', requireRole('pm'), asyncH(async (req, res) => {
     });
     return { proj, job, show, instantiated, notified };
   });
+  // both folders the composite minted (9/11) — after the commit, off the hot path
+  eagerCreate({ project: out.proj, actor: req.actor });
+  eagerCreate({ project: out.proj, show: out.show, actor: req.actor });
 
   const showRec = await hydrateShow(out.show, pool, { withSteps: true });
   showRec.instantiated_steps = out.instantiated;

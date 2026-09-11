@@ -438,6 +438,16 @@ async function call(method, p, { token, body, raw, headers = {} } = {}) {
   ok('buildQuarantinePath still lands under _agent-inbox',
      S.buildQuarantinePath('tom', { kind: 'invoice', name: 'i', ext: 'pdf' }) ===
      P('_agent-inbox', 'tom', 'invoice', 'i.pdf'));
+  // 9/11 — the eager folder create shares ONE path scheme with the uploads:
+  // buildFolderPath is byte-for-byte the directory prefix of buildNasPath.
+  ok('buildFolderPath(project, show) is the literal prefix of that show\'s every nas_path',
+     S.buildNasPath({ id: 1, slug: 'big-ten' }, { id: 1, slug: 'wrigley' },
+                    { kind: 'spec', name: 'a', ext: 'pdf' })
+       .startsWith(S.buildFolderPath({ id: 1, slug: 'big-ten' }, { id: 1, slug: 'wrigley' }) + '\\'));
+  ok('buildFolderPath(project) names the _project area uploads use',
+     S.buildFolderPath({ id: 1, slug: 'big-ten' }) === P('P1-big-ten', '_project')
+     && S.buildNasPath({ id: 1, slug: 'big-ten' }, null, { kind: 'other', name: 'x' })
+          .startsWith(S.buildFolderPath({ id: 1, slug: 'big-ten' }, null) + '\\'));
 
   // ══════════════════════════════════════════════════════════════════════════
   section('3. MKCOL — deep, from nothing');

@@ -148,6 +148,15 @@ router.post('/proposals/:id/confirm', asyncH(async (req, res) => {
   // to the rows we just made rather than anchoring on a null id.
   const madeShow = (result.created.shows || [])[0] || null;
   const madeProject = (result.created.projects || [])[0] || null;
+  // 9/11 — a confirmed project proposal mints real entities, so it mints their
+  // NAS folders too, exactly like POST /projects and POST /shows. AFTER the
+  // commit (the eager create must never roll back a decision a human made) and
+  // fire-and-forget (a dead NAS must not slow the confirm).
+  if (madeProject) {
+    const { eagerCreate } = require('../lib/folders');
+    eagerCreate({ projectId: madeProject, actor: req.session.username });
+    if (madeShow) eagerCreate({ projectId: madeProject, showId: madeShow, actor: req.session.username });
+  }
   const anchorShow = proposal.show_id || madeShow;
   const anchorProject = proposal.project_id || madeProject;
   const notified = (anchorShow || anchorProject)

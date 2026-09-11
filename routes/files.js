@@ -138,6 +138,18 @@ router.post('/admin/storage-probe', requireRole('admin'), asyncH(async (req, res
   res.json(out);
 }));
 
+// ── 9/11: THE FOLDER BACKFILL ───────────────────────────────────────────────
+// POST /api/admin/storage-folders/sweep — one attempt per non-archived
+// project/show still missing its NAS folder skeleton, reported PER PATH. This
+// is what heals a tree that predates the eager create (P2/P3/P4, including
+// the rugby show) — IF the NAS cooperates; a per-path failure is a reported
+// row, never a thrown sweep, and 200 whatever the verdict (the probe's rule:
+// the body IS the instrument). Also runs, gated and non-blocking, on boot.
+router.post('/admin/storage-folders/sweep', requireRole('admin'), asyncH(async (req, res) => {
+  const { sweepStorageFolders } = require('../lib/folders');
+  res.json(await sweepStorageFolders({ actor: req.actor }));
+}));
+
 // ════════════════════════════════════════════════════════════════════════════
 // ADMIN: THE BACKUP — the nightly promise, triggerable and auditable by hand
 // ────────────────────────────────────────────────────────────────────────────
@@ -451,6 +463,17 @@ router.put('/files/:id/content',
     // row is updated, so there is no window in which a reader could take a
     // freshly-validated stale entry. (lib/filecache.js)
     fileCache.invalidatePath(cur.nas_path);
+    // 9/11 — bytes landed, so the entity's folder demonstrably exists now:
+    // this upload IS the retry the warn chip promised, and it clears itself.
+    if (cur.show_id) {
+      await pool.query(
+        `UPDATE shows SET storage_folder_at=NOW(), storage_folder_error=NULL WHERE id=$1`,
+        [cur.show_id]);
+    } else if (cur.project_id) {
+      await pool.query(
+        `UPDATE projects SET storage_folder_at=NOW(), storage_folder_error=NULL WHERE id=$1`,
+        [cur.project_id]);
+    }
 
     const w = intOrNull(pick(req.query, 'w')) || intOrNull(pick(req.query, 'width'));
     const h = intOrNull(pick(req.query, 'h')) || intOrNull(pick(req.query, 'height'));
@@ -817,6 +840,11 @@ router.post('/shows/:id/spec-bind', requireRole('pm'), asyncH(async (req, res) =
     // a v2 bind would keep serving v1 out of the warm copy.
     await storage.put(nasPath, bytes);
     fileCache.invalidatePath(nasPath);
+    // 9/11 — a bind writes real bytes, so the show folder demonstrably exists:
+    // stamp it, same clause the upload route uses, riding this transaction.
+    await c.query(
+      `UPDATE shows SET storage_folder_at=NOW(), storage_folder_error=NULL WHERE id=$1`,
+      [showId]);
 
     // 6/7. the chain upsert, identical to PUT /shows/:id/chain/:node.
     const chainBefore = await chainFor(showId, c);

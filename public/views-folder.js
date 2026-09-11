@@ -163,7 +163,10 @@ function viewShow(show, opts) {
       (canEditFolderOf(show) && RECAP_EDIT_ROLES[CURRENT_USER.role]
         ? '<button class="lnk-btn" ' + act('editScope', show.id) + '>' + inlineIcon('pencil') +
           (hasScope(show) ? 'Edit scope' : 'Set scope') + '</button>' : '') +
-      confirmChip(show) + '</div>' +
+      confirmChip(show) +
+      /* 9/11 — the eager folder create failed and said so; honest until an
+         upload or the backfill sweep heals it */
+      storageFolderChip(show) + '</div>' +
     '<div class="ef-sub"><span>' + icon('users') + ' <b>' + esc(show.job ? show.job.client : p.client) + '</b></span>' +
     '<span>' + icon('pin') + ' <b>' + esc(show.venue) + '</b></span>' +
     '<span>Lead <b>' + esc(userName(show.owner)) + '</b></span>' +

@@ -1578,6 +1578,44 @@ var api = (function () {
       var q = rev == null ? '' : '?rev=' + encodeURIComponent(rev);
       return SR.get('/api/shows/' + Number(showId) + '/spec-render/' + encodeURIComponent(node) + q);
     },
+    /* ---- 9/11 (Tom: "if this doesnt bind the spec sheet as i see it… its of
+       no use to me"). THE VIEWER'S BUNDLE LOOKUP: the banked render FOR THIS
+       ROW, not merely for its node. The latest live render answers when it is
+       this row's bind; an older or unbound row is found through spec-history
+       (fileId -> rev) and fetched at that rev, retired-or-not. Resolves NULL
+       when no banked bundle answers for the row — a legacy or manual bind —
+       and the viewer then shows the honest card alone. The file's own
+       chain_key names the node; the type map is the fallback for a row whose
+       key was cleared by unbind (T2's rule: the server copy of this map is
+       authoritative — this fallback mirrors it and is corrected by chain_key
+       whenever one exists). */
+    specRenderForFile: function (showId, f) {
+      var node = (f && f.chain_key) ||
+        ({ e360: 'content', nsf: 'cabling', pcfg: 'power' })[f && f.spec_type] || null;
+      if (!node || node === 'pull') return ok(null);
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return ok(null);
+        var rev = (s.chain[node] || {}).rev;
+        return ok(rev ? demoSpecRenderFor(s, node, rev) : null);
+      }
+      var api2 = api;      /* the outer var — assigned long before any click */
+      /* the history path: THIS row's rev, whatever its state — superseded and
+         unbound revs stay openable by rev, which is the whole point of history */
+      var byHistory = function () {
+        return api2.listSpecHistory(showId).then(function (h) {
+          var v = ((h && h.versions) || []).filter(function (x) {
+            return x.fileId === (f && f.id); })[0];
+          if (!v) return null;
+          return api2.getSpecRender(showId, v.node, v.rev).then(
+            function (r2) { return r2 || null; }, function () { return null; });
+        }, function () { return null; });
+      };
+      return api2.getSpecRender(showId, node).then(function (r) {
+        if (r && f && r.fileId === f.id) return r;
+        return byHistory();
+      }, byHistory);   /* a node with nothing live still has a history */
+    },
     outdateSpec: function (showId, node, opts) {
       opts = opts || {};
       if (!API()) {
@@ -4615,6 +4653,17 @@ var api = (function () {
         return ok(sweepLocal(ME));
       }
       return SR.post('/api/admin/sweep', {});
+    },
+    /* 9/11 — the NAS-folder backfill: one attempt per non-archived project/
+       show still missing its folder skeleton, reported per path. The demo
+       answers honestly instead of pretending at a NAS it does not model. */
+    storageFoldersSweep: function () {
+      if (!API()) {
+        if (CURRENT_USER.role !== 'admin') return fail('the folder backfill is an admin act');
+        return ok({ configured: false, demo: true, attempted: 0, ok: 0, failed: 0, results: [],
+                    note: 'demo — the modeled workspace has no NAS to create folders on' });
+      }
+      return SR.post('/api/admin/storage-folders/sweep', {});
     },
 
     /* ================= SPEC BIND (INTEGRATIONS_SPEC §9 · D1/D5) =========

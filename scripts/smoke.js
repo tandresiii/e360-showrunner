@@ -2265,6 +2265,200 @@ const DEL = (p, o) => call('DELETE', p, o);
      'content' in ((await GET(`/api/shows/${S}/spec-check`, { token: A })).body.nodes || {}));
 
   // ══════════════════════════════════════════════════════════════════════════
+  // 13c. EAGER FOLDERS (Tom, 9/11: "the folder should get created the minute
+  //      a show is created")
+  // ─────────────────────────────────────────────────────────────────────────
+  // Three claims, each with the mutation that must turn it red:
+  //   · minting a project/show mints its NAS folder — the exact path prefix
+  //     every upload computes, through the same driver call
+  //   · THE TOLERANCE GATE: storage configured and DOWN, and the create still
+  //     answers 200 with the outcome recorded (make the eager create awaited/
+  //     fatal in routes/core.js → the child's POST /projects 500s → red)
+  //   · the backfill sweep floors (admin) and reports PER PATH, honestly
+  // ══════════════════════════════════════════════════════════════════════════
+  section('13c. eager folders — created the minute the entity is; tolerant when the NAS is not');
+  {
+    const fsE = require('fs');
+    const pathE = require('path');
+    const SROOT = process.env.STORAGE_ROOT;
+    // the eager create is fire-and-forget BY DESIGN (never in the hot path),
+    // so the record lands a beat after the response — poll for it, briefly
+    const waitStamp = async (table, id, tries = 60) => {
+      for (let i = 0; i < tries; i++) {
+        const r = await pool.query(
+          `SELECT storage_folder_at, storage_folder_error FROM ${table === 'shows' ? 'shows' : 'projects'} WHERE id=$1`, [id]);
+        if (r.rows[0] && (r.rows[0].storage_folder_at || r.rows[0].storage_folder_error)) return r.rows[0];
+        await new Promise((res) => setTimeout(res, 50));
+      }
+      return {};
+    };
+
+    const efProj = await POST('/api/projects',
+      { name: TAG + ' Eager FC', client: 'EF', type: 'led' }, { token: A });
+    ok('13c: POST /api/projects answers without waiting on the NAS', efProj.status === 200, efProj.status);
+    const efP = await waitStamp('projects', efProj.body.id);
+    ok('13c: …and the project folder create was recorded (stamped)', !!efP.storage_folder_at, efP);
+    const efPDir = pathE.join(SROOT, `P${efProj.body.id}-${efProj.body.slug}`, '_project');
+    ok('13c: the _project skeleton really exists on disk', fsE.existsSync(efPDir), efPDir);
+
+    const efShow = await POST('/api/shows',
+      { project_id: efProj.body.id, name: TAG + ' EF Show', venue: 'EF Arena' }, { token: A });
+    ok('13c: POST /api/shows answers without waiting on the NAS', efShow.status === 200, efShow.status);
+    const efS = await waitStamp('shows', efShow.body.id);
+    ok('13c: …and the show folder create was recorded', !!efS.storage_folder_at, efS);
+    const efSDir = pathE.join(SROOT, `P${efProj.body.id}-${efProj.body.slug}`,
+      `S${efShow.body.id}-${efShow.body.slug}`);
+    ok('13c: the show subdir exists — the exact upload-path prefix', fsE.existsSync(efSDir), efSDir);
+
+    // ONE path scheme: the folder path is byte-for-byte the prefix of every
+    // nas_path the upload/bind code computes for the same entity
+    const SLib = require('../lib/storage');
+    ok('13c: buildFolderPath is the literal prefix of buildNasPath — no second scheme', (() => {
+      const p = { id: efProj.body.id, slug: efProj.body.slug };
+      const s = { id: efShow.body.id, slug: efShow.body.slug };
+      return SLib.buildNasPath(p, s, { kind: 'spec', name: 'x', ext: 'e360' })
+               .startsWith(SLib.buildFolderPath(p, s) + '\\')
+          && SLib.buildNasPath(p, null, { kind: 'other', name: 'x' })
+               .startsWith(SLib.buildFolderPath(p, null) + '\\');
+    })());
+
+    const efEv = await POST('/api/events', { name: TAG + ' EF Event', type: 'led' }, { token: A });
+    ok('13c: the New Event composite still answers', efEv.status === 200, efEv.status);
+    const efEvP = await waitStamp('projects', efEv.body.project.id);
+    const efEvS = await waitStamp('shows', efEv.body.show.id);
+    ok('13c: …and minted BOTH folders (project + show)',
+       !!efEvP.storage_folder_at && !!efEvS.storage_folder_at, { p: efEvP, s: efEvS });
+
+    const efGet = await GET(`/api/projects/${efProj.body.id}`, { token: PMT });
+    ok('13c: the payload carries the folder record — what the warn chip reads',
+       efGet.status === 200 && !!efGet.body.storage_folder_at
+       && efGet.body.storage_folder_error === null, efGet.body.storage_folder_at);
+
+    // ── the backfill: admin floor, per-path report, real creation ───────────
+    const swPm = await POST('/api/admin/storage-folders/sweep', {}, { token: PMT });
+    ok('13c GATE: the backfill sweep is admin-only', swPm.status === 403, swPm.status);
+    // a legacy row, minted around the routes — exactly what every pre-9/11 row is
+    const legacyP = (await pool.query(
+      `INSERT INTO projects (name, slug, client) VALUES ($1,$2,'EF') RETURNING *`,
+      [TAG + ' EF Legacy', 'ef-legacy-' + TAG])).rows[0];
+    const sw = await POST('/api/admin/storage-folders/sweep', {}, { token: A });
+    ok('13c: the sweep answers 200 with per-path results',
+       sw.status === 200 && sw.body.configured === true && Array.isArray(sw.body.results), sw.body);
+    const swRow = (sw.body.results || []).find((r) => r.kind === 'project' && r.id === legacyP.id);
+    ok('13c: the legacy project is in the report, created, path named',
+       !!swRow && swRow.ok === true && swRow.path.includes(`P${legacyP.id}-${legacyP.slug}`), swRow);
+    ok('13c: …its folder now really exists',
+       fsE.existsSync(pathE.join(SROOT, `P${legacyP.id}-${legacyP.slug}`, '_project')));
+    ok('13c: …and its row is stamped',
+       !!(await pool.query('SELECT storage_folder_at FROM projects WHERE id=$1', [legacyP.id]))
+         .rows[0].storage_folder_at);
+    const sw2 = await POST('/api/admin/storage-folders/sweep', {}, { token: A });
+    ok('13c: a second sweep does not re-attempt what is already stamped',
+       sw2.status === 200 && !(sw2.body.results || []).some((r) => r.kind === 'project' && r.id === legacyP.id),
+       (sw2.body.results || []).length);
+
+    // ── "will retry on next upload" — the upload really does clear the state ─
+    await pool.query(
+      `UPDATE shows SET storage_folder_at=NULL, storage_folder_error='induced for 13c' WHERE id=$1`,
+      [efShow.body.id]);
+    const efFile = await POST('/api/files',
+      { show_id: efShow.body.id, name: 'ef-doc', ext: 'pdf', kind: 'other' }, { token: A });
+    const efUp = await call('PUT', `/api/files/${efFile.body.id}/content`,
+      { token: A, raw: Buffer.from('%PDF-1.4 ef') });
+    const efAfterUp = (await pool.query(
+      'SELECT storage_folder_at, storage_folder_error FROM shows WHERE id=$1', [efShow.body.id])).rows[0];
+    ok('13c: a real upload clears the warn state — the promised retry',
+       efUp.status === 200 && !!efAfterUp.storage_folder_at && efAfterUp.storage_folder_error === null,
+       efAfterUp);
+
+    // ── THE TOLERANCE GATE: storage configured and DOWN ─────────────────────
+    // A child server (lib/storage.js reads its env once at require time) with
+    // the webdav driver aimed at a port nothing answers. Creating entities
+    // must still 200; the misses must be RECORDED; the sweep must report
+    // per-path failures and still 200. This block is the mutation target.
+    const { spawnSync } = require('child_process');
+    const childScript =
+      `(async () => {
+        const srv = require(${JSON.stringify(require('path').join(__dirname, '..', 'server.js').replace(/\\\\/g, '/'))});
+        const server = await srv.boot();
+        const base = 'http://127.0.0.1:' + server.address().port;
+        const login = await fetch(base + '/api/auth/login', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: 'admin', password: 'e360admin' }) });
+        const tok = (await login.json()).token;
+        const H = { 'Content-Type': 'application/json', 'x-auth-token': tok };
+        const pRes = await fetch(base + '/api/projects', { method: 'POST', headers: H,
+          body: JSON.stringify({ name: ${JSON.stringify(TAG + ' EF Down')}, client: 'EF' }) });
+        const p = { status: pRes.status, body: await pRes.json() };
+        const sRes = await fetch(base + '/api/shows', { method: 'POST', headers: H,
+          body: JSON.stringify({ project_id: p.body.id, name: ${JSON.stringify(TAG + ' EF Down Show')} }) });
+        const s = { status: sRes.status, body: await sRes.json() };
+        const pool = require(${JSON.stringify(require('path').join(__dirname, '..', 'lib', 'db.js').replace(/\\\\/g, '/'))}).pool;
+        const wait = async (table, id) => {
+          for (let i = 0; i < 80; i++) {
+            const r = await pool.query(
+              'SELECT storage_folder_at, storage_folder_error FROM ' +
+              (table === 'shows' ? 'shows' : 'projects') + ' WHERE id=$1', [id]);
+            if (r.rows[0] && (r.rows[0].storage_folder_at || r.rows[0].storage_folder_error)) return r.rows[0];
+            await new Promise((res) => setTimeout(res, 50));
+          }
+          return {};
+        };
+        const pOut = await wait('projects', p.body.id);
+        const sOut = await wait('shows', s.body.id);
+        const actN = (await pool.query(
+          "SELECT COUNT(*)::int AS n FROM activity WHERE action='storage.folder_failed' AND project_id=$1",
+          [p.body.id])).rows[0].n;
+        const payload = await (await fetch(base + '/api/projects/' + p.body.id, { headers: H })).json();
+        const swRes = await fetch(base + '/api/admin/storage-folders/sweep', { method: 'POST', headers: H });
+        const sweep = { status: swRes.status, body: await swRes.json() };
+        console.log('EFDOWN ' + JSON.stringify({ p: p.status, s: s.status, pOut, sOut, actN,
+          payloadErr: payload.storage_folder_error || null, sweep }));
+        server.close();
+        process.exit(0);
+      })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });`;
+    const child = spawnSync(process.execPath, ['-e', childScript], {
+      encoding: 'utf8',
+      env: {
+        ...process.env, PORT: '0', SWEEP_ON_BOOT: '0',
+        STORAGE_DRIVER: 'webdav',
+        NAS_WEBDAV_URL: 'http://127.0.0.1:1/dav',   // nothing listens — instant refusal
+        NAS_WEBDAV_USER: 'x', NAS_WEBDAV_PASS: 'x',
+        NAS_WEBDAV_TIMEOUT_MS: '2500'
+      }
+    });
+    const efm = String(child.stdout || '').match(/EFDOWN (.*)/);
+    if (!efm) console.error('  (13c child failed)', String(child.stderr || '').slice(0, 400));
+    const down = efm ? JSON.parse(efm[1]) : {};
+    ok('13c THE TOLERANCE GATE: with the NAS down, POST /projects and /shows still 200',
+       down.p === 200 && down.s === 200, { p: down.p, s: down.s });
+    ok('13c: …the miss is RECORDED on both rows, never thrown',
+       !!(down.pOut && down.pOut.storage_folder_error) && !down.pOut.storage_folder_at
+       && !!(down.sOut && down.sOut.storage_folder_error), { p: down.pOut, s: down.sOut });
+    ok('13c: …with an honest activity line (storage.folder_failed)', down.actN >= 1, down.actN);
+    ok('13c: …and the payload carries the error — the warn chip has its data',
+       !!down.payloadErr, down.payloadErr);
+    ok('13c: the sweep against a dead NAS still 200s and reports failures per path',
+       down.sweep && down.sweep.status === 200 && down.sweep.body.configured === true
+       && down.sweep.body.ok === 0
+       && (down.sweep.body.failed >= 1)
+       && (down.sweep.body.results || []).every((r) => r.ok === false && !!r.error),
+       down.sweep && { ok: down.sweep.body.ok, failed: down.sweep.body.failed,
+                       skipped: down.sweep.body.skipped });
+    ok('13c: …and after ' + 3 + ' consecutive transport misses it stops dialling (bail, honestly labeled)',
+       !down.sweep || down.sweep.body.results.length <= 3 ||
+       down.sweep.body.results.slice(3).every((r) => r.skipped === true),
+       down.sweep && down.sweep.body.results.slice(0, 5));
+
+    // tidy: the section's own entities go, cascades and all
+    for (const pid of [efProj.body.id, efEv.body.project.id, legacyP.id,
+                       down.pOut ? (await pool.query(
+                         'SELECT id FROM projects WHERE name=$1', [TAG + ' EF Down'])).rows[0].id : null]) {
+      if (pid) await DEL(`/api/projects/${pid}`, { token: A });
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   // 14. THE PRE-DEPLOY HARDENING PASS (HARDENING_TODO.md, 2026-08-27)
   // ─────────────────────────────────────────────────────────────────────────
   // One block per fixed item. Each is written to FAIL on the old behaviour, so

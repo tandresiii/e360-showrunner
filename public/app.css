@@ -693,6 +693,20 @@ button.next-item>svg{width:16px; height:16px; flex:none; color:var(--muted)}
 .stale-chip{font-family:var(--font-mono); font-size:9.5px; font-weight:600; color:var(--crit); background:var(--crit-ghost); border:1px solid color-mix(in srgb,var(--crit) 40%,transparent); padding:1px 6px; border-radius:4px; display:inline-flex; align-items:center; gap:4px}
 .stale-chip svg{width:10px;height:10px}
 .fresh-chip{font-family:var(--font-mono); font-size:9.5px; font-weight:600; color:var(--go); background:var(--go-ghost); border:1px solid color-mix(in srgb,var(--go) 35%,transparent); padding:1px 6px; border-radius:4px}
+/* 9/11 — the missing-NAS-folder warning on show/season headers (Fix A) */
+.sfold-chip{font-family:var(--font-mono); font-size:9.5px; font-weight:600; color:var(--warn); background:var(--warn-ghost); border:1px solid color-mix(in srgb,var(--warn) 40%,transparent); padding:1px 6px; border-radius:4px; display:inline-flex; align-items:center; gap:4px}
+.sfold-chip svg{width:10px;height:10px}
+/* 9/11 — the banked spec render, staged (Fix B: viewer + chain View modal) */
+.specr{display:flex; flex-direction:column; gap:8px; width:100%}
+.specr-frame{width:100%; height:min(62vh,560px); border:1px solid var(--border); border-radius:8px; background:#fff}
+.specr-img{max-width:100%; border:1px solid var(--border); border-radius:8px; background:#fff}
+.specr-acts{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+/* on the viewer stage the embed owns the hole: frame flexes, the affordance
+   bar keeps its own strip at the bottom */
+.stage-canvas .specr{height:100%; gap:0}
+.stage-canvas .specr-frame{flex:1; height:auto; min-height:0; border:0; border-radius:0}
+.stage-canvas .specr-img{flex:1; min-height:0; max-height:none; object-fit:contain; border:0; border-radius:0}
+.stage-canvas .specr-acts{padding:8px 12px; border-top:1px solid var(--border); background:var(--surface)}
 .two-tier{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px}
 @media(max-width:760px){ .two-tier{grid-template-columns:1fr} }
 .tier{background:var(--surface); border:1px solid var(--border); border-radius:var(--r); padding:12px 14px}

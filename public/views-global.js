@@ -783,7 +783,16 @@ function viewSettings(ctx) {
         (h.storageLiveness
           ? row('Liveness', '<span style="font-size:11px;color:var(--muted)">' + esc(String(h.storageLiveness).slice(0, 120)) + '</span>') : '') +
         (h.storageEphemeralRisk
-          ? row('Risk', '<span style="color:var(--crit)">ephemeral disk — bytes die with the deploy</span>') : '');
+          ? row('Risk', '<span style="color:var(--crit)">ephemeral disk — bytes die with the deploy</span>') : '') +
+        /* 9/11 — the folder backfill: heals every entity that predates the
+           eager create (or whose create the NAS refused). Admin, like the
+           route; per-path outcomes come back in the toast. */
+        (CURRENT_USER.role === 'admin'
+          ? '<div class="set-row"><span class="k">Folders</span><span class="v">' +
+            '<button class="btn sm ghost" ' + act('storageFolderSweep') +
+            ' title="Create the NAS folder skeleton for every non-archived project and show still missing one — one attempt each, reported per path, never fatal">' +
+            icon('folder') + 'Backfill folders</button></span></div>'
+          : '');
     })()) +
     card('send', 'Staffing scheduler', '<p>Downstream system of record (e360-staffing3). Push-to-scheduler maps a show onto /api/events + child rows.</p>' + row('Base URL', 'SCHEDULER_BASE_URL') + row('Auth', 'service token') + row('Mode', 'dry-run default')) +
     card('layers', 'Flex + spec tools', '<p>Spec Sheet Generator, NovaSpec, PowerSpec + Flex. Bound artifacts derive .e360 → .nsf → .pcfg → pull sheet.</p>' + row('Chain', 'e360 · nsf · pcfg') + row('Flex', 'event folders + pull sheets') + row('Stale-flag', 'on re-bind')) +
@@ -1177,28 +1186,40 @@ function drawViewer(show) {
      exception — photoSheet() puts #vPrev inside its own gallery frame, so it
      must not be given a second one. */
   var live = !!prevKind;
+  /* 9/11 (Fix B) — a bound spec's BANKED RENDER takes the stage: the sheet as
+     the tool drew it, above the honest metadata card, exactly what the chain
+     View shows. Live mode only (the demo's sheetHTML already draws its
+     modeled sheet) and only for the three spec classes; the async lookup
+     (api.specRenderForFile) resolves null for a legacy bind and the stage
+     falls back to the card, saying so. */
+  var specNode = (!live && !isPhoto && typeof SR !== 'undefined' && SR.isApi())
+    ? specNodeForFile(f) : null;
+  var staged = (live || specNode) && !isPhoto;
   var sheet = sheetHTML(show, f, show.gear);
   $('#vStage').innerHTML = '<div class="stage-bar"><div class="stitle">' + stitle + '</div>' +
     '<div class="pagenav"><button class="iconbtn" title="Previous" ' + act('vGo', -1) + '>' + icon('chevL') + '</button>' +
     '<span class="mono" style="font-size:11px;color:var(--muted);padding:0 6px">' + (ni + 1) + ' / ' + nav.length + (isPhoto ? ' photos' : '') + '</span>' +
     '<button class="iconbtn" title="Next" ' + act('vGo', 1) + '>' + icon('chevR') + '</button></div>' +
-    (live ? '<button class="iconbtn" title="' + (VIEWER.max ? 'Exit full width' : 'Full width') + '" ' +
+    (live || specNode ? '<button class="iconbtn" title="' + (VIEWER.max ? 'Exit full width' : 'Full width') + '" ' +
       act('vMax') + '>' + icon(VIEWER.max ? 'collapse' : 'expand') + '</button>' : '') +
     '<button class="btn sm primary" ' + act('printFile') + '>' + icon('print') + 'Print</button></div>' +
-    '<div class="stage-canvas' + (live && !isPhoto ? ' doc' : '') + '">' +
-      (live && !isPhoto ? '<div class="vprev" id="vPrev">' + previewLoadingHTML() + '</div>' : sheet) +
+    '<div class="stage-canvas' + (staged ? ' doc' : '') + '">' +
+      (live && !isPhoto ? '<div class="vprev" id="vPrev">' + previewLoadingHTML() + '</div>'
+        : specNode ? '<div class="vprev" id="vSpecR">' + previewLoadingHTML() + '</div>'
+        : sheet) +
     '</div>';
   /* The record, demoted. It is still rendered — it is the file's own facts and
      the print path draws the same sheet — just no longer competing with the
      document for the fold. Cleared, never left stale, when the stage owns it. */
   var rec = $('#vRecord');
   if (rec) {
-    rec.innerHTML = (live && !isPhoto)
+    rec.innerHTML = staged
       ? '<div class="vrec-h">' + icon('file') + '<b>Document record</b>' +
         '<span>the file’s own metadata — the document itself is above</span></div>' + sheet
       : '';
   }
   if (live) drawPreview(f, prevKind);
+  else if (specNode) drawSpecRender(show, f, sheet);
 
   var title = show.project.single ? show.project.name : show.name;
   if (isPhoto) { drawPhotoMeta(show, f, title, hasBytes); return; }
@@ -1441,6 +1462,39 @@ async function drawPreview(f, kind) {
     if (stale()) return;
     host.innerHTML = previewFailHTML(e && e.message ? e.message : e);
   }
+}
+
+/* ── 9/11 (Fix B): THE BANKED RENDER, ON THE STAGE ─────────────────────────
+   The bound spec's own render bundle — the same one Specs & Chain's View
+   serves — fetched through api.specRenderForFile (latest live bind first,
+   spec-history for an older or unbound row) and embedded above the record
+   card. Uses the same generation ticket as drawPreview, so paging away
+   mid-fetch drops the result instead of drawing over the next file. */
+async function drawSpecRender(show, f, sheet) {
+  var gen = VPREV.gen;
+  var host = $('#vSpecR');
+  if (!host) return;
+  var stale = function () { return gen !== VPREV.gen; };
+  var r = null;
+  try { r = await api.specRenderForFile(show.id, f); } catch (_) { r = null; }
+  if (stale()) return;
+  host = $('#vSpecR');
+  if (!host) return;
+  var embed = r ? specRenderEmbedHTML(r, { showId: show.id }) : null;
+  if (embed) { host.innerHTML = embed; return; }
+  /* no banked bundle answers for this row (a legacy or hand bind): the stage
+     goes back to the honest card, with the reason said out loud — and the
+     record mount below is cleared so the card is not printed twice. The
+     canvas sheds its .doc fit-to-hole mode so the card scrolls like any
+     sheet-on-stage. */
+  var canvas = host.parentElement;
+  if (canvas && canvas.classList) canvas.classList.remove('doc');
+  host.outerHTML = sheet +
+    '<div class="hint">' + icon('file') + '<span>No banked render for this bind — it was bound ' +
+    'before renders were banked, or by hand. The spec file on the NAS is the record; the card ' +
+    'above is the row’s own facts.</span></div>';
+  var rec = $('#vRecord');
+  if (rec) rec.innerHTML = '';
 }
 
 /* "Open in new tab". If the stage already holds these bytes the URL is minted

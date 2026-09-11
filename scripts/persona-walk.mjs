@@ -3059,6 +3059,169 @@ async function main() {
   ok('an empty Today panel celebrates silence instead of paging anyone',
      /silence is the success state/.test(vg));
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('45 · eager folders — the create is recorded, the warning renders, the backfill heals  (Tom, 9/11)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "the folder should get created the minute a show is created. i chose the
+  // big ten because i knew it was the only one with a folder." This server
+  // runs in PRODUCTION SHAPE — no storage — so what the walk proves here is
+  // the TOLERANT path: every entity minted this month had its folder create
+  // ATTEMPTED, the miss recorded (never thrown, never slowing the create),
+  // the warning renders from that record, and the backfill sweep answers
+  // honestly here and REALLY CREATES on §34's child-server device.
+  reach('Backfill storage folders (Settings · NAS card)',
+    { seam: 'storageFoldersSweep', action: 'storageFolderSweep' });
+
+  // the attempt on §1's project was recorded — error, no stamp, activity line
+  const fProjRow = (await pool.query(
+    'SELECT storage_folder_at, storage_folder_error FROM projects WHERE id=$1', [PROJ])).rows[0];
+  ok('the folder create was ATTEMPTED the minute the event was opened — and the miss recorded',
+     !!fProjRow.storage_folder_error && !fProjRow.storage_folder_at, fProjRow);
+  ok('…as an honest activity line, not a thrown create',
+     (await pool.query(
+       `SELECT COUNT(*)::int AS n FROM activity WHERE action='storage.folder_failed' AND project_id=$1`,
+       [PROJ])).rows[0].n >= 1);
+  const fPayload = await GET(`/api/projects/${PROJ}`, { token: T.omar });
+  ok('the payload carries the record — what the warn chip reads',
+     fPayload.status === 200 && !!fPayload.body.storage_folder_error, fPayload.body.storage_folder_error);
+
+  // the warning state, EXECUTED: the real components.js, headless
+  const comp = (() => {
+    const ctx = { console };
+    ctx.window = ctx;
+    vm.createContext(ctx);
+    new vm.Script(SRC['components.js'], { filename: 'public/components.js' }).runInContext(ctx);
+    return ctx;
+  })();
+  comp.SR = { isApi: () => true };
+  ok('the warn chip renders from a recorded miss — and says the honest sentence',
+     /storage folder missing — will retry on next upload/.test(
+       comp.storageFolderChip({ storage_folder_error: 'MKCOL answered 500' })));
+  ok('…clears itself once the folder is confirmed, and never renders in demo',
+     comp.storageFolderChip({ storage_folder_error: null, storage_folder_at: '2026-09-11' }) === ''
+     && (() => { comp.SR = { isApi: () => false };
+                 const r = comp.storageFolderChip({ storage_folder_error: 'x' });
+                 comp.SR = { isApi: () => true }; return r === ''; })());
+  ok('both headers render the chip — show and season',
+     /storageFolderChip\(show\)/.test(SRC['views-folder.js'])
+     && /storageFolderChip\(project\)/.test(SRC['views-dashboard.js']));
+
+  // floors + the storage-less sweep answers honestly
+  ok('a pm cannot run the backfill',
+     (await POST('/api/admin/storage-folders/sweep', {}, { token: T.brenden })).status === 403);
+  const fSweepNoStore = await POST('/api/admin/storage-folders/sweep', {}, { token: T.tom });
+  ok('with no storage the sweep says so — configured:false, nothing invented',
+     fSweepNoStore.status === 200 && fSweepNoStore.body.configured === false
+     && /not configured/.test(fSweepNoStore.body.note || ''), fSweepNoStore.body);
+
+  // the backfill FOR REAL — §34's child-server device, throwaway STORAGE_ROOT
+  const fStoreRoot = path.join(os.tmpdir(), 'sr-walk-folders');
+  const fChild = (() => {
+    const script =
+      `(async () => {
+        const srv = require(${JSON.stringify(path.join(APP, 'server.js').replace(/\\/g, '/'))});
+        const server = await srv.boot();
+        const base = 'http://127.0.0.1:' + server.address().port;
+        const login = await fetch(base + '/api/auth/login', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: 'tom', password: ${JSON.stringify(PW)} }) });
+        const tok = (await login.json()).token;
+        const r = await fetch(base + '/api/admin/storage-folders/sweep', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'x-auth-token': tok } });
+        console.log('WALKFOLDERS ' + JSON.stringify({ status: r.status, body: await r.json() }));
+        server.close();
+        process.exit(0);
+      })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });`;
+    const r = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      env: { ...process.env, PORT: '0', SWEEP_ON_BOOT: '0', STORAGE_ROOT: fStoreRoot }
+    });
+    const m = String(r.stdout || '').match(/WALKFOLDERS (.*)/);
+    if (!m) console.error('  (folders child failed)', String(r.stderr || '').slice(0, 400));
+    return m ? JSON.parse(m[1]) : { status: 0, body: {} };
+  })();
+  ok('the sweep on a storage-backed twin answers per path',
+     fChild.status === 200 && fChild.body.configured === true
+     && Array.isArray(fChild.body.results) && fChild.body.results.length >= 1,
+     { ok: fChild.body.ok, failed: fChild.body.failed });
+  const fMine = (fChild.body.results || []).find((r) => r.kind === 'project' && r.id === PROJ);
+  ok('…including §1\'s folder, created and named',
+     !!fMine && fMine.ok === true && fMine.path.includes(`P${PROJ}-`), fMine);
+  ok('…and the folder REALLY exists where every upload path starts',
+     fs.existsSync(path.join(fStoreRoot, `P${PROJ}-${fPayload.body.slug}`, '_project')),
+     path.join(fStoreRoot, `P${PROJ}-${fPayload.body.slug}`));
+  const fProjAfter = (await pool.query(
+    'SELECT storage_folder_at, storage_folder_error FROM projects WHERE id=$1', [PROJ])).rows[0];
+  ok('…which heals the record: stamped, error gone — the chip retires itself',
+     !!fProjAfter.storage_folder_at && fProjAfter.storage_folder_error === null, fProjAfter);
+  ok('the SHOW was already stamped by §34\'s bind — real bytes are their own proof',
+     !!(await pool.query('SELECT storage_folder_at FROM shows WHERE id=$1', [SHOW]))
+       .rows[0].storage_folder_at);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('46 · the bound spec IS the sheet — the viewer\'s lookup and embed, executed  (Tom, 9/11)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "if this doesnt bind the spec sheet as i see it or email it- its of no
+  // use to me." The bind banks a render bundle per rev; the FILE VIEWER now
+  // stages it above the honest card, with Download image and Print / PDF.
+  // The lookup (api.specRenderForFile) is EXECUTED through §37's browser-half
+  // vm against this walk's live server — break the bundle lookup and these
+  // go red, not just a scan.
+  reach('Download / print the banked spec render',
+    { seam: ['specRenderForFile', 'getSpecRender'], action: ['specDownloadRender', 'specPrintRender'] });
+  ok('the viewer stages the render above the record card — and keeps the honest fallback',
+     /drawSpecRender\(show, f, sheet\)/.test(SRC['views-global.js'])
+     && /id="vSpecR"/.test(SRC['views-global.js'])
+     && /No banked render for this bind/.test(SRC['views-global.js']));
+  ok('the chain View modal shares the SAME embed — one implementation, two surfaces',
+     /specRenderEmbedHTML\(r, \{ showId: Number\(showId\) \}\)/.test(APP_JS));
+  ok('the seam\'s demo twin serves the locally-generated bundle',
+     /specRenderForFile:[\s\S]{0,900}?demoSpecRenderFor/.test(API_JS));
+
+  // the LOOKUP, executed: the current bind resolves on the fast path; a
+  // superseded or unbound rev resolves through history AT ITS OWN REV; a row
+  // no bundle answers for resolves NULL, honestly
+  tab.SR.setToken(T.omar);
+  const fCur = await GET(`/api/shows/${SHOW}/spec-render/content`, { token: T.omar });
+  ok('(precondition) a live content render exists to look up', fCur.status === 200, fCur.status);
+  const fLk0 = await tab.api.specRenderForFile(SHOW,
+    { id: fCur.body.fileId, chain_key: 'content', spec_type: 'e360' });
+  ok('THE LOOKUP · the CURRENT bind answers on the fast path, at its own rev',
+     !!fLk0 && fLk0.fileId === fCur.body.fileId && fLk0.rev === fCur.body.rev,
+     fLk0 && { rev: fLk0.rev, want: fCur.body.rev });
+  const fLk1 = await tab.api.specRenderForFile(SHOW,
+    { id: wb3.body.fileId, chain_key: 'content', spec_type: 'e360' });
+  ok('…a SUPERSEDED row (§34\'s v3, retired by §41\'s zoned bind) is served at ITS rev',
+     !!fLk1 && fLk1.fileId === wb3.body.fileId && fLk1.rev === 3, fLk1 && { rev: fLk1.rev });
+  const fLk2 = await tab.api.specRenderForFile(SHOW,
+    { id: wb2.body.fileId, chain_key: null, spec_type: 'e360' });
+  ok('…an UNBOUND row is found through spec-history and served at ITS rev, marked retired',
+     !!fLk2 && fLk2.fileId === wb2.body.fileId && fLk2.rev === 2 && fLk2.retired === true,
+     fLk2 && { rev: fLk2.rev, retired: fLk2.retired });
+  ok('…a row no bundle answers for resolves NULL — the card stands alone, honestly',
+     (await tab.api.specRenderForFile(SHOW, { id: 99999999, spec_type: 'e360' })) === null
+     && (await tab.api.specRenderForFile(SHOW, { id: wb3.body.fileId })) === null);
+
+  // the EMBED, executed on the real components.js: preference order, the
+  // sandbox, the print harness, and both download labels
+  const fEmHtml = comp.specRenderEmbedHTML(
+    { node: 'content', rev: 2, html: '<div>page</div>', png: 'data:image/png;base64,AAAA' },
+    { showId: SHOW });
+  ok('THE EMBED · pageHtml wins the stage: sandboxed iframe + print harness + both affordances',
+     /sandbox="allow-scripts allow-modals"/.test(fEmHtml) && /sr-print/.test(fEmHtml)
+     && /Download image/.test(fEmHtml) && /Print \/ PDF/.test(fEmHtml));
+  const fEmPng = comp.specRenderEmbedHTML({ node: 'content', rev: 1, png: 'data:image/png;base64,AAAA' },
+    { showId: SHOW });
+  ok('…the PNG stands in when pageHtml is absent — image staged, print honestly absent',
+     /specr-img/.test(fEmPng) && /Download image/.test(fEmPng) && !/Print \/ PDF/.test(fEmPng));
+  ok('…an SVG-only bundle (the demo twin\'s shape) downloads AS the SVG, labeled',
+     /Download SVG/.test(comp.specRenderEmbedHTML({ node: 'content', rev: 1, svg: '<svg/>' }, { showId: SHOW })));
+  ok('…and a bundle with nothing drawable is NULL — the surfaces say so instead of drawing',
+     comp.specRenderEmbedHTML({ node: 'content', rev: 1 }, { showId: SHOW }) === null);
+  ok('the download action hands over real bytes under a sensible name',
+     /function specRenderFileName/.test(APP_JS) && /image\/svg\+xml/.test(APP_JS)
+     && /pngDataUrlToBlob/.test(APP_JS));
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

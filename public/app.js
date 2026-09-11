@@ -620,24 +620,95 @@ async function specViewRevAct(showId, key) {
   var r;
   try { r = await api.getSpecRender(showId, node, rev); }
   catch (e) { toast('No banked render for that version', String((e && e.message) || e), 'err'); return; }
-  var body;
-  if (r.png) {
-    body = '<img src="' + esc(r.png) + '" alt="spec render" style="max-width:100%;border:1px solid var(--border);border-radius:8px">';
-  } else if (r.html || r.svg) {
-    /* sandboxed on purpose: a stored bundle is attacker-influenced input the
-       moment anyone can bind one (D8's argument, applied to the history view) */
-    body = '<iframe sandbox="" srcdoc="' + esc(r.html || r.svg) +
-      '" style="width:100%;height:420px;border:1px solid var(--border);border-radius:8px;background:#fff"></iframe>';
-  } else {
-    body = '<div class="hint">' + icon('file') +
-      'This bind stored no drawable bundle — the spec JSON and the NAS file are the record.</div>';
-  }
+  /* 9/11 — the shared embed (components.js specRenderEmbedHTML): the same
+     sandboxed frame + Download / Print affordances the file viewer stages,
+     so the two surfaces cannot drift. Sandboxing is still D8's argument. */
+  var body = specRenderEmbedHTML(r, { showId: Number(showId) }) ||
+    '<div class="hint">' + icon('file') +
+    'This bind stored no drawable bundle — the spec JSON and the NAS file are the record.</div>';
   openModal((CHAIN_LABEL[node] || node) + ' · v' + rev,
     '<div class="cs" style="margin-bottom:10px;font-size:11.5px">bound by ' +
     esc(firstName(r.createdBy) || r.createdBy || '—') + ' · ' + esc(fmtDate(String(r.createdAt || '').slice(0, 10))) +
     (r.retired ? ' · <b style="color:var(--warn)">unbound from the show</b> — kept as history' : '') +
     (r.demo ? ' · demo placeholder, generated locally' : '') + '</div>' + body);
 }
+/* ── 9/11 (Fix B): the two export affordances on a banked render ──────────
+   Download hands over the HIGH-RES PNG the bind banked (the SVG, labeled,
+   when only that exists) as a real file named SpecName-vN.png; Print posts
+   into the sandboxed render frame's harness so window.print() runs INSIDE
+   the frame — the only place the pageHtml prints complete. Both work in demo
+   too: the demo bundle is a locally-generated SVG and downloads as itself. */
+function specRenderFileName(base, rev, extn) {
+  var clean = String(base || 'spec').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
+  /* a bound file is usually already named "…v2" — do not stutter "-v2-v2" */
+  clean = clean.replace(/[\s-]*v\d+$/i, '');
+  return (clean || 'spec') + '-v' + rev + extn;
+}
+function pngDataUrlToBlob(dataUrl) {
+  var b64 = String(dataUrl).split(',')[1] || '';
+  var bin = atob(b64);
+  var bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: 'image/png' });
+}
+function triggerBlobDownload(blob, name) {
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  /* revoke on a tick — revoking synchronously races the download in Safari */
+  setTimeout(function () { try { URL.revokeObjectURL(url); a.remove(); } catch (_) {} }, 2000);
+}
+async function specDownloadRenderAct(showId, key) {
+  var parts = String(key || '').split(':');
+  var node = parts[0], rev = parseInt(parts[1], 10);
+  var r;
+  try { r = await api.getSpecRender(showId, node, rev); }
+  catch (e) { toast('Could not fetch the banked render', String((e && e.message) || e), 'err'); return; }
+  var blob, extn, label;
+  if (r && r.png) { blob = pngDataUrlToBlob(r.png); extn = '.png'; label = 'PNG'; }
+  else if (r && r.svg) { blob = new Blob([r.svg], { type: 'image/svg+xml' }); extn = '.svg'; label = 'SVG'; }
+  else { toast('No image banked for this bind', 'Only the page render exists — use Print / PDF.', 'err'); return; }
+  /* name it after the bound file when the record knows it; the node otherwise */
+  var base = CHAIN_LABEL[node] ? CHAIN_LABEL[node].replace(/^\.\w+\s*/, '') : node;
+  if (r.fileId) {
+    try { var f = await api.getFile(r.fileId); if (f && f.name) base = f.name; } catch (_) {}
+  }
+  var name = specRenderFileName(base, rev, extn);
+  triggerBlobDownload(blob, name);
+  toast('Downloading', name + ' · ' + label + (r.demo ? ' — demo render, generated locally' : ''));
+}
+function specPrintRenderAct(showId, key) {
+  var parts = String(key || '').split(':');
+  var frames = document.querySelectorAll('#' + specRenderFrameId(parts[0], parts[1]));
+  var frame = frames.length ? frames[frames.length - 1] : null;
+  if (frame && frame.contentWindow) { frame.contentWindow.postMessage('sr-print', '*'); return; }
+  toast('Nothing to print', 'The rendered sheet is not on screen any more — reopen it.', 'err');
+}
+
+/* ── 9/11 (Fix A): the folder backfill, from the Settings NAS card ────────── */
+async function storageFolderSweepAct() {
+  var r;
+  try { r = await api.storageFoldersSweep(); }
+  catch (e) { toast('Backfill did not run', String((e && e.message) || e), 'err'); return; }
+  if (!r.configured) {
+    toast('No storage to create folders on', r.note || 'Storage is not configured on this server.', 'err');
+    return;
+  }
+  var firstFail = (r.results || []).filter(function (x) { return !x.ok; })[0];
+  if (r.failed || r.skipped) {
+    toast('Backfill finished with misses',
+      r.ok + ' created · ' + r.failed + ' failed' + (r.skipped ? ' · ' + r.skipped + ' skipped' : '') +
+      (firstFail ? ' — first miss: ' + firstFail.path + ' (' + (firstFail.error || '') + ')' : ''), 'err');
+  } else if (r.attempted === 0) {
+    toast('Nothing missing', 'Every non-archived project and show already has its folder on record.');
+  } else {
+    toast('Folders created', r.ok + ' folder' + (r.ok === 1 ? '' : 's') + ' created on the NAS — per-path detail in the response.');
+  }
+  if (CUR.view === 'settings') render('settings');
+}
+
 async function specOutdateAct(showId, node) {
   /* one dialog: Cancel aborts, an empty answer flags with no note. The flag is
      a statement, not a deletion — say exactly that before taking it. */
@@ -7280,6 +7351,11 @@ var ACTIONS = {
   /* spec lifecycle — history / outdated flag / unbind */
   specHistory:   function (t, id) { return specHistoryAct(id); },
   specViewRev:   function (t, id, k) { return specViewRevAct(id, k); },
+  /* 9/11 — the banked render's export affordances (viewer + chain View) */
+  specDownloadRender: function (t, id, k) { return specDownloadRenderAct(id, k); },
+  specPrintRender:    function (t, id, k) { return specPrintRenderAct(id, k); },
+  /* 9/11 — the NAS folder backfill (Settings · E360 NAS card) */
+  storageFolderSweep: function () { return storageFolderSweepAct(); },
   specOutdate:   function (t, id, k) { return specOutdateAct(id, k); },
   specOutdateClear: function (t, id, k) { return specOutdateClearAct(id, k); },
   specUnbind:    function (t, id, k) { return specUnbindAct(id, k); },

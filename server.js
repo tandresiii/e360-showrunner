@@ -383,6 +383,24 @@ async function boot() {
   setInterval(housekeeping, 6 * 60 * 60 * 1000).unref();
   await bootSweep();
 
+  // ── 9/11: the folder backfill, on boot ────────────────────────────────────
+  // Gated exactly like bootSweep above — but NEVER awaited, and the difference
+  // is the whole lesson of 9/11: bootSweep is DB-only and cheap, while this
+  // one dials the NAS, and a NAS that hangs for its timeout must not sit in
+  // the boot path. It heals every project/show that predates the eager create
+  // (or whose create failed), one honest per-path attempt each.
+  if (process.env.SWEEP_ON_BOOT !== '0') {
+    setImmediate(() => {
+      require('./lib/folders').sweepStorageFolders({ actor: 'system' })
+        .then((r) => {
+          if (r.configured && (r.attempted || r.skipped)) {
+            console.log(`[folders] backfill: ok:${r.ok} failed:${r.failed} skipped:${r.skipped || 0}`);
+          }
+        })
+        .catch((e) => console.error('[folders]', e.message));
+    });
+  }
+
   // The warm copy. Its directory is created (and swept of the previous
   // process's orphans) here; if that fails the cache simply stays off and the
   // app is exactly as fast as it was before it existed. Nothing downstream

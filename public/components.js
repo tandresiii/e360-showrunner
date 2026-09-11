@@ -1078,6 +1078,83 @@ function boundDocSheet(show, f, doctype, kicker) {
     '</div></div></div>';
 }
 
+/* ── 9/11: THE BOUND SPEC IS THE SHEET (Tom: "if this doesnt bind the spec
+   sheet as i see it or email it- its of no use to me") ─────────────────────
+   The bind banks a render bundle (pageHtml + png + svg) per rev; until
+   tonight only Specs & Chain's View modal ever drew it, and the file viewer
+   showed the honest metadata card ALONE. These helpers are shared by both
+   surfaces so the embed and its two affordances cannot drift.
+
+   The iframe is SANDBOXED (D8's argument: a stored bundle is attacker-
+   influenced input the moment anyone can bind one). allow-scripts runs in an
+   OPAQUE origin — no cookies, no localStorage, no reach into this app — and
+   exists solely so the tiny print harness below can answer window.print()
+   from inside the frame, which is the only place the render prints complete. */
+function specNodeForFile(f) {
+  if (!f) return null;
+  var node = f.chain_key ||
+    ({ e360: 'content', nsf: 'cabling', pcfg: 'power' })[f.spec_type] || null;
+  return node === 'pull' ? null : node;
+}
+function specRenderFrameId(node, rev) { return 'specRF-' + node + '-' + rev; }
+/* the pageHtml, made printable: a message harness so the parent's Print
+   button can reach window.print() INSIDE the sandboxed frame */
+function specPrintShellHtml(html) {
+  return String(html) +
+    '<scr' + 'ipt>window.addEventListener("message",function(e){' +
+    'if(e&&e.data==="sr-print")window.print();});</scr' + 'ipt>';
+}
+/* the embed + its affordances, or null when the bundle holds nothing drawable
+   (a legacy/manual bind — the caller says so honestly). opts: { showId } */
+function specRenderEmbedHTML(r, opts) {
+  if (!r) return null;
+  opts = opts || {};
+  var key = r.node + ':' + r.rev;
+  var body = null;
+  if (r.html) {
+    body = '<iframe class="specr-frame" id="' + esc(specRenderFrameId(r.node, r.rev)) +
+      '" sandbox="allow-scripts allow-modals" title="banked spec render" srcdoc="' +
+      esc(specPrintShellHtml(r.html)) + '"></iframe>';
+  } else if (r.png) {
+    body = '<img class="specr-img" src="' + esc(r.png) + '" alt="banked spec render">';
+  } else if (r.svg) {
+    body = '<iframe class="specr-frame" sandbox="" title="banked spec render" srcdoc="' +
+      esc(r.svg) + '"></iframe>';
+  }
+  if (!body) return null;
+  var acts = [];
+  if (r.png) {
+    acts.push('<button class="btn sm" ' + act('specDownloadRender', opts.showId, key) + '>' +
+      icon('download') + 'Download image</button>');
+  } else if (r.svg) {
+    /* only the SVG exists — hand that over instead, and say which it is */
+    acts.push('<button class="btn sm" ' + act('specDownloadRender', opts.showId, key) + '>' +
+      icon('download') + 'Download SVG</button>');
+  }
+  if (r.html) {
+    acts.push('<button class="btn sm" ' + act('specPrintRender', opts.showId, key) + '>' +
+      icon('print') + 'Print / PDF</button>');
+  }
+  return '<div class="specr">' + body +
+    '<div class="specr-acts">' + acts.join('') +
+    '<span class="cs" style="font-size:11px">v' + esc(r.rev) +
+    (r.demo ? ' · demo render, generated locally' : ' · banked at bind — the sheet as the tool drew it') +
+    '</span></div></div>';
+}
+
+/* ── 9/11: THE MISSING-FOLDER WARN CHIP (Fix A) ────────────────────────────
+   Rendered on the show and season headers when the eager NAS-folder create
+   RECORDED a failure. Live-only — the demo models no NAS — and it clears
+   itself: the next successful upload (or the backfill sweep) stamps the
+   entity and the error goes. The title carries the driver's own sentence. */
+function storageFolderChip(e) {
+  if (!(typeof SR !== 'undefined' && SR.isApi())) return '';
+  if (!e || !e.storage_folder_error || e.storage_folder_at) return '';
+  return '<span class="sfold-chip" title="' +
+    esc('Last attempt: ' + e.storage_folder_error) + '">' + inlineIcon('server') +
+    'storage folder missing — will retry on next upload</span>';
+}
+
 /* gear is required only for pullsheet / manifest classes */
 function sheetHTML(show, f, gear) {
   var c = fileClass(f);

@@ -176,7 +176,9 @@ function viewSeason(project) {
   var upcoming = shows.filter(function (s) { return s.event_date >= TODAY_ISO; });
   var head = '<div class="ef-head">' +
     '<div class="ef-top"><div>' +
-    '<div class="ef-title"><h1>' + esc(project.name) + '</h1>' + typeTag(project.type) + jobsChip(project.jobs) + ragPill(r.rag) + lifecycleChip(project) + archivedChip(project) + '</div>' +
+    '<div class="ef-title"><h1>' + esc(project.name) + '</h1>' + typeTag(project.type) + jobsChip(project.jobs) + ragPill(r.rag) + lifecycleChip(project) + archivedChip(project) +
+    /* 9/11 — the season folder's own missing-NAS-folder warning */
+    storageFolderChip(project) + '</div>' +
     '<div class="ef-sub"><span>' + icon('users') + ' <b>' + esc(project.client) + '</b></span>' +
     '<span>' + icon('pin') + ' <b>Multi-city · ' + shows.length + ' shows</b></span>' +
     '<span>Lead <b>' + esc(userName(project.owner)) + '</b></span>' +
