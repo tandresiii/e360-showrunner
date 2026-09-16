@@ -3515,6 +3515,81 @@ async function main() {
        /presses Sweep in Settings/.test(SRC['views-dashboard.js']));
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('49 · the browser is the thumbnailer  (Tom, 9/16, round two)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom walked §47's upload live: bytes on the NAS, real dimensions — and
+  // placeholder art forever. Root cause: the NAS watcher the thumb contract
+  // promised WAS NEVER BUILT (no daemon in any repo, THUMBNAILER_TOKEN unset
+  // in prod), so thumb_path stayed NULL for eternity — a fictional actor,
+  // the exact class §47 and §48 closed. The browser that decodes every
+  // picked image to measure it now downscales it too, and the thumb-less
+  // backlog gets its own manual door.
+  reach('Make thumbnails (the backfill door)', {
+    seam: ['uploadPhotoThumb', 'downloadThumbBytes'], action: 'phThumbBackfill' });
+
+  // ── THE DISCARD BUG, PINNED FUNCTIONALLY on the real loaded api.js ────────
+  // A.file used to throw away a NAS-shaped thumb_path and substitute the
+  // placeholder — honest while no byte route existed, a real-thumbnail eater
+  // the moment one did. Run the actual adapter, not a regex over it. (The vm
+  // has no data.js, so the placeholder-maker is stubbed to a RECOGNIZABLE
+  // data URI — the adapter's branching is what is under test. §48 installed
+  // its own inert ''-returning stub for its absorbs, which have all run;
+  // overwrite it here on purpose, so "placeholder painted" is
+  // distinguishable from "nothing painted".)
+  tab.mkThumb = function () { return 'data:image/svg+xml;stub'; };
+  const pinPath = '\\\\E360-NAS\\Showrunner\\P9-x\\S9-y\\photo\\a_t320.jpg';
+  const pin1 = tab.SR.absorb.file({ id: 999001, kind: 'photo', name: 'pin',
+    thumb_path: pinPath, width: 400, height: 300 });
+  ok('a NAS-shaped thumb_path is NO LONGER DISCARDED — placeholder paints, and the row is marked for the session-authed fetch',
+     pin1.thumb_pending === true && /^data:image\/svg/.test(String(pin1.thumb)),
+     { pending: pin1.thumb_pending, thumb: String(pin1.thumb).slice(0, 28) });
+  pin1.thumb = 'blob:resolved-thumb'; pin1.thumb_pending = false;
+  const pin2 = tab.SR.absorb.file({ id: 999001, kind: 'photo', name: 'pin',
+    thumb_path: pinPath, width: 400, height: 300 });
+  ok('…a re-absorb CARRIES the resolved thumb forward instead of resetting to placeholder',
+     pin2.thumb === 'blob:resolved-thumb' && pin2.thumb_pending === false, String(pin2.thumb));
+  const pin3 = tab.SR.absorb.file({ id: 999002, kind: 'photo', name: 'bare' });
+  ok('…and a thumb-less row keeps placeholder art as the honest fallback, unmarked',
+     /^data:image\/svg/.test(String(pin3.thumb)) && !pin3.thumb_pending);
+
+  // ── the wall fetches thumbs on the session, LAZILY ────────────────────────
+  ok('the gallery kicks the thumb fetch and its imgs carry the swap hook',
+     /phThumbKick\(photos\)/.test(SRC['views-folder.js']) &&
+     /data-phid="' \+ Number\(f\.id\)/.test(SRC['views-folder.js']));
+  ok('the wall stays lazy — phThumbKick moves THUMB bytes, never an original',
+     /function phThumbKick[\s\S]{0,700}downloadThumbBytes/.test(APP_JS) &&
+     !/function phThumbKick[\s\S]{0,700}downloadFileBytes/.test(APP_JS));
+  ok('the backfill door renders only when thumb-less photos this person can fix exist',
+     /var thumbless = photos\.filter[\s\S]{0,200}canEditPhoto\(f\)/.test(SRC['views-folder.js']) &&
+     /id="phBackfillBtn"/.test(SRC['views-folder.js']));
+  // the fictional actor is out of the COPY too — §48's device, applied here
+  ok('no UI line promises the NAS watcher will render thumbnails',
+     !/thumbnails fill in when the NAS watcher renders them/.test(APP_JS));
+  ok('SCHEMA.md says out loud that the browser is the thumbnailer today',
+     /The browser is the thumbnailer today/.test(
+       fs.readFileSync(path.join(APP, 'SCHEMA.md'), 'utf8')));
+
+  // ── the live half, in PRODUCTION SHAPE (no storage) ───────────────────────
+  // bytes-first must hold for thumbs exactly as for originals: the refusal
+  // is honest AND the row is never stamped — thumb_path pointing at bytes
+  // that never landed would be the fictional actor reborn as a column.
+  const thReg = await POST(`/api/shows/${SHOW}/photos`, { name: 'walk-thumb-target', ext: 'jpg' },
+    { token: T.omar });
+  ok('(fixture) a metadata photo registers', thReg.status === 200, thReg.body);
+  const thTry = await call('PUT', `/api/photos/${thReg.body.id}/thumb/content`,
+    { token: T.omar, raw: Buffer.from('320px jpeg stand-in') });
+  ok('the thumb PUT on a storage-less server is a 501 naming STORAGE_ROOT',
+     thTry.status === 501 && /STORAGE_ROOT/.test(thTry.body?.error || ''), thTry);
+  const thRow = await GET(`/api/photos/${thReg.body.id}`, { token: T.omar });
+  ok('…and thumb_path is STILL NULL — never stamped for bytes that did not land',
+     thRow.body.thumb_path == null, thRow.body.thumb_path);
+  ok('…a viewer may not thumb somebody else’s photo (pm+ OR the uploader)',
+     (await call('PUT', `/api/photos/${thReg.body.id}/thumb/content`,
+                 { token: VICT, raw: Buffer.from('x') })).status === 403);
+  ok('…GET thumb for a thumb-less photo is an honest 404',
+     (await GET(`/api/photos/${thReg.body.id}/thumb/content`, { token: T.omar })).status === 404);
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

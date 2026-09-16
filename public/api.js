@@ -368,15 +368,30 @@ var SR = (function () {
     step: function (s) { return keep(STEPS_BY_ID, s); },
     file: function (f) {
       if (!f) return f;
-      /* `thumb_path` is a NAS path, not a URL, and nothing serves photo bytes
-         over HTTP yet — so a photo gets the same deterministic placeholder the
-         demo uses rather than a broken <img>. The moment a byte route exists,
-         this one line is where it lands. */
+      /* THE THUMB RESOLUTION (9/16 round two). This branch used to DISCARD a
+         NAS-shaped thumb_path and substitute the placeholder — honest when no
+         byte route existed, a real-thumbnail eater the moment one did. Now:
+         · a URL-shaped thumb_path renders directly;
+         · a NAS-shaped one is REAL — bytes exist beside the original — but an
+           <img> cannot send x-auth-token, so the placeholder paints instantly
+           and `thumb_pending` marks the row for the gallery's session-authed
+           blob fetch (app.js phThumbKick → GET /photos/:id/thumb/content);
+         · a re-absorb CARRIES a resolved thumb forward — a refetch of the
+           same row must not reset a real thumbnail back to placeholder art.
+         Placeholder art remains the honest fallback for a thumb-less row. */
       if (f.kind === 'photo' && !f.thumb) {
         var tp = String(f.thumb_path || '');
-        f.thumb = /^(data:|https?:|\/)/.test(tp) ? tp
-          : mkThumb(String(f.name || f.id), f.name || '',
-                    (Number(f.width) || 1600) / (Number(f.height) || 1200));
+        var curF = FILES_BY_ID[f.id];
+        if (curF && curF.thumb && String(curF.thumb_path || '') === tp) {
+          f.thumb = curF.thumb;
+          f.thumb_pending = !!curF.thumb_pending;
+        } else if (/^(data:|https?:|\/)/.test(tp)) {
+          f.thumb = tp;
+        } else {
+          f.thumb = mkThumb(String(f.name || f.id), f.name || '',
+                            (Number(f.width) || 1600) / (Number(f.height) || 1200));
+          f.thumb_pending = !!tp;
+        }
       }
       return keep(FILES_BY_ID, f);
     },
@@ -3895,6 +3910,9 @@ var api = (function () {
        GET  /api/photos?…            -> listAllPhotos(filters)
        POST /api/shows/:id/photos/upload -> uploadPhoto(showId, file, opts)
                                         [tech+ · bytes FIRST, fail = nothing]
+       PUT  /api/photos/:id/thumb/content -> uploadPhotoThumb(id, blob)
+                                        [pm+/uploader · bytes FIRST, then thumb_path]
+       GET  /api/photos/:id/thumb/content -> downloadThumbBytes(id)
        PUT  /api/photos/:id          -> updatePhoto(id, {caption, tags})
        PUT  /api/photos/:id/pick     -> setRecapPick(id, bool)  [pm+]
        POST /api/proposals/:id/confirm|reject -> confirmPhoto / rejectPhoto
@@ -3982,6 +4000,42 @@ var api = (function () {
         if (s2 && s2.files) s2.files.push(f2);
         return f2;
       });
+    },
+    /* THE BROWSER-MADE THUMBNAIL (9/16 round two — the NAS watcher the thumb
+       contract promised was never built, so the browser that decoded the
+       image to measure it now downscales it too). Bytes to
+       PUT /photos/:id/thumb/content; the SERVER derives the {name}_t320.jpg
+       convention path and stamps thumb_path only after the bytes are safe.
+       A failure here must never take the photo with it — callers catch and
+       leave the row on its honest placeholder.
+
+       DEMO: models the flow on the demo store — the convention path is
+       stamped (modeled; file:// has no NAS for the bytes) and the thumb the
+       person's own browser just rendered becomes the card art via an object
+       URL: their real pixels, nothing invented. */
+    uploadPhotoThumb: function (photoId, blob) {
+      if (!API()) {
+        var f = FILES_BY_ID[Number(photoId)];
+        if (!f || f.kind !== 'photo') return fail('photo ' + photoId + ' not found');
+        if (!canEditPhoto(f)) return fail('uploading a photo thumbnail requires pm, manager, admin — or its uploader');
+        if (f.status === 'proposed') return fail('this photo is a pending proposal — thumbnails come after it is confirmed');
+        var np = String(f.nas_path || '');
+        var dot = np.lastIndexOf('.');
+        f.thumb_path = np ? (dot > np.lastIndexOf('\\') ? np.slice(0, dot) : np) + '_t320.jpg' : null;
+        try {
+          if (blob && typeof URL !== 'undefined' && URL.createObjectURL) f.thumb = URL.createObjectURL(blob);
+        } catch (_) { /* the placeholder art stands */ }
+        return ok(f);
+      }
+      return SR.putBytes('/api/photos/' + Number(photoId) + '/thumb/content', blob)
+        .then(function (r) { return A.file(r && r.photo ? r.photo : r); });
+    },
+    /* the thumb back down, as a Blob — the gallery cannot put a NAS path in
+       an <img> (no x-auth-token on an image request), so it fetches on the
+       session and mints object URLs, the viewer-preview argument exactly. */
+    downloadThumbBytes: function (photoId) {
+      if (!API()) return fail('thumbnail downloads need the Showrunner server');
+      return SR.getBlob('/api/photos/' + Number(photoId) + '/thumb/content');
     },
     updatePhoto: function (id, patch) {
       patch = patch || {};

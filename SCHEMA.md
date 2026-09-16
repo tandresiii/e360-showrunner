@@ -238,8 +238,13 @@ Photos therefore land under the **mechanical `{kind}` folder — `\photo\`** wit
 no special casing. Proposed documents quarantine under
 `{ROOT}\_agent-inbox\{username}\{kind}\{filename}` and **move to the canonical
 path on confirm**; a rejected proposal leaves nothing behind.
-The NAS thumbnailer writes `{name}_t320.jpg` beside the original and PATCHes
-`files.thumb_path`.
+Thumbnails live at `{name}_t320.jpg` beside the original (`thumbPathFor`).
+**The browser is the thumbnailer today** (9/16): the Photos tab downscales at
+upload — and backfills via "Make thumbnails" — through
+`PUT /api/photos/:id/thumb/content`, which writes the bytes at that exact
+convention path and only then stamps `files.thumb_path`. A NAS-side watcher
+remains a future option on the same convention (`PATCH /api/photos/:id/thumb`
++ `x-thumbnailer-token`); no such daemon exists yet, and nothing depends on it.
 
 **`spec_chain`** *(unique `(show_id, node)`)* — `id · show_id · node · gen · rev · derived_from_rev · by · when_at · file_id · updated_at · outdated · outdated_by · outdated_at · outdated_note`
 Nodes: `content → cabling → power → pull`. A child is **stale** when

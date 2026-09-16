@@ -1971,7 +1971,9 @@ function photoCard(f) {
     : '';
   return '<div class="ph-card' + (proposed ? ' proposed' : '') + '" ' + act('openViewer', f.id) + '>' +
     '<div class="ph-fig" style="aspect-ratio:' + w + '/' + h + '">' +
-    '<img src="' + esc(f.thumb) + '" alt="' + esc(f.caption || f.name) + '" loading="lazy">' +
+    /* data-phid is the swap hook: phThumbKick fetches the REAL thumb on the
+       session (an <img> cannot send x-auth-token) and patches this src */
+    '<img src="' + esc(f.thumb) + '" data-phid="' + Number(f.id) + '" alt="' + esc(f.caption || f.name) + '" loading="lazy">' +
     (proposed ? '<span class="pill warn ph-prop"><span class="dot"></span>Proposed' +
       (f.provenance ? ' · ' + Math.round(f.provenance.confidence) + '%' : '') + '</span>' : '') +
     photoStarBtn(f) + '</div>' +
@@ -2013,12 +2015,25 @@ function tabPhotos(show) {
     return '<button class="ph-chip' + (cur === t.tag ? ' on' : '') + '" ' + act('phTag', show.id, t.tag) + '>' +
       esc(t.tag) + ' <span class="n">' + t.n + '</span></button>';
   }).join('');
+  /* rows still wearing placeholder art with no thumb on the NAS — offered
+     only for photos THIS person may fix (canEditPhoto mirrors the server's
+     pm+/uploader gate; the server enforces it per row regardless) */
+  var thumbless = photos.filter(function (f) {
+    return !f.thumb_path && f.status !== 'proposed' && canEditPhoto(f);
+  });
   var bar = '<div class="ph-bar">' + chips + '<span style="flex:1"></span>' +
     (propN ? '<span class="pill warn"><span class="dot"></span>' + propN + ' proposed</span>' : '') +
+    (thumbless.length
+      ? '<button class="btn sm ghost" id="phBackfillBtn" title="Downscale each thumb-less photo right here in the browser and file the thumbnail beside its original" ' +
+        act('phThumbBackfill', show.id) + '>' + icon('cam') + 'Make thumbnails <span class="n">' + thumbless.length + '</span></button>'
+      : '') +
     (canAddPhotos()
       ? '<button class="btn sm ghost" ' + act('photoAdd', show.id) + '>' + icon('plus') + 'Add photos</button>'
       : '') +
     '</div>';
+  /* kick the session-authed thumb fetch for rows whose real thumbnail exists
+     on the NAS — patches the imgs in THIS render pass as blobs arrive */
+  phThumbKick(photos);
 
   /* ---- apply the filter --------------------------------------------------- */
   var shown = photos.filter(function (f) {
@@ -2053,9 +2068,11 @@ function photoStrip(show) {
   var photos = photosForShow(show.id);
   if (!photos.length) return '';
   var picksN = photos.filter(function (f) { return f.recap_pick; }).length;
-  var thumbs = recapStripPhotos(show.id, 5).map(function (f) {
+  var strip = recapStripPhotos(show.id, 5);
+  phThumbKick(strip);          /* real thumbs swap into this pass as they land */
+  var thumbs = strip.map(function (f) {
     return '<button class="ph-th" ' + act('openViewer', f.id) + ' title="' + esc(f.caption || f.name) + '">' +
-      '<img src="' + esc(f.thumb) + '" alt="' + esc(f.caption || f.name) + '" loading="lazy">' +
+      '<img src="' + esc(f.thumb) + '" data-phid="' + Number(f.id) + '" alt="' + esc(f.caption || f.name) + '" loading="lazy">' +
       (f.recap_pick ? '<span class="st">' + icon('star') + '</span>' : '') + '</button>';
   }).join('');
   return '<div class="panel"><h3>Photos · ' + photos.length + (picksN ? ' <span style="color:var(--warn)">· ' + picksN + ' picks</span>' : '') + '</h3>' +

@@ -56,6 +56,8 @@
 //   POST   /api/shows/:id/photos        human upload, metadata   [tech+]
 //   PUT    /api/photos/:id/content      raw bytes      [pm+ OR the uploader]
 //   POST   /api/shows/:id/photos/upload one call, bytes FIRST    [tech+]
+//   PUT    /api/photos/:id/thumb/content thumb bytes, bytes FIRST [pm+ OR uploader]
+//   GET    /api/photos/:id/thumb/content stream the thumb  [any session]
 // ════════════════════════════════════════════════════════════════════════════
 
 'use strict';
@@ -600,6 +602,95 @@ router.put('/photos/:id/content',
     res.json({ ok: true, size: result.size != null ? result.size : req.body.length });
   })
 );
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE BROWSER IS THE THUMBNAILER (9/16, round two)
+// ────────────────────────────────────────────────────────────────────────────
+// Tom walked the human upload live: bytes on the NAS, real dimensions — and
+// placeholder art forever, because the NAS watcher the contract above waits
+// for WAS NEVER BUILT. No daemon exists in any repo and THUMBNAILER_TOKEN is
+// unset in production, so thumb_path stayed NULL for eternity: a fictional
+// actor, the same class as the empty-state copy the last pass rewrote. Tom's
+// law: nothing may depend on an actor that does not exist.
+//
+// So the browser that already decoded the image to measure it now also
+// downscales it, and these two routes are its lane:
+//
+//   PUT /api/photos/:id/thumb/content — the thumb bytes. The server derives
+//   the path with thumbPathFor(nas_path) — the SAME one-liner the watcher
+//   contract encodes, so a future NAS daemon and today's browser write to the
+//   identical place — writes the bytes FIRST, and stamps thumb_path only
+//   after they are safe. thumb_path can therefore never point at bytes that
+//   do not exist. This is also why PATCH :id/thumb (path-only, no bytes) was
+//   NOT reused for the browser: a client that can stamp a path without
+//   landing bytes is the fictional-actor bug wearing a new hat. The PATCH
+//   stays as the future watcher's door — a watcher writes the file itself
+//   beside the original, so path-only is honest THERE and only there.
+//
+//   GET /api/photos/:id/thumb/content — the thumb back out, streamed on the
+//   session (an <img> cannot carry x-auth-token, so the gallery fetches
+//   blobs — same argument as the viewer's preview lane). Deliberately NOT
+//   through lib/filecache: these are ~30 KB files; the warm-copy machinery
+//   earns its keep on the 400 KB PDFs, and the gallery keeps its own
+//   per-session blob cache anyway.
+//
+// A thumbnail failing must never take the photo with it: the caller uploads
+// the original first, then tries the thumb, and a refusal here leaves the row
+// exactly as it was — placeholder art is the honest fallback, and the
+// "Make thumbnails" door retries it later.
+
+// PUT /api/photos/:id/thumb/content — [pm+ OR the uploader], same gate as the
+// photo's own bytes. 5 MB cap: a downscaled 320px JPEG is ~20-50 KB, and a
+// body a hundred times that is a wrong file, not a big thumbnail.
+router.put('/photos/:id/thumb/content',
+  requireAuth,
+  express.raw({ type: 'application/octet-stream', limit: '5mb' }),
+  asyncH(async (req, res) => {
+    const id = idParam(req);
+    const row = await loadPhoto(id);
+    if (!canEditPhoto(req.session, row)) {
+      throw forbidden('uploading a photo thumbnail requires pm, manager, admin — or its uploader');
+    }
+    // Same rule as the original's bytes: a proposed photo's bytes live in the
+    // _agent-inbox quarantine and MOVE on confirm — a thumb written beside
+    // the quarantine copy would be orphaned by that move.
+    if (row.status === 'proposed') {
+      throw badRequest('this photo is a pending proposal — thumbnails come after it is confirmed');
+    }
+    if (!row.nas_path) throw badRequest('this photo has no nas_path');
+    if (!Buffer.isBuffer(req.body) || !req.body.length) {
+      throw badRequest('empty body — send the thumbnail as application/octet-stream');
+    }
+
+    const thumbPath = thumbPathFor(row.nas_path);   // {name}_t320.jpg, one spelling
+    // BYTES FIRST — a failure here changes nothing on the row.
+    await storage.put(thumbPath, req.body);
+    fileCache.invalidatePath(thumbPath);
+    const r = await pool.query('UPDATE files SET thumb_path=$1 WHERE id=$2 RETURNING *',
+      [thumbPath, id]);
+    // NO activity row — same reasoning as PATCH :id/thumb: a thumbnail
+    // appearing is housekeeping, not news, whoever's machine rendered it.
+    res.json(dbToFile(r.rows[0]));
+  })
+);
+
+// GET /api/photos/:id/thumb/content — any signed-in user; the gates are on
+// writing, exactly as they are for the original's download route.
+router.get('/photos/:id/thumb/content', requireAuth, asyncH(async (req, res) => {
+  const row = await loadPhoto(idParam(req));
+  if (!row.thumb_path) throw notFound(`photo ${row.id} has no thumbnail yet`);
+  const { stream, size } = await storage.getStream(row.thumb_path);
+  // _t320.jpg by convention — JPEG whatever the original's ext was.
+  res.setHeader('Content-Type', 'image/jpeg');
+  if (size != null) res.setHeader('Content-Length', String(size));
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  stream.on('error', (e) => {
+    console.error(`[photos/${row.id}/thumb] transfer failed:`, e.message);
+    res.destroy(e);
+  });
+  stream.pipe(res);
+}));
 
 // POST /api/shows/:id/photos/upload — the ONE-CALL human upload.
 //

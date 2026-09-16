@@ -1273,6 +1273,90 @@ async function measureMedia(file) {
   return measureVideo(file);
 }
 
+/* ── the browser-made thumbnail (9/16, round two) ───────────────────────────
+   The NAS watcher the thumb contract promised WAS NEVER BUILT — no daemon in
+   any repo, THUMBNAILER_TOKEN unset in production — so thumb_path stayed NULL
+   and the gallery wore placeholder art forever: a fictional actor, the same
+   class as the empty-state copy the last pass rewrote. The browser already
+   decodes every picked image to measure it; now it downscales it too: max
+   320px long edge, JPEG q0.8 (~20-50 KB), drawn through createImageBitmap
+   with imageOrientation:'from-image' where the browser has it, so a portrait
+   phone photo lands upright instead of sideways (older engines fall back to
+   a plain decode — a possibly-sideways thumb beats none). Returns
+   {blob, srcW, srcH} — srcW/srcH are the ORIENTED full-size pixels, the same
+   real measurement measureImage takes, taken after rotation — or null for
+   anything the browser cannot decode (a .heic on desktop Chrome, say):
+   nothing is guessed, the photo still files, the thumb is simply not made. */
+async function makePhotoThumb(source) {
+  try {
+    if (typeof createImageBitmap !== 'function' || typeof document === 'undefined') return null;
+    var bmp = null;
+    try { bmp = await createImageBitmap(source, { imageOrientation: 'from-image' }); }
+    catch (_) { bmp = await createImageBitmap(source); }   /* no options bag, or it choked on it */
+    var W = bmp.width, H = bmp.height;
+    if (!W || !H) { try { bmp.close(); } catch (_) {} return null; }
+    var scale = Math.min(1, 320 / Math.max(W, H));         /* never upscale a small original */
+    var w = Math.max(1, Math.round(W * scale)), h = Math.max(1, Math.round(H * scale));
+    var cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
+    try { bmp.close(); } catch (_) {}
+    var blob = await new Promise(function (res) {
+      try { cv.toBlob(res, 'image/jpeg', 0.8); } catch (_) { res(null); }
+    });
+    if (!blob || !blob.size) return null;
+    return { blob: blob, srcW: W, srcH: H };
+  } catch (_) { return null; }
+}
+
+/* ── real thumbs on the gallery wall ────────────────────────────────────────
+   An <img src="/api/photos/7/thumb/content"> arrives with no x-auth-token and
+   dies 401 — the viewer-preview argument (views-global.js drawPreview). So
+   every renderer paints the placeholder INSTANTLY, and this pass fetches each
+   pending row's thumb blob on the session and swaps it in place via the
+   img[data-phid] hook the photo renderers carry. LAZY on purpose: only thumbs
+   move — an original is never fetched to draw a wall.
+
+   The cache is keyed id|thumb_path and lives for the session ON PURPOSE:
+   entries are ~30 KB icons, and revoking on navigation would refetch the
+   whole wall on every tab flip (the one-at-a-time VPREV discipline is for the
+   full-size documents). A failed fetch marks its key so the wall cannot
+   become a retry storm — the placeholder simply stands, honestly. */
+var PH_THUMBS = { url: {}, state: {} };   /* key -> objectURL · 'busy'|'failed' */
+function phThumbKey(f) { return f.id + '|' + String(f.thumb_path || ''); }
+function phThumbApply(f, url) {
+  f.thumb = url;
+  f.thumb_pending = false;
+  var imgs = document.querySelectorAll('img[data-phid="' + Number(f.id) + '"]');
+  for (var i = 0; i < imgs.length; i++) imgs[i].src = url;
+}
+/* a thumb this browser just MADE — adopt its own pixels, no round trip */
+function phThumbAdopt(f, blob) {
+  try {
+    var url = URL.createObjectURL(blob);
+    PH_THUMBS.url[phThumbKey(f)] = url;
+    phThumbApply(f, url);
+  } catch (_) { /* the next render fetches it the normal way */ }
+}
+function phThumbKick(photos) {
+  if (!apiMode()) return;
+  (photos || []).forEach(function (f) {
+    if (!f || !f.thumb_pending || !f.thumb_path) return;
+    var key = phThumbKey(f);
+    if (PH_THUMBS.url[key]) return phThumbApply(f, PH_THUMBS.url[key]);
+    if (PH_THUMBS.state[key]) return;                 /* in flight, or failed once */
+    PH_THUMBS.state[key] = 'busy';
+    api.downloadThumbBytes(f.id).then(function (blob) {
+      delete PH_THUMBS.state[key];
+      var url = URL.createObjectURL(blob);
+      PH_THUMBS.url[key] = url;
+      phThumbApply(f, url);
+    }, function () {
+      PH_THUMBS.state[key] = 'failed';                /* placeholder stands */
+    });
+  });
+}
+
 function fmtBytes(n) {
   n = Number(n) || 0;
   if (n < 1024) return n + ' B';
@@ -3014,14 +3098,19 @@ async function photoAddAct(showId) {
     for (var i = 0; i < files.length; i++) {
       var file = files[i];
       var g = guessFileKind(file.name);
-      var dims = await measureImage(file);       /* real pixels or nothing */
+      /* thumb FIRST: one oriented decode serves both the thumbnail and the
+         measurement (its srcW/srcH are the post-rotation pixels, so a
+         portrait phone photo records upright). measureImage stays as the
+         fallback when the downscale path cannot decode. */
+      var t = await makePhotoThumb(file);
+      var dims = t ? { w: t.srcW, h: t.srcH } : await measureImage(file);
+      var row;
       try {
-        await api.uploadPhoto(showId, file, {
+        row = await api.uploadPhoto(showId, file, {
           name: g.base, ext: g.ext || 'jpg',
           w: dims ? dims.w : null, h: dims ? dims.h : null,
           /* the file's own mtime — real, browser-reported metadata, the best
-             stand-in this layer has for the shutter moment (no EXIF here;
-             the NAS watcher can backfill a truer value later) */
+             stand-in this layer has for the shutter moment (no EXIF here) */
           takenAt: file.lastModified > 0 ? new Date(file.lastModified).toISOString() : null
         });
         added += 1;
@@ -3029,18 +3118,94 @@ async function photoAddAct(showId) {
         /* bytes-first on the server: this failure created NOTHING — name
            the file and pass the storage layer's own message through */
         toast('Photo not added', file.name + ' — ' + String(e && e.message || e), 'err');
+        continue;
+      }
+      /* the thumbnail is second and OPTIONAL — its failure must never take
+         the photo with it: the row stands, thumb_path stays null, the
+         placeholder is the honest fallback and "Make thumbnails" retries. */
+      if (t) {
+        try {
+          row = await api.uploadPhotoThumb(row.id, t.blob);
+          if (apiMode()) phThumbAdopt(row, t.blob);
+        } catch (e2) {
+          toast('Thumbnail not made', file.name + ' — the photo itself is filed; “Make thumbnails” retries it. ' +
+            String((e2 && e2.message) || e2), 'err');
+        }
+      } else {
+        toast('Thumbnail not made', file.name + ' — the browser could not decode this image. ' +
+          'The photo itself is filed; “Make thumbnails” can retry from a machine that decodes it.', 'warn');
       }
     }
     if (added) {
       toast(added === 1 ? 'Photo added' : added + ' photos added',
         apiMode()
-          ? 'Bytes are on the NAS under \\photo\\ — thumbnails fill in when the NAS watcher renders them'
+          ? 'Bytes are on the NAS under \\photo\\ — thumbnails made right here in the browser, filed beside each original'
           : 'Modeled in the demo store — no NAS on file://, the bytes stayed on your machine');
     }
     if (CUR.view === 'show') return refreshShowTab(showId, 'photos');
     if (CUR.view === 'files') return render('files');
   });
   inp.click();
+}
+/* ── MAKE THUMBNAILS — the manual door for the thumb-less (Tom's law) ──────
+   Photos uploaded before the browser became the thumbnailer — Tom's own
+   frames from tonight's live walk — sit on placeholder art with thumb_path
+   NULL, and no daemon is coming to fix them. This fetches each thumb-less
+   photo's ORIGINAL bytes on the session, downscales in-browser exactly like
+   the upload path, and files the thumb through the same lane. Per-file
+   progress on the button itself; per-file failures name the frame and the
+   reason; nothing here can hurt a photo. */
+async function phThumbBackfillAct(showId) {
+  var photos = await api.listPhotos(showId);
+  var todo = (photos || []).filter(function (f) {
+    return !f.thumb_path && f.status !== 'proposed' && canEditPhoto(f);
+  });
+  if (!todo.length) {
+    toast('Nothing to thumbnail', 'Every photo you can edit here already has one.');
+    return;
+  }
+  var btn = document.getElementById('phBackfillBtn');
+  if (btn) btn.disabled = true;
+  var done = 0, failed = 0;
+  for (var i = 0; i < todo.length; i++) {
+    var f = todo[i];
+    if (btn) btn.textContent = 'Making ' + (i + 1) + ' / ' + todo.length + '…';
+    var label = String(f.caption || f.name || ('photo ' + f.id)).slice(0, 48);
+    if (!apiMode()) {
+      /* demo twin: the same walk over the demo store — the seam stamps the
+         modeled convention path; there are no originals to downscale */
+      try { await api.uploadPhotoThumb(f.id, null); done += 1; }
+      catch (e0) { failed += 1; toast('Thumbnail not made', label + ' — ' + String((e0 && e0.message) || e0), 'err'); }
+      continue;
+    }
+    if (!(Number(f.size) > 0)) {
+      failed += 1;
+      toast('Thumbnail not made', label + ' — this row has no bytes on the NAS to downscale (metadata only).', 'err');
+      continue;
+    }
+    try {
+      var blob = await api.downloadFileBytes(f.id);   /* the original, on the session */
+      var t = await makePhotoThumb(blob);
+      if (!t) {
+        failed += 1;
+        toast('Thumbnail not made', label + ' — the browser could not decode this image.', 'err');
+        continue;
+      }
+      var row = await api.uploadPhotoThumb(f.id, t.blob);
+      phThumbAdopt(row, t.blob);
+      done += 1;
+    } catch (e) {
+      failed += 1;
+      toast('Thumbnail not made', label + ' — ' + String((e && e.message) || e), 'err');
+    }
+  }
+  toast(done ? (done === 1 ? '1 thumbnail made' : done + ' thumbnails made') : 'No thumbnails made',
+    (failed ? failed + ' failed — each named above. ' : '') +
+    (apiMode()
+      ? 'Each sits beside its original on the NAS as {name}_t320.jpg.'
+      : 'Modeled — file:// has no NAS; the demo store carries the convention path.'),
+    done ? 'ok' : 'err');
+  if (CUR.view === 'show') return refreshShowTab(showId, 'photos');
 }
 async function photoPickAct(fileId) {
   var cur = await api.getFile(fileId);
@@ -7533,6 +7698,7 @@ var ACTIONS = {
   schedDelete:     function (t, id) { return schedDeleteAct(id); },
   /* event photos (photo pass) */
   photoAdd:      function (t, id) { return photoAddAct(id); },
+  phThumbBackfill: function (t, id) { return phThumbBackfillAct(id); },
   photoPick:     function (t, id) { return photoPickAct(id); },
   photoConfirm:  function (t, id) { return photoConfirmAct(id); },
   photoReject:   function (t, id) { return photoRejectAct(id); },

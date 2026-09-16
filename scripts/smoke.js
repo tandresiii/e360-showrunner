@@ -1175,6 +1175,84 @@ const DEL = (p, o) => call('DELETE', p, o);
     await DEL(`/api/files/${reg.body.id}`, { token: A }); // the fixture row goes too
   }
 
+  // ── 4d. the browser is the thumbnailer ────────────────────────────────────
+  // Round two, 9/16. Tom walked the human upload live — bytes on the NAS,
+  // real dimensions — and placeholder art forever, because the NAS watcher
+  // the thumb contract promised WAS NEVER BUILT: no daemon in any repo,
+  // THUMBNAILER_TOKEN unset in production, thumb_path NULL for eternity. A
+  // fictional actor, the same class as the empty-state copy. The browser
+  // now downscales at upload (and backfills on demand); this is its lane.
+  // Pins: the bytes land at EXACTLY thumbPathFor(nas_path) — the convention
+  // a future NAS watcher shares, one spelling — and read back byte-identical
+  // beside an untouched original; thumb_path is stamped only AFTER the bytes
+  // are safe (a refused write leaves the row honest); and the gate is the
+  // photo family's pm+/uploader, discriminated on BOTH terms.
+  section('4d. browser thumbnails — bytes beside the original, row honest on failure');
+  const { thumbPathFor } = require('../lib/storage');
+  const thumbBytes = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+                                    Buffer.from(TAG + ' 320px jpeg stand-in')]);
+  // the uploader — a tech, BELOW the pm rank — thumbs their own photo
+  const th = await call('PUT', `/api/photos/${up.body.id}/thumb/content`,
+    { token: TECHT, raw: thumbBytes });
+  ok('PUT /api/photos/:id/thumb/content — the uploader files the thumb', th.status === 200, th.body);
+  ok('...thumb_path is EXACTLY thumbPathFor(nas_path) — {name}_t320.jpg beside the original',
+     th.body.thumb_path === thumbPathFor(up.body.nas_path) &&
+     /_t320\.jpg$/.test(String(th.body.thumb_path)),
+     { got: th.body.thumb_path, want: thumbPathFor(up.body.nas_path) });
+  const thBack = await call('GET', `/api/photos/${up.body.id}/thumb/content`,
+    { token: PMT, wantBytes: true });
+  ok('...and the thumb streams back BYTE-IDENTICAL as image/jpeg, to any session',
+     thBack.status === 200 && Buffer.compare(thBack.bytes, thumbBytes) === 0 &&
+     /image\/jpeg/.test(String(thBack.headers.get('content-type'))),
+     { status: thBack.status });
+  const origBack = await call('GET', `/api/files/${up.body.id}/content`, { token: TECHT, wantBytes: true });
+  ok('...while the ORIGINAL beside it is untouched',
+     origBack.status === 200 && Buffer.compare(origBack.bytes, upBytes) === 0);
+
+  // the gate, discriminated on BOTH terms of "pm+ OR the uploader": a SECOND
+  // tech is the identity every existing one cannot be — same rank as the
+  // uploader (so rank alone must not admit) and not the uploader (so the
+  // ownership term must not either).
+  const tech2User = TAG + 'tech2';
+  await POST('/api/users', { username: tech2User, password: 'smokepass123', role: 'tech',
+                             name: 'SMOKE TECH2' }, { token: A });
+  const TECH2T = (await POST('/api/auth/login', { username: tech2User, password: 'smokepass123' })).body.token;
+  ok('GATE: a tech who is NOT the uploader may not thumb it',
+     (await call('PUT', `/api/photos/${up.body.id}/thumb/content`,
+                 { token: TECH2T, raw: thumbBytes })).status === 403);
+  ok('...while a pm who owns nothing may — photo curation stays a rank gate',
+     (await call('PUT', `/api/photos/${up.body.id}/thumb/content`,
+                 { token: PM2T, raw: thumbBytes })).status === 200);
+
+  // failure shapes leave the row HONEST: no body -> 400 and nothing stamped;
+  // a refused byte write -> an error AND thumb_path still NULL. This is the
+  // bytes-first invariant that made PATCH :id/thumb wrong for the browser —
+  // a path stamped without bytes is the fictional actor again.
+  const freshPh = await call('POST', `/api/shows/${S}/photos/upload?name=${TAG}-no-thumb-yet&ext=jpg`,
+    { token: TECHT, raw: upBytes });
+  ok('(fixture) a second photo, thumb-less at birth',
+     freshPh.status === 200 && freshPh.body.thumb_path == null, freshPh.body.thumb_path);
+  ok('an empty thumb body is a 400 naming the contract',
+     (await call('PUT', `/api/photos/${freshPh.body.id}/thumb/content`,
+                 { token: TECHT, body: { nope: 1 } })).status === 400);
+  {
+    const fs2 = require('fs');
+    const { toLocalPath: toLocal2 } = require('../lib/storage');
+    const blockedThumbLocal = toLocal2(thumbPathFor(freshPh.body.nas_path));
+    fs2.mkdirSync(blockedThumbLocal, { recursive: true });   // a DIRECTORY where the thumb goes
+    const thBlocked = await call('PUT', `/api/photos/${freshPh.body.id}/thumb/content`,
+      { token: TECHT, raw: thumbBytes });
+    ok('a refused thumb byte-write surfaces as an error, never a green 200',
+       thBlocked.status >= 500, { status: thBlocked.status });
+    const stillBare = await GET(`/api/photos/${freshPh.body.id}`, { token: TECHT });
+    ok('...and thumb_path is STILL NULL — never stamped for bytes that did not land',
+       stillBare.body.thumb_path == null, stillBare.body.thumb_path);
+    fs2.rmdirSync(blockedThumbLocal);
+  }
+  ok('GET thumb for a thumb-less photo is an honest 404, not an empty 200',
+     (await call('GET', `/api/photos/${freshPh.body.id}/thumb/content`,
+                 { token: TECHT, wantBytes: true })).status === 404);
+
   // ── 5. the agent API ──────────────────────────────────────────────────────
   section('5. agent API — key, whoami, match, propose, confirm');
   const keyRes = await POST('/api/keys', { label: TAG + " Tom's M365 agent",
