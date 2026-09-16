@@ -388,6 +388,34 @@ const DEL = (p, o) => call('DELETE', p, o);
      (await call('GET', `/api/files/${ghostFile.body.id}/content`,
         { token: A, wantBytes: true })).bytes.toString() === 'the bytes, landing at last');
 
+  // ── a HUMAN files a FOLDER-LEVEL document (9/16 audit) ───────────────────
+  // The route took project_id-with-no-show all along, and the agent surface
+  // used it (routes/agent.js /documents takes projectId) — but api.addFile
+  // hard-set show_id, so no person could reach the shape. Tom's law (9/16):
+  // "there shouldnt be anything that cant also be done manually". This pins
+  // the server half the new folder door rides: a tech's project-level file
+  // lands show-less, on the folder's _project NAS path, and its bytes are
+  // readable back. MUTATION GATE: re-hard-set show_id in api.addFile and the
+  // walk's seam execution goes red; break the route's project branch and
+  // these do.
+  const pfMeta = await POST('/api/files', {
+    project_id: P, name: TAG + ' season sponsor deck', ext: '.pdf', kind: 'contract'
+  }, { token: TECHT });
+  ok('a tech files a FOLDER-LEVEL document — project_id, no show (the human door)',
+     pfMeta.status === 200 && pfMeta.body.show_id == null && pfMeta.body.project_id === P,
+     pfMeta.body);
+  ok('...its NAS path is the folder\'s _project directory (buildNasPath(project, null))',
+     /\\_project\\/.test(String(pfMeta.body.nas_path)), pfMeta.body.nas_path);
+  const pfBytes = await call('PUT', `/api/files/${pfMeta.body.id}/content`,
+    { token: TECHT, raw: Buffer.from('season-wide sponsor deck bytes') });
+  ok('...the bytes land through the same content PUT, TRUE size recorded',
+     pfBytes.status === 200 && pfBytes.body.size === 30, pfBytes.body);
+  const pfDown = await call('GET', `/api/files/${pfMeta.body.id}/content`,
+    { token: A, wantBytes: true });
+  ok('...and read back byte-for-byte — a folder-level file is a REAL file',
+     pfDown.status === 200 && pfDown.bytes.toString() === 'season-wide sponsor deck bytes',
+     pfDown.status);
+
   const invoice = await POST('/api/files', {
     show_id: S, name: TAG + " O'Brien freight", ext: '.pdf', kind: 'invoice',
     amount: 8400, vendor: "O'Brien Freight", doc_date: '2026-11-01', category: 'freight'
@@ -1381,6 +1409,37 @@ const DEL = (p, o) => call('DELETE', p, o);
     steps: [{ lane: 'venue', title: 'x', owner: 'nobody-real' }]
   }, { key: K, idem: TAG + ':inv#tasks' });
   ok('an agent may assign, but may not INVENT people (§4)', invented.status === 400, invented.body);
+
+  // ── REJECT works on a proposal that never made a FILE (9/16 audit) ───────
+  // A proposed tasks:batch materializes no file row — the bell synthesizes a
+  // pseudo-file with a NEGATIVE id, and the browser's Reject used to gate on
+  // GET /api/files/:id, silently dying on the 404: a dead button on exactly
+  // these proposal kinds. The seam resolves the PROPOSAL (proposal_id), and
+  // this pins the server half that ride depends on: the reject SUCCEEDS, is
+  // RECORDED on the proposal row, and creates none of the batched steps.
+  const propBatch = await POST('/api/agent/tasks:batch', {
+    showId: S, status: 'proposed',
+    provenance: { sourceKind: 'meeting', sourceRef: TAG + ':rejbatch',
+                  sourceLabel: 'Wrong client call', confidence: 70 },
+    steps: [{ lane: 'venue', title: TAG + ' batch step to reject' }]
+  }, { key: K, idem: TAG + ':rejbatch#tasks' });
+  ok('a proposed tasks:batch lands as a PROPOSAL with no file row',
+     propBatch.status === 200 && propBatch.body.status === 'proposed'
+     && !!propBatch.body.proposalId, propBatch.body);
+  const rejBatch = await POST(`/api/proposals/${propBatch.body.proposalId}/reject`,
+    { reason: 'wrong client' }, { token: A });
+  ok('Reject on a task-batch proposal SUCCEEDS — no file row required',
+     rejBatch.status === 200 && rejBatch.body.status === 'rejected', rejBatch.body);
+  const rejBatchRow = await pool.query(
+    'SELECT status, resolved_by, resolve_reason FROM proposals WHERE id=$1',
+    [propBatch.body.proposalId]);
+  ok('...and is RECORDED — the proposal row is marked rejected with the human\'s reason',
+     rejBatchRow.rows[0].status === 'rejected'
+     && /wrong client/.test(rejBatchRow.rows[0].resolve_reason || ''), rejBatchRow.rows[0]);
+  const rejBatchSteps = await pool.query(
+    'SELECT COUNT(*)::int AS n FROM steps WHERE title=$1', [TAG + ' batch step to reject']);
+  ok('...and none of its steps were ever created', rejBatchSteps.rows[0].n === 0,
+     rejBatchSteps.rows[0]);
 
   // agent notes
   const agentNote = await POST('/api/agent/notes', {
@@ -3346,11 +3405,40 @@ const DEL = (p, o) => call('DELETE', p, o);
   await POST('/api/admin/notifications/flush', {}, { token: A });
   const afterPlain = await pool.query(
     `SELECT COUNT(*)::int AS n FROM notification_outbox WHERE mode='digest' AND status='queued'`);
-  ok('F3 DIGEST: a plain flush leaves digest rows ALONE — there is no scheduler',
+  ok('F3 DIGEST: a plain flush leaves digest rows ALONE — batching means batching',
      afterPlain.rows[0].n === beforeDigest.rows[0].n, { beforeDigest, afterPlain });
   const digestFlush = await POST('/api/admin/notifications/flush', { digest: true }, { token: A });
   ok('F3 DIGEST: asking for the digest explicitly flushes it',
      digestFlush.status === 200 && digestFlush.body.considered >= 0, digestFlush.body);
+
+  // ── THE DIGEST QUEUE HAS A DRAIN (9/16 audit) ────────────────────────────
+  // NOTIFY_DEFAULT_MODE batches 'notify'/'report_nag'/'change' into digest
+  // mode — and until this pass NOTHING drained those rows on its own: the
+  // lifecycle sweep flushes immediate-only on purpose, the digest sweep
+  // passed {}, and the {digest:true} endpoint hung unused. Batched rows
+  // queued forever. The morning digest sweep (lib/digest.js runDigestSweep)
+  // now passes digest:true to the house flush — batched rows ride the daily
+  // timer, exactly what "in a digest" advertises — and Settings grew the
+  // manual door (Flush digest queue; the walk reaches it). MUTATION GATE:
+  // put flush({}) back in runDigestSweep and the drained-queue assertion
+  // goes red with the rows still sitting there.
+  await PUT(`/api/shows/${S}`, { venue: 'UW Field House — drain probe', notify: [techUser] },
+    { token: A });
+  const drainBefore = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM notification_outbox
+      WHERE username=$1 AND mode='digest' AND status='queued'`, [techUser]);
+  ok('F3 DRAIN: a batched (digest-mode) row is queued and waiting',
+     drainBefore.rows[0].n >= 1, drainBefore.rows[0]);
+  const drainSweep = await POST('/api/admin/digest', {}, { token: A });
+  ok('F3 DRAIN: the morning digest sweep answers, flush report attached',
+     drainSweep.status === 200 && !!drainSweep.body.flush, drainSweep.body.flush);
+  const drainAfter = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM notification_outbox
+      WHERE username=$1 AND mode='digest' AND status='queued'`, [techUser]);
+  ok('F3 DRAIN (mutation gate): the sweep FLUSHED the digest queue — batched rows ride ' +
+     'the morning timer instead of queuing forever',
+     drainAfter.rows[0].n === 0,
+     { before: drainBefore.rows[0].n, after: drainAfter.rows[0].n });
 
   // the mail layer's honest posture
   const mailStatus = await GET('/api/admin/mail-status', { token: A });

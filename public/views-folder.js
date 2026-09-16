@@ -2433,8 +2433,9 @@ function tabReports(show) {
       '<div class="empty">' + (show.struck_at
         ? 'This show is struck and nobody on the crew has a login, so no report is owed. ' +
           (noLogin.length ? noLogin.length + ' local hire' + (noLogin.length === 1 ? '' : 's') + ' on the sheet.' : '')
-        : 'Reports are created for every crew member the moment the show strikes — automatically when ' +
-          'the strike date passes, or now if it is already over.') + '</div>' +
+        : 'Reports are created for every crew member the moment the show strikes — the strike lands ' +
+          'the next time the sweep runs after the strike date passes (on boot, or when an admin ' +
+          'presses Sweep in Settings), or now if it is already over.') + '</div>' +
       (canStrike && !show.struck_at
         ? '<div style="display:flex;justify-content:center;margin-top:14px">' +
           '<button class="btn primary" ' + act('markStruck', show.id) + '>' + icon('checkC') +

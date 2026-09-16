@@ -1090,10 +1090,25 @@ var ADD_TYPES = [
   { label: 'Spec',                   desc: 'content / layout spec',       ext: 'e360', kind: 'spec',     ic: 'led',  size: 421888,  dim: 'content layout', spec_type: 'e360' }
 ];
 var PENDING_ADD = null;
+/* Two targets, one dialog (9/16 audit): a SHOW (the original), or — pass
+   showId null with ctx.projectId — the FOLDER itself. Agents could file a
+   folder-level document all along (routes/agent.js takes projectId with no
+   show; POST /api/files likewise); this is the human door onto the same
+   record shape. Bytes land in the folder's _project NAS directory —
+   buildFolderPath(project, null), the path the server already derives. */
 async function openAddFile(showId, ctx) {
-  PENDING_ADD = { showId: Number(showId), ctx: ctx || null };
-  var show = await api.getShow(showId);
-  var title = show.project.single ? show.project.name : show.name;
+  ctx = ctx || null;
+  var projectId = showId == null && ctx && ctx.projectId ? Number(ctx.projectId) : null;
+  PENDING_ADD = { showId: projectId ? null : Number(showId), projectId: projectId, ctx: ctx };
+  var title;
+  if (projectId) {
+    var proj = await api.getProject(projectId);
+    if (!proj) { toast('Could not open the folder', 'Folder ' + projectId + ' did not load', 'err'); return; }
+    title = proj.name;
+  } else {
+    var show = await api.getShow(showId);
+    title = show.project.single ? show.project.name : show.name;
+  }
   var ctxLine = ctx && ctx.label
     ? '<div class="callout" style="margin-bottom:14px"><div class="ci">' + icon('link') + '</div><div><b>Attaching in context</b><p>Lands on <b>' + esc(ctx.label) + '</b> and also shows in this show’s Files tab.</p></div></div>'
     : '';
@@ -1105,6 +1120,10 @@ async function openAddFile(showId, ctx) {
      button that invents a 6.7 MB proof nobody uploaded is exactly the disease
      HARDENING 21 was about.
      ══════════════════════════════════════════════════════════════════════ */
+  /* the NAS directory the target maps to — a show's own folder, or the
+     project's _project level (lib/storage.js buildFolderPath, mirrored) */
+  var nasHintPath = '\\\\e360-nas\\showrunner\\P{id}-{slug}\\' +
+    (projectId ? '_project' : 'S{id}-{slug}') + '\\{kind}';
   if (apiMode()) {
     var canStore = await api.uploadsEnabled();
     var kinds = ['other', 'spec', 'proof', 'contract', 'invoice', 'receipt', 'quote', 'photo'];
@@ -1116,15 +1135,16 @@ async function openAddFile(showId, ctx) {
        worse than refusing at the top. */
     var storageNote = canStore
       ? '<div class="hint" style="margin-top:12px">' + icon('server') +
-        'Bytes go to the e360 NAS: <span class="mono">\\\\e360-nas\\showrunner\\P{id}-{slug}\\S{id}-{slug}\\{kind}</span>. ' +
+        'Bytes go to the e360 NAS: <span class="mono">' + esc(nasHintPath) + '</span>. ' +
         'The record here is metadata; the file itself lives there.</div>'
       : '<div class="callout" style="margin:12px 0 0"><div class="ci">' + icon('alert') + '</div><div>' +
         '<b>No storage on this server</b><p>This Showrunner has no NAS connection configured, so the ' +
         'file can be <b>registered</b> — name, type, folder, who filed it — but the bytes stay on your ' +
         'machine. Ask Tom to finish the storage wiring.</p></div></div>';
-    openModal('Add file' + (ctx && ctx.label ? ' · ' + ctx.label : ''),
+    openModal('Add file' + (ctx && ctx.label ? ' · ' + ctx.label : (projectId ? ' · folder level' : '')),
       ctxLine +
-      '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">Uploads to <b>' + esc(title) + '</b>. ' +
+      '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">Uploads to <b>' + esc(title) + '</b>' +
+      (projectId ? ' at <b>folder level</b> — season-wide paperwork that belongs to no single show' : '') + '. ' +
       'The file name, extension and size are read from the file itself — nothing here is typed in twice.</p>' +
       '<div class="fin-inputs" style="grid-template-columns:1fr">' +
       finLabelWrap('File', '<input type="file" id="upFile" class="cell-in">') + '</div>' +
@@ -1154,11 +1174,11 @@ async function openAddFile(showId, ctx) {
   var opts = ADD_TYPES.map(function (t, i) {
     return '<button class="tpl-card" style="text-align:left" ' + act('commitAddFile', i) + '><div class="ti">' + icon(t.ic) + '</div><b>' + esc(t.label) + '</b><div class="td">.' + esc(t.ext) + ' · ' + esc(t.desc) + '</div></button>';
   }).join('');
-  openModal('Add file' + (ctx && ctx.label ? ' · ' + ctx.label : ''), ctxLine +
-    (ctx && ctx.label ? '' : '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px">Pick a file type to model an upload. It binds to <b>' + esc(title) + '</b>, appears in the Files grid, and opens in the viewer.</p>') +
+  openModal('Add file' + (ctx && ctx.label ? ' · ' + ctx.label : (projectId ? ' · folder level' : '')), ctxLine +
+    (ctx && ctx.label ? '' : '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px">Pick a file type to model an upload. ' + (projectId ? 'It binds to <b>' + esc(title) + '</b> at folder level — season-wide paperwork that belongs to no single show.' : 'It binds to <b>' + esc(title) + '</b>, appears in the Files grid, and opens in the viewer.') + '</p>') +
     notifyRow() +
     '<div class="tpl-cards" style="margin:0">' + opts + '</div>' +
-    '<div class="hint" style="margin-top:14px">' + icon('server') + 'Modeled — no upload backend. Bytes store on the e360 NAS: <span class="mono">\\\\e360-nas\\showrunner\\P{id}-{slug}\\S{id}-{slug}\\{kind}</span>.</div>');
+    '<div class="hint" style="margin-top:14px">' + icon('server') + 'Modeled — no upload backend. Bytes store on the e360 NAS: <span class="mono">' + esc(nasHintPath) + '</span>.</div>');
 }
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -1267,7 +1287,8 @@ async function uploadRealFile(showId, file, opts) {
   var g = guessFileKind(file.name);
   var kind = opts.kind || g.kind;
   var dims = await measureMedia(file);   /* real pixels (and, for video, a real duration) or nothing */
-  var f = await api.addFile(showId, {
+  /* opts.projectId targets the FOLDER — show_id null, bytes in _project */
+  var f = await api.addFile(opts.projectId ? null : showId, {
     name: opts.name || g.base,
     ext: g.ext,
     kind: kind,
@@ -1276,7 +1297,8 @@ async function uploadRealFile(showId, file, opts) {
     ver: 'v1',
     /* NO size, NO dim — the server owns both once real bytes land */
     meta: '',
-    attached_to: opts.attachedTo || null
+    attached_to: opts.attachedTo || null,
+    project_id: opts.projectId || undefined
   });
   var canStore = await api.uploadsEnabled();
   if (!canStore) return { file: f, stored: false, reason: 'not-configured' };
@@ -1290,7 +1312,7 @@ async function uploadRealFile(showId, file, opts) {
 
 async function commitUpload() {
   if (!PENDING_ADD) return;
-  var showId = PENDING_ADD.showId, ctx = PENDING_ADD.ctx;
+  var showId = PENDING_ADD.showId, projectId = PENDING_ADD.projectId, ctx = PENDING_ADD.ctx;
   var inp = $('#upFile');
   var file = inp && inp.files && inp.files[0];
   if (!file) { toast('Pick a file first', 'Nothing was selected.'); return; }
@@ -1298,14 +1320,21 @@ async function commitUpload() {
   if (btn) { btn.disabled = true; btn.innerHTML = 'Uploading…'; }
   var kind = ($('#upKind') && $('#upKind').value) || null;
   var name = ($('#upName') && $('#upName').value || '').trim() || null;
-  var show = await api.getShow(showId);
-  var title = show.project.single ? show.project.name : show.name;
+  var title;
+  if (projectId) {
+    var proj = await api.getProject(projectId);
+    title = (proj && proj.name) || 'the folder';
+  } else {
+    var show = await api.getShow(showId);
+    title = show.project.single ? show.project.name : show.name;
+  }
   stageNotifies();
   var res;
   try {
     res = await uploadRealFile(showId, file, {
       kind: kind, name: name || (ctx && ctx.name) || null,
-      attachedTo: ctx ? ctx.attachedTo : null
+      attachedTo: ctx ? ctx.attachedTo : null,
+      projectId: projectId || null
     });
   } catch (e) {
     if (btn) { btn.disabled = false; btn.innerHTML = 'Upload'; }
@@ -1314,14 +1343,21 @@ async function commitUpload() {
   }
   closeM();
   var suffix = await sendNotifies('file', res.file.id, 'added a file: ' + res.file.name + ' — ' + title);
+  var where = projectId ? title + ' (folder level)' : title;
   if (res.stored) {
-    toast('File uploaded', res.file.name + ' → ' + title + ' · ' + fmtBytes(res.size) + suffix);
+    toast('File uploaded', res.file.name + ' → ' + where + ' · ' + fmtBytes(res.size) + suffix);
   } else if (res.reason === 'not-configured') {
     toast('Registered — bytes not stored',
       res.file.name + ' is on the record, but this server has no NAS storage configured.', 'warn');
   } else {
     /* The row exists and the bytes did not land. Say BOTH halves. */
     toast('Filed, but the bytes did not land', res.file.name + ' — ' + res.reason, 'err');
+  }
+  if (projectId) {
+    /* a folder-level row has no show for the viewer to page through — land
+       back on the folder the file belongs to */
+    if (CUR.view === 'folder') return render('folder', CUR.projectId);
+    return;
   }
   return openViewer(res.file.id);
 }
@@ -1460,16 +1496,36 @@ async function commitAddFile(i) {
   if (demoOnly('Nothing added — pick the real file instead',
       'These cards model an upload. With a server attached the Add-file dialog ' +
       'takes the actual file and the NAS gets the actual bytes.')) return;
-  var showId = PENDING_ADD.showId, ctx = PENDING_ADD.ctx, td = ADD_TYPES[Number(i)];
-  var show = await api.getShow(showId);
-  var title = show.project.single ? show.project.name : show.name;
+  var showId = PENDING_ADD.showId, projectId = PENDING_ADD.projectId,
+      ctx = PENDING_ADD.ctx, td = ADD_TYPES[Number(i)];
+  var title;
+  if (projectId) {
+    var proj = await api.getProject(projectId);
+    title = (proj && proj.name) || 'the folder';
+  } else {
+    var show = await api.getShow(showId);
+    title = show.project.single ? show.project.name : show.name;
+  }
   var name = ctx && ctx.name ? ctx.name : (td.label + ' — ' + title.split(' ')[0]);
   var meta = ctx && ctx.label ? ('attached to ' + ctx.label + ' · added ' + fmtDate(TODAY_ISO)) : ('uploaded ' + fmtDate(TODAY_ISO) + ' · modeled');
   stageNotifies();
-  var f = await api.addFile(showId, { name: name, ext: td.ext, kind: td.kind, spec_type: td.spec_type, artifact: td.artifact,
-    ver: 'v1', size: td.size, dim: td.dim, by: ME, meta: meta, attached_to: ctx ? ctx.attachedTo : null });
+  var f;
+  try {
+    f = await api.addFile(projectId ? null : showId,
+      { name: name, ext: td.ext, kind: td.kind, spec_type: td.spec_type, artifact: td.artifact,
+        ver: 'v1', size: td.size, dim: td.dim, by: ME, meta: meta,
+        attached_to: ctx ? ctx.attachedTo : null,
+        project_id: projectId || undefined });
+  } catch (e) { toast('Not filed', String(e && e.message || e), 'err'); return; }
   closeM();
   var suffix = await sendNotifies('file', f.id, 'added a file: ' + name + ' — ' + title);
+  if (projectId) {
+    /* a folder-level row has no show for the viewer to page — land back on
+       the folder it filed into */
+    toast('File added', name + ' → ' + title + ' (folder level)' + suffix);
+    if (CUR.view === 'folder') return render('folder', CUR.projectId);
+    return;
+  }
   toast('File added', name + ' → ' + title + suffix);
   return openViewer(f.id);
 }
@@ -1855,14 +1911,27 @@ async function rtSkipAct() {
   return confirmDocAct(fileId, {});
 }
 
+/* E2's mirror, pointed at Reject (9/16 audit). This used to gate on
+   api.getFile(fileId) — and a SYNTHESIZED bell row (a tasks batch, a
+   new-event proposal: nothing materialized a file) carries a negative
+   pseudo-id GET /api/files/:id answers 404 for. So Reject silently returned:
+   no toast, no rejection, a dead button — on exactly the proposal kinds a
+   person most needs to turn down. api.rejectDoc never needed that fetch: it
+   resolves the PROPOSAL from the cached proposal_id (proposalIdFor). Ask it
+   directly, and let the toast tell the truth either way. */
 async function rejectDocAct(fileId) {
-  var f = await api.getFile(fileId);
-  if (!f) return;
-  var showId = f.show_id;
-  var r = await api.rejectDoc(fileId);
-  toast('Proposal rejected', r.name + ' removed — nothing landed in the record');
+  var cached = FILES_BY_ID[Number(fileId)] || null;
+  var showId = (cached && cached.show_id) || null;
+  var r;
+  try { r = await api.rejectDoc(fileId); }
+  catch (e) { toast('Not rejected', String(e && e.message || e), 'err'); return; }
   refreshBellPanel();
-  if (CUR.view === 'viewer') { await updateFinCount(); updateBellBadge(); return openShowFin(showId); }
+  toast('Proposal rejected',
+    ((r && r.name) || 'The proposal') + ' removed — nothing landed in the record');
+  if (CUR.view === 'viewer' && showId) {
+    await updateFinCount(); updateBellBadge();
+    return openShowFin(showId);
+  }
   return refreshFinanceUI();
 }
 async function excAttach(id, kind) {
@@ -2528,7 +2597,7 @@ async function openAddFinDoc(showId, link) {
     '<p style="margin:0 0 12px;color:var(--text-2);font-size:13px">' + intro + '</p>' +
     fileWell + inputs + notifyRow() +
     '<div class="tpl-cards" style="margin:0" id="fdCards">' + cards + '</div>' + storeNote +
-    '<div class="hint" style="margin-top:14px">' + icon('bolt') + 'Your M365 agent does this filing automatically from your inbox — high-confidence matches file themselves; uncertain ones land as <b>proposed</b> for review.</div>');
+    '<div class="hint" style="margin-top:14px">' + icon('bolt') + 'Once your M365 agent runs, it will do this filing from your inbox — high-confidence matches will file themselves; uncertain ones will land as <b>proposed</b> for review.</div>');
   /* Show the chosen file the moment it is chosen. Guarded the same way
      openAddFile() guards its own listener — a DOM shim has no addEventListener
      and must not take the whole modal down with it. */
@@ -3726,6 +3795,29 @@ async function digestNowAct() {
   toast('Morning digest', bits.length ? bits.join(' · ')
     : 'nobody to consider — one row per person per day, and empty plates stay silent');
   await updateBellBadge();
+  return render('settings');
+}
+
+/* Flush digest queue — the manual drain beside the morning timer's daily one
+   (Tom's law, 9/16: "there shouldnt be anything that cant also be done
+   manually"). Calls the seam that existed unused since the outbox pass:
+   POST /api/admin/notifications/flush {digest:true}. The toast reads back the
+   flush's own arithmetic — sent / skipped / still queued — never a bare OK. */
+async function flushDigestAct() {
+  var r;
+  try { r = await api.flushNotifications({ digest: true }); }
+  catch (e) { toast('Not flushed', String(e && e.message || e), 'err'); return; }
+  var bits = [];
+  if (r.sent) bits.push(r.sent + ' sent');
+  if (r.skipped) bits.push(r.skipped + ' skipped');
+  if (r.queued) bits.push(r.queued + ' still queued' + (r.configured ? '' : ' — mail not configured'));
+  if (r.failed) {
+    bits.push(r.failed + ' failed');
+    toast('Digest flush hit failures', bits.join(' · '), 'err');
+    return render('settings');
+  }
+  toast('Digest queue flushed', bits.length ? bits.join(' · ')
+    : 'nothing was waiting — batched rows also ride the morning digest timer');
   return render('settings');
 }
 
@@ -7393,6 +7485,7 @@ var ACTIONS = {
   attachStep:    function (t, id) { return attachToStep(id); },
   attachBooking: function (t, id) { return attachToBooking(id); },
   addFile:       function (t, id) { return openAddFile(id); },
+  addProjectFile: function (t, id) { return openAddFile(null, { projectId: Number(id) }); },
   commitAddFile: function (t, id) { return commitAddFile(id); },
   commitUpload:  function () { return commitUpload(); },
   downloadFile:  function (t, id) { return downloadFile(id); },
@@ -7623,6 +7716,7 @@ var ACTIONS = {
   goToday:       function () { return render('today'); },
   goSettings:    function () { return render('settings'); },
   digestNow:     function () { return digestNowAct(); },
+  flushDigest:   function () { return flushDigestAct(); },
   /* people admin — the Team view's controls (admin-only, server-enforced) */
   userAdd:              function () { return openAddPerson(); },
   userAddCommit:        function () { return commitAddPerson(); },

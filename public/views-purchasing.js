@@ -163,7 +163,10 @@ function viewPurchasing(o) {
     poRiskPanel(o.risks) +
     '<div style="display:flex;flex-direction:column;gap:16px">' + poApprovalQueue(o.approvals) +
     needsRollupPanel() +
-    '<div class="hint" style="margin-top:0">' + icon('bolt') + '<span>Your agent can draft these — <b>PO-26-049</b> below came out of the <b>LOVB season planning</b> meeting. Once Teams transcripts go live, “derive the purchase list from this meeting” files straight onto this board as a draft.</span></div>' +
+    '<div class="hint" style="margin-top:0">' + icon('bolt') + '<span>Once Teams transcripts go live, your agent will draft these — “derive the purchase list from this meeting” files straight onto this board as a draft' +
+    (typeof SR !== 'undefined' && SR.isApi()
+      ? '.'
+      : ' (<b>PO-26-049</b> below models that flow, from the <b>LOVB season planning</b> meeting).') + '</span></div>' +
     '</div></div>' +
     boardHead + poBoard(o.pos);
 }

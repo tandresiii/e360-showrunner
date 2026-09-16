@@ -168,8 +168,9 @@ router.get('/admin/mail-status', requireRole('admin'), asyncH(async (req, res) =
 }));
 
 // ── ADMIN: flush ────────────────────────────────────────────────────────────
-// POST { digest:true } also flushes the digest queue. A future scheduler calls
-// exactly this endpoint; there is no scheduler in this app.
+// POST { digest:true } also flushes the digest queue. The morning digest timer
+// (lib/digest.js) drains that queue daily now; this endpoint is the manual
+// door — Settings → Notifications → "Flush digest queue" calls exactly this.
 router.post('/admin/notifications/flush', requireRole('admin'), asyncH(async (req, res) => {
   const b = req.body || {};
   const out = await notify.flush({

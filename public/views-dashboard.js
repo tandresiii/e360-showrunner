@@ -200,6 +200,15 @@ function viewSeason(project) {
     (canEditFolder(project)
       ? '<button class="btn primary" ' + act('addShow', project.id) + '>' + icon('plus') + 'Add show</button>'
       : '') +
+    /* 9/16 — the folder-level file door. Agents could file a season-wide
+       document against the folder (projectId, no show) since the agent pass;
+       a person could not: api.addFile hard-set show_id and nothing rendered
+       an Add-file control outside a show. Same dialog, the folder as target,
+       bytes into the folder's _project NAS directory. Rendered like the show
+       Files tab's own door (no client gate); the server floor is tech+. */
+    '<button class="btn ghost" ' + act('addProjectFile', project.id) +
+    ' title="File a season-wide document against this folder — no single show. Lands in the folder’s _project NAS directory.">' +
+    icon('plus') + 'Add file</button>' +
     /* The season-wide fan-outs stay honestly not-built — but the toast now
        points at Seed pipeline, a control that exists (the old copy sent people
        hunting for a per-show seed button that was never rendered). */
@@ -366,8 +375,9 @@ function viewArchive(projects) {
 
   return '<div class="page-h"><div><h1>Archive</h1><div class="sub">Folders that closed out and left the ' +
     'working set. Nothing here is deleted: every folder still opens with all of its files, money and ' +
-    'history, and search still finds it. Auto-archive runs ' + ARCHIVE_AFTER_DAYS +
-    ' days after closeout completes.</div></div>' +
+    'history, and search still finds it. A folder auto-archives ' + ARCHIVE_AFTER_DAYS +
+    ' days after closeout completes — applied the next time the sweep runs: on boot, or when an ' +
+    'admin presses Sweep in Settings.</div></div>' +
     '<button class="btn ghost" ' + act('goProjects') + '>' + icon('grid') + 'Back to Projects</button></div>' +
     '<div class="card"><div class="card-h"><h3>Archived folders</h3>' +
     '<span class="pill idle">' + projects.length + ' folder' + (projects.length === 1 ? '' : 's') +

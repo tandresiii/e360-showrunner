@@ -887,13 +887,19 @@ function viewSettings(ctx) {
                                  : '<span style="color:var(--go)">nothing queued</span>') +
         '<div class="set-row"><span class="k">Your queue</span><span class="v">' +
         '<button class="btn sm ghost" ' + act('openOutbox') + '>' + icon('mail') + 'See what was sent</button>' +
+        (CURRENT_USER.role === 'admin'
+          ? '<button class="btn sm ghost" ' + act('flushDigest') + ' style="margin-left:8px" ' +
+            'title="Drain the batched (digest-mode) queue for everyone right now — the same flush the morning digest timer runs daily">' +
+            icon('send') + 'Flush digest queue</button>'
+          : '') +
         '</span></div>' +
         '<div class="perm-note" style="margin-top:10px">' + inlineIcon('bolt') +
         ' Defaults are assignments and @mentions right away, everything else digested. ' +
         '<b>Bell only</b> silences the email, never the app. A message you already read in-app is ' +
-        'skipped rather than mailed. Batched (“in a digest”) rows still flush only when someone ' +
-        'asks — an honest gap. The <b>morning digest</b> is different: a real daily timer ' +
-        '(DIGEST_HOUR_UTC), one row per day, and empty mornings send nothing at all.</div>';
+        'skipped rather than mailed. Batched (“in a digest”) rows ride the <b>morning digest</b> ' +
+        'timer (DIGEST_HOUR_UTC) — its daily sweep flushes the digest queue — or go now when an ' +
+        'admin presses <b>Flush digest queue</b>. The morning digest itself stays one row per day, ' +
+        'and empty mornings send nothing at all.</div>';
     })()) +
     /* ══ F6 · the operator's card — the sweep and the archive ══════════════ */
     (CURRENT_USER.role === 'admin' ? card('box', 'Archive &amp; the sweep', (function () {

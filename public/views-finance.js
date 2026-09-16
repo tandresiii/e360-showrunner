@@ -153,7 +153,7 @@ function viewFinance(fin) {
   var excCard = '<div class="card"><div class="card-h"><h3>Waiting on me · chase list</h3>' +
     (fin.exceptions.length ? '<span class="pill warn"><span class="dot"></span>' + fin.exceptions.length + ' open · ' + esc(fmtMoney(st.excAmount)) + '</span>' : '<span class="pill go"><span class="dot"></span>Clear</span>') +
     '</div>' + excRows +
-    '<div class="perm-note" style="padding:12px 16px;margin-top:0">' + inlineIcon('bolt') + ' Booked or spent with no receipt / invoice / confirmation on file — chase <b>ahead</b> of the close, not after it. Your agent watches your inbox for these.</div></div>';
+    '<div class="perm-note" style="padding:12px 16px;margin-top:0">' + inlineIcon('bolt') + ' Booked or spent with no receipt / invoice / confirmation on file — chase <b>ahead</b> of the close, not after it. Once your M365 agent runs, it will watch your inbox for these.</div></div>';
 
   /* --- jobs table — every deal, its burn, its margin ----------------------- */
   var jobRows = fin.jobs.map(function (jf) {
@@ -530,7 +530,7 @@ function tabFinancials(show) {
     '<div style="display:flex;flex-direction:column;gap:0">' + expCard + docsBlock + '</div>' +
     '<div style="display:flex;flex-direction:column;gap:16px">' +
     (jf ? budgetPanel(jf, show, gate) : '') + waitPanel +
-    '<div class="hint" style="margin-top:0">' + icon('bolt') + '<span>Your M365 agent can do this filing — it watches your inbox, matches each doc to the right show + job, and files high-confidence matches itself. Anything uncertain lands as <b>proposed</b> above.</span></div>' +
+    '<div class="hint" style="margin-top:0">' + icon('bolt') + '<span>Once your M365 agent runs, it will do this filing — watching your inbox, matching each doc to the right show + job, and filing high-confidence matches itself. Anything uncertain lands as <b>proposed</b> above.</span></div>' +
     '</div></div>';
 }
 

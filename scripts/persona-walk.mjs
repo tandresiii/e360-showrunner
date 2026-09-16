@@ -3352,6 +3352,169 @@ async function main() {
   ok('the floor is tech+: a viewer is 403 from the role gate, before storage is ever consulted',
      phViewer.status === 403, phViewer);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('48 · every automated capability keeps a human door  (Tom, 9/16)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom's law, decreed 9/16: "there shouldnt be anything that cant also be
+  // done manually" — and its corollary, the UI must never claim actors that
+  // do not exist. A read-only audit found five violations; this section is
+  // their regression wall: the new doors reach(), the seams EXECUTE against
+  // this walk's live server (§37's lesson), and the fictional-actor and
+  // scheduler-overstating strings are held out of the source MECHANICALLY,
+  // the way §38 holds the toast faces.
+
+  // ── the doors exist and render ────────────────────────────────────────────
+  reach('Reject an agent proposal (every kind, file row or none)',
+    { seam: 'rejectDoc', action: 'rejectDoc' });
+  reach('Flush the digest queue (Settings · Notifications)',
+    { seam: 'flushNotifications', action: 'flushDigest' });
+  reach('Add a folder-level file (season dashboard)',
+    { seam: 'addFile', action: 'addProjectFile' });
+
+  // ── 1 · REJECT is not a dead button on a file-less proposal ──────────────
+  // A proposed tasks:batch materializes NO file row; the bell/review reshape
+  // synthesizes a pseudo-file with a NEGATIVE id. rejectDocAct used to gate
+  // on api.getFile(fileId) — a 404 for that id — and silently returned:
+  // no toast, no rejection. MUTATION GATE: put the `if (!f) return;` gate
+  // back in front of api.rejectDoc and both halves below go red.
+  {
+    const rdBody = (APP_JS.match(/async function rejectDocAct[\s\S]*?\n}/) || [''])[0];
+    ok('rejectDocAct no longer gates on api.getFile — the dead-button gate is GONE',
+       rdBody.length > 0 && !/api\.getFile/.test(rdBody) && /api\.rejectDoc/.test(rdBody),
+       rdBody.slice(0, 120));
+    ok('…and its failure toast wears the error face (“Not rejected”, kind err)',
+       /toast\('Not rejected',[\s\S]{0,120}'err'\)/.test(rdBody), rdBody.slice(0, 200));
+
+    // the live half: brenden's agent proposes a tasks batch (no file row),
+    // and the REAL api.js — the loaded browser half — rejects it through the
+    // pseudo-id the review page hands a click.
+    //
+    // These seams read the page's STORE CACHES — globals data.js defines
+    // before api.js loads on the real page, empty in a fresh API-mode tab
+    // and filled by the A.* normalizers. Provide exactly that slice here;
+    // §37's eight-global shim stays untouched for the seams that need none.
+    // (mkThumb is data.js's photo placeholder — a headless stub, never hit
+    // for the document kinds this section files.)
+    for (const g of ['FILES_BY_ID', 'SHOWS_BY_ID', 'PROJECTS_BY_ID',
+                     'EXPENSES_BY_ID', 'BOOKINGS_BY_ID']) {
+      if (!(g in tab)) tab[g] = {};
+    }
+    if (!('ALL_EXPENSES' in tab)) tab.ALL_EXPENSES = [];
+    if (!('mkThumb' in tab)) tab.mkThumb = () => '';
+    const wtbKey = await POST('/api/keys',
+      { label: 'walk batch agent', scopes: ['agent:propose'] }, { token: T.brenden });
+    ok('brenden mints his agent a propose-scoped key', wtbKey.status === 200 && !!wtbKey.body.key,
+       wtbKey.body?.key_prefix);
+    const wtb = await POST('/api/agent/tasks:batch', {
+      showId: SHOW, status: 'proposed',
+      provenance: { sourceKind: 'meeting', sourceRef: 'walk:48batch',
+                    sourceLabel: 'Wrong client call', confidence: 68 },
+      steps: [{ lane: 'venue', title: 'walk48 step that must never exist' }]
+    }, { key: wtbKey.body.key, idem: 'walk:48batch#tasks' });
+    ok('the agent proposes a tasks batch — a proposal with NO file row',
+       wtb.status === 200 && wtb.body.status === 'proposed' && !!wtb.body.proposalId, wtb.body);
+    const WPID = wtb.body.proposalId;
+    tab.SR.setToken(T.brenden);
+    const wtbRows = await tab.api.listProposals({ status: 'pending' });
+    const wtbRow = (wtbRows || []).find((p) => p.id === WPID);
+    ok('the REAL api.listProposals synthesizes the pseudo-file (negative id, proposal_id cached)',
+       !!wtbRow && wtbRow.file && wtbRow.file.id === -WPID && wtbRow.file.proposal_id === WPID,
+       wtbRow && wtbRow.file && { id: wtbRow.file.id, pid: wtbRow.file.proposal_id });
+    const wtbRej = await tab.api.rejectDoc(-WPID).then((r) => r, (e) => ({ error: String(e) }));
+    ok('the REAL api.rejectDoc EXECUTES on the pseudo-id — the click path, minus the finger',
+       wtbRej && wtbRej.ok === true && !wtbRej.error, wtbRej);
+    const wtbDb = await pool.query('SELECT status, resolved_by FROM proposals WHERE id=$1', [WPID]);
+    ok('…and the rejection is RECORDED — resolved by the human, no step ever created',
+       wtbDb.rows[0].status === 'rejected' && wtbDb.rows[0].resolved_by === 'brenden' &&
+       (await pool.query(`SELECT COUNT(*)::int AS n FROM steps
+          WHERE title='walk48 step that must never exist'`)).rows[0].n === 0,
+       wtbDb.rows[0]);
+  }
+
+  // ── 2 · the digest queue drains — timer AND button ────────────────────────
+  // Batched ('in a digest') rows queued forever: the lifecycle sweep flushes
+  // immediate-only, the digest sweep passed {}, and the {digest:true} seam
+  // hung unrendered. Now the morning digest sweep drains it (smoke's
+  // mutation-gated F3 DRAIN) and Settings has the manual door; this executes
+  // the exact seam the button fires, as the admin the button renders for.
+  {
+    await PUT('/api/me/notification-prefs', { notify: 'digest' }, { token: T.omar });
+    const wfd = await PUT(`/api/shows/${SHOW}`,
+      { venue: 'Fiserv Forum — dock B', notify: ['omar'] }, { token: T.brenden });
+    ok('brenden notifies omar of a change — omar batches it (digest mode)', wfd.status === 200);
+    const wfdBefore = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM notification_outbox
+        WHERE username='omar' AND mode='digest' AND status='queued'`);
+    ok('…the batched row is queued and waiting', wfdBefore.rows[0].n >= 1, wfdBefore.rows[0]);
+    tab.SR.setToken(T.tom);
+    const wfdRes = await tab.api.flushNotifications({ digest: true })
+      .then((r) => r, (e) => ({ error: String(e) }));
+    ok('the REAL api.flushNotifications({digest:true}) executes — the Settings button\'s exact call',
+       wfdRes && !wfdRes.error && typeof wfdRes.considered === 'number', wfdRes);
+    const wfdAfter = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM notification_outbox
+        WHERE username='omar' AND mode='digest' AND status='queued'`);
+    ok('…and omar\'s batched queue is DRAINED', wfdAfter.rows[0].n === 0, wfdAfter.rows[0]);
+    const vg48 = SRC['views-global.js'];
+    ok('the button renders beside “See what was sent”, admin-gated like the endpoint',
+       /act\('openOutbox'\)[\s\S]{0,400}act\('flushDigest'\)/.test(vg48) &&
+       /role === 'admin'[\s\S]{0,300}act\('flushDigest'\)/.test(vg48));
+    ok('the card copy stopped claiming the queue only moves when someone asks',
+       !/still flush only when someone asks/.test(vg48) &&
+       /ride the <b>morning digest<\/b>/.test(vg48));
+  }
+
+  // ── 3 · a human files a FOLDER-LEVEL document, like agents always could ──
+  // routes/agent.js takes projectId with no show; POST /api/files likewise;
+  // api.addFile hard-set show_id so no person could reach the shape, and no
+  // folder view rendered a door. MUTATION GATE: re-hard-set show_id in
+  // api.addFile (or drop the season header button) and this goes red.
+  {
+    tab.SR.setToken(T.brenden);
+    const wpf = await tab.api.addFile(null,
+      { project_id: PROJ, name: 'walk48 season sponsor deck', ext: 'pdf', kind: 'contract' })
+      .then((r) => r, (e) => ({ error: String(e) }));
+    ok('the REAL api.addFile takes a folder target — show_id null, project_id kept',
+       wpf && !wpf.error && wpf.show_id == null && wpf.project_id === PROJ, wpf);
+    ok('…and the server derived the folder\'s _project NAS path — buildFolderPath, mirrored',
+       /\\_project\\/.test(String(wpf && wpf.nas_path)), wpf && wpf.nas_path);
+    ok('the season dashboard renders the door (Add file, beside Add show)',
+       /act\('addProjectFile', project\.id\)/.test(SRC['views-dashboard.js']));
+    ok('the add-file dialog names the folder target honestly (_project, folder level)',
+       /_project/.test(APP_JS) && /folder level/.test(APP_JS));
+  }
+
+  // ── 4 · the fictional actors are GONE from the source ────────────────────
+  // Nothing watches any inbox (lib/mail.js only sends). The mechanism —
+  // agent API + confidence bands — is real; the actor is not yet. The copy
+  // now says so in the API-keys card's conditional voice, and these scans
+  // keep it that way.
+  {
+    for (const [fname, bad] of [
+      ['views-finance.js', /watches your inbox/],
+      ['app.js', /does this filing automatically/],
+      ['views-folder.js', /automatically when the strike date passes/],
+      ['views-dashboard.js', /Auto-archive runs/]
+    ]) {
+      ok(`“${String(bad).slice(1, -1)}” is GONE from ${fname}`, !bad.test(SRC[fname]));
+    }
+    ok('the finance copy speaks in the conditional — the agent WILL run, it does not yet',
+       (SRC['views-finance.js'].match(/Once your M365 agent runs/g) || []).length === 2 &&
+       /Once your M365 agent runs/.test(APP_JS));
+    // the demo fixture PO-26-049 may be named only on the DEMO side of the
+    // mode ternary — a live board must not promise a demo row
+    const poHint = SRC['views-purchasing.js'];
+    const poHits = poHint.match(/PO-26-049/g) || [];
+    ok('PO-26-049 is name-dropped once, demo-gated — never promised on a live board',
+       poHits.length === 1 && /SR\.isApi\(\)[\s\S]{0,220}PO-26-049/.test(poHint), poHits.length);
+    // the sweep-honest phrasing replaced both scheduler overstatements
+    ok('both reworded lines defer to the SWEEP — on boot, or when an admin presses Sweep',
+       /the next time the sweep runs after the strike date passes/.test(SRC['views-folder.js']) &&
+       /presses Sweep in Settings/.test(SRC['views-folder.js']) &&
+       /the next time the sweep runs: on boot/.test(SRC['views-dashboard.js']) &&
+       /presses Sweep in Settings/.test(SRC['views-dashboard.js']));
+  }
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

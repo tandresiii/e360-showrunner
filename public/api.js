@@ -1378,28 +1378,53 @@ var api = (function () {
       if (!API()) return ok(FILES_BY_ID[Number(id)] || null);
       return SR.get('/api/files/' + Number(id)).then(A.file, function () { return null; });
     },
+    /* A PROJECT-LEVEL target (9/16 audit): pass showId null with
+       body.project_id set and the file lands folder-level — show_id null,
+       project_id kept, bytes in the folder's _project NAS directory. The
+       server route took this shape all along (POST /api/files, project_id
+       OR show_id) and the agent surface used it; this seam hard-set show_id
+       so no human could. Mirrors routes/files.js, invents nothing. */
     addFile: function (showId, body) {
+      var projectTarget = showId == null && body && body.project_id != null
+        ? Number(body.project_id) : null;
       if (!API()) {
-        var s = SHOWS_BY_ID[Number(showId)];
-        if (!s) return fail('show ' + showId + ' not found');
-        var f = mkFile({
+        var f, s = null;
+        if (projectTarget) {
+          var p = PROJECTS_BY_ID[projectTarget];
+          if (!p) return fail('folder ' + projectTarget + ' not found');
+        } else {
+          s = SHOWS_BY_ID[Number(showId)];
+          if (!s) return fail('show ' + showId + ' not found');
+        }
+        f = mkFile({
           name: body.name, ext: body.ext, kind: body.kind, spec_type: body.spec_type,
           artifact: body.artifact, ver: body.ver, size: body.size, dim: body.dim,
           by: body.by || ME, off: 0, meta: body.meta, chain: body.chain_key
         });
-        f.show_id = s.id; f.project_id = s.project_id;
+        if (projectTarget) {
+          f.show_id = null; f.project_id = projectTarget;
+          var pp = PROJECTS_BY_ID[projectTarget];
+          if (pp && pp.activity) {
+            pp.activity.unshift(mkAct(ME, 'filed a folder-level ' + (f.kind || 'file'), f.name, 0, _nowHM()));
+          }
+        } else {
+          f.show_id = s.id; f.project_id = s.project_id;
+        }
         if (body.attached_to) f.attached_to = body.attached_to;
         FILES_BY_ID[f.id] = f;
-        if (body.unshift) s.files.unshift(f); else s.files.push(f);
+        if (s) { if (body.unshift) s.files.unshift(f); else s.files.push(f); }
         return ok(f);
       }
       var b = {}; Object.keys(body || {}).forEach(function (k) { b[k] = body[k]; });
-      b.show_id = Number(showId);
+      if (projectTarget) { b.project_id = projectTarget; delete b.show_id; }
+      else b.show_id = Number(showId);
       delete b.unshift; delete b.by;
       return SR.post('/api/files', b, { notifyOk: true }).then(function (r) {
         var f = A.file(r && r.file ? r.file : r);
-        var s2 = SHOWS_BY_ID[Number(showId)];
-        if (s2 && s2.files) { if (body && body.unshift) s2.files.unshift(f); else s2.files.push(f); }
+        if (!projectTarget) {
+          var s2 = SHOWS_BY_ID[Number(showId)];
+          if (s2 && s2.files) { if (body && body.unshift) s2.files.unshift(f); else s2.files.push(f); }
+        }
         return f;
       });
     },
@@ -2265,18 +2290,22 @@ var api = (function () {
       if (!API()) {
         var f = FILES_BY_ID[Number(fileId)];
         if (!f) return fail('file ' + fileId + ' not found');
+        /* a show-less proposal (folder-level, or one that never named a show)
+           has nothing to unpick from a show — the record removal is enough */
         var s = SHOWS_BY_ID[f.show_id];
-        s.files = s.files.filter(function (x) { return x.id !== f.id; });
+        if (s) {
+          s.files = s.files.filter(function (x) { return x.id !== f.id; });
+          var dropped = (s.expenses || []).filter(function (e) { return e.file_id === f.id; });
+          s.expenses = (s.expenses || []).filter(function (e) { return e.file_id !== f.id; });
+          dropped.forEach(function (e) {
+            delete EXPENSES_BY_ID[e.id];
+            var i = ALL_EXPENSES.indexOf(e);
+            if (i >= 0) ALL_EXPENSES.splice(i, 1);
+          });
+          s.activity.unshift(mkAct(ME, 'rejected a proposed ' + f.kind, (f.vendor || f.name), 0, _nowHM()));
+        }
         delete FILES_BY_ID[f.id];
-        var dropped = (s.expenses || []).filter(function (e) { return e.file_id === f.id; });
-        s.expenses = (s.expenses || []).filter(function (e) { return e.file_id !== f.id; });
-        dropped.forEach(function (e) {
-          delete EXPENSES_BY_ID[e.id];
-          var i = ALL_EXPENSES.indexOf(e);
-          if (i >= 0) ALL_EXPENSES.splice(i, 1);
-        });
-        s.activity.unshift(mkAct(ME, 'rejected a proposed ' + f.kind, (f.vendor || f.name), 0, _nowHM()));
-        return ok({ ok: true, show_id: s.id, name: f.vendor || f.name });
+        return ok({ ok: true, show_id: s ? s.id : null, name: f.vendor || f.name });
       }
       var cached = FILES_BY_ID[Number(fileId)] || {};
       var showId = cached.show_id || null, label = cached.vendor || cached.name || 'the document';

@@ -4504,11 +4504,11 @@ function mkNotif(username, kind, subject, x) {
   if (n.mode === 'digest' && n.status === 'queued' && n.kind !== 'digest') refreshDigestRow(username);
   return n;
 }
-/* "a queued digest row per user that a future scheduler flushes" — literally
-   one open row per person, whose subject counts what is waiting behind it.
-   HONEST TODO: nothing in this app runs on a timer. Immediate rows flush on the
-   sweep; digest rows flush only when someone asks for them explicitly. A real
-   daily digest needs a scheduler this app does not have and will not fake. */
+/* "a queued digest row per user that a scheduler flushes" — literally one
+   open row per person, whose subject counts what is waiting behind it. The
+   morning digest sweep drains the digest queue (runDigestSweepDemo below,
+   mirroring lib/digest.js runDigestSweep), and an admin can drain it any
+   moment from Settings — the same two doors the server has. */
 function refreshDigestRow(username) {
   var n = NOTIF_OUTBOX.filter(function (o) {
     return o.username === username && o.mode === 'digest' && o.status === 'queued' && o.kind !== 'digest';
@@ -4786,6 +4786,9 @@ function runDigestSweepDemo() {
     });
     out.notified++; out.users[u.username] = { items: d.total, outcome: 'notified' };
   });
+  /* the drain — lib/digest.js runDigestSweep passes digest:true to the house
+     flush, so batched (digest-mode) rows ride the morning sweep. Same here. */
+  out.flush = flushNotifications({ digest: true });
   return out;
 }
 
