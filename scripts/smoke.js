@@ -5704,6 +5704,99 @@ const DEL = (p, o) => call('DELETE', p, o);
   const pmEditsOther = await PUT(`/api/users/${HIRE_ID}`, { title: 'nope' }, { token: TECHT });
   ok('17 GATE: somebody else\'s profile is 403 for a non-admin', pmEditsOther.status === 403, pmEditsOther.body);
 
+  // ── PHONE — free text, F4 hygiene, one narrow self-serve door ────────────
+  // SMS notifications (Twilio, a later build) will key off the USER account,
+  // and the opt-in story rides on people entering their OWN number (Tom,
+  // 2026-09-16: "you might as well add the phone field everywhere"). So:
+  // users.phone is an additive column, an admin sets it on the Team path, a
+  // person sets THEIR OWN through PUT /me/phone — which carries no id and
+  // therefore cannot aim at anybody else — and the assembled call sheet reads
+  // crew.phone || user.phone so crew rows get numbers for free.
+  const phoneCol = await pool.query(
+    `SELECT data_type FROM information_schema.columns
+      WHERE table_name='users' AND column_name='phone'`);
+  ok('17 PHONE: the users.phone column migrated additively (TEXT, initDB on boot)',
+     phoneCol.rows.length === 1 && phoneCol.rows[0].data_type === 'text', phoneCol.rows);
+  const admSetsPhone = await PUT(`/api/users/${HIRE_ID}`, { phone: '224.251.9334' }, { token: A });
+  ok('17 PHONE: an admin sets it on the Team path — free text, dots and all',
+     admSetsPhone.status === 200 && admSetsPhone.body.phone === '224.251.9334', admSetsPhone.body.phone);
+  const HIRE_SELF = newPwLogin.body.token;
+  const selfPhone = await PUT('/api/me/phone', { phone: '  +1 330 555 0101  ' }, { token: HIRE_SELF });
+  ok('17 PHONE: a person sets THEIR OWN through the narrow route, trimmed, format untouched',
+     selfPhone.status === 200 && selfPhone.body.phone === '+1 330 555 0101'
+     && selfPhone.body.username === newHire, selfPhone.body);
+  const hireMePhone = await GET('/api/auth/me', { token: HIRE_SELF });
+  ok('17 PHONE: GET /auth/me carries it back to them',
+     hireMePhone.body.user && hireMePhone.body.user.phone === '+1 330 555 0101', hireMePhone.body.user);
+  const rosterPhone = await GET('/api/users', { token: TECHT });
+  ok('17 PHONE: the roster publishes it to everyone — phones ride on call sheets by design',
+     (rosterPhone.body.find((u) => u.username === newHire) || {}).phone === '+1 330 555 0101');
+
+  // the self-only gate, with discriminating identities (MUTATION-TESTED: break
+  // the `req.session.userId !== id` refusal in PUT /users/:id, or point the
+  // /me/phone UPDATE at a body-supplied id, and the four assertions below go red)
+  const techRowBefore = await pool.query('SELECT id, phone FROM users WHERE username=$1', [techUser]);
+  const TECH_UID = techRowBefore.rows[0].id;
+  const phoneHijack = await PUT(`/api/users/${TECH_UID}`, { phone: '(999) 999-9999' }, { token: HIRE_SELF });
+  ok('17 PHONE GATE: a non-admin cannot set somebody ELSE\'s number — 403 on the Team path',
+     phoneHijack.status === 403, phoneHijack.body);
+  ok('17 PHONE GATE: ...and the refusal wrote nothing',
+     (await pool.query('SELECT phone FROM users WHERE id=$1', [TECH_UID])).rows[0].phone
+       === techRowBefore.rows[0].phone);
+  const smuggle = await PUT('/api/me/phone',
+    { phone: '(414) 555-0777', id: TECH_UID, user_id: TECH_UID, username: techUser },
+    { token: HIRE_SELF });
+  ok('17 PHONE GATE: /me/phone with a smuggled id still writes the SESSION\'s own row',
+     smuggle.status === 200 && smuggle.body.username === newHire
+     && smuggle.body.phone === '(414) 555-0777', smuggle.body);
+  ok('17 PHONE GATE: ...and the smuggled target is untouched',
+     (await pool.query('SELECT phone FROM users WHERE id=$1', [TECH_UID])).rows[0].phone
+       === techRowBefore.rows[0].phone);
+
+  // F4 HYGIENE — the same washer every stored text field gets (the jumbled chip)
+  const dirtyPhone = await PUT('/api/me/phone',
+    { phone: ' 2​24.251.9‮334 ' }, { token: HIRE_SELF });
+  ok('17 PHONE F4 HYGIENE: controls, zero-widths and bidi marks are stripped on write',
+     dirtyPhone.status === 200 && dirtyPhone.body.phone === '224.251.9334',
+     JSON.stringify(dirtyPhone.body.phone));
+  ok('17 PHONE F4 HYGIENE: ...and it is the STORED value that is clean, not a display trim',
+     (await pool.query('SELECT phone FROM users WHERE id=$1', [HIRE_ID])).rows[0].phone
+       === '224.251.9334');
+  const admDirty = await PUT(`/api/users/${HIRE_ID}`, { phone: '(4̶14) 555-0̶200' }, { token: A });
+  ok('17 PHONE F4 HYGIENE: the admin path strips the overlay strokes too — every write path, one washer',
+     admDirty.status === 200 && admDirty.body.phone === '(414) 555-0200',
+     JSON.stringify(admDirty.body.phone));
+  const clearPhone = await PUT('/api/me/phone', { phone: '' }, { token: HIRE_SELF });
+  ok('17 PHONE: blank clears it — a number can be taken away again',
+     clearPhone.status === 200 && clearPhone.body.phone === '', JSON.stringify(clearPhone.body.phone));
+
+  // ── PHONE → THE CALL SHEET: crew.phone || user.phone ─────────────────────
+  // §F2's show already carries the three-line crew this needs: techUser and
+  // pm2User with logins (no number on their crew lines), and Local Hand, whose
+  // line is the only place a local hire's number can live.
+  await PUT(`/api/users/${TECH_UID}`, { phone: '(262) 555-0161' }, { token: A });
+  const pm2Uid = (await pool.query('SELECT id FROM users WHERE username=$1', [pm2User])).rows[0].id;
+  await PUT(`/api/users/${pm2Uid}`, { phone: '(414) 555-0158' }, { token: A });
+  // §F2's FS binding is block-scoped up in §15; the show is found again by its
+  // name, which is TAG-stamped and therefore unique to this run.
+  const FSID = (await pool.query('SELECT id FROM shows WHERE name=$1', [TAG + ' firewall'])).rows[0].id;
+  const fsCrewList = await GET(`/api/shows/${FSID}/crew`, { token: A });
+  const pm2CrewLine = fsCrewList.body.find((c) => c.username === pm2User);
+  await PUT(`/api/crew/${pm2CrewLine.id}`, { phone: '(608) 555-0102' }, { token: A });
+  const fsSheet = await GET(`/api/shows/${FSID}/call-sheet`, { token: TECHT });
+  const techLine = (fsSheet.body.crew || []).find((c) => c.username === techUser);
+  const pm2Line = (fsSheet.body.crew || []).find((c) => c.username === pm2User);
+  const localLine = (fsSheet.body.crew || []).find((c) => !c.username);
+  ok('17 PHONE SHEET: a crew line with no number of its own reads the ACCOUNT\'s — crew.phone || user.phone',
+     !!techLine && techLine.phone === '(262) 555-0161', techLine && techLine.phone);
+  ok('17 PHONE SHEET: a line carrying its OWN number keeps it — "the number for THIS show" wins',
+     !!pm2Line && pm2Line.phone === '(608) 555-0102', pm2Line && pm2Line.phone);
+  ok('17 PHONE SHEET: a local hire is untouched — their line was always the only home their number has',
+     !!localLine && localLine.phone === '(555) 555-0100', localLine && localLine.phone);
+  ok('17 PHONE SHEET: the fallback is READ-side only — the crew row itself still holds no number',
+     (await pool.query('SELECT phone FROM crew_assignments WHERE show_id=$1 AND username=$2',
+       [FSID, techUser])).rows[0].phone === null);
+
   // ── RESET ────────────────────────────────────────────────────────────────
   const HIRE_LIVE = (await POST('/api/auth/login',
     { username: newHire, password: 'a-real-password-1' })).body.token;

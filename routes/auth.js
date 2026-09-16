@@ -19,7 +19,7 @@ const {
 } = require('../lib/auth');
 const { asyncH, badRequest, forbidden, notFound, idParam } = require('../lib/http');
 const { dbToUser, dbToApiKey, pick } = require('../lib/mappers');
-const { oneOf, ALL_ROLES, AGENT_SCOPES, USER_COLORS, initialsFrom } = require('../lib/enums');
+const { oneOf, ALL_ROLES, AGENT_SCOPES, USER_COLORS, initialsFrom, printable } = require('../lib/enums');
 const { logActivity } = require('../lib/activity');
 
 const router = express.Router();
@@ -100,6 +100,19 @@ function staffingNameFromBody(b) {
   if (raw === undefined) return undefined;
   const v = String(raw == null ? '' : raw).trim();
   return v || null;
+}
+
+// The phone number. FREE TEXT on purpose — people write "+1 330…",
+// "224.251.9334", "(414) 555-0114 ext 2" and every one of those is a number a
+// human can dial, so there is no format validation to fail. What it does get is
+// the F4 HYGIENE pass every stored text field gets (the jumbled chip,
+// 2026-09-03): printable() strips controls, zero-widths, bidi marks and the
+// combining overlay strokes — never accents — BEFORE the trim, so an invisible
+// character cannot survive as the whole value either. Applied on EVERY write
+// path (POST /users, PUT /users/:id, PUT /me/phone), so re-saving is also how
+// an already-dirty row gets clean. Blank stores as '' — the column's default.
+function cleanPhone(v) {
+  return printable(String(v == null ? '' : v)).trim().slice(0, 60);
 }
 
 // The first palette colour nobody is wearing; once all ten are taken it wraps
@@ -318,7 +331,7 @@ router.post('/users', requireAuth, requireRole('admin'), asyncH(async (req, res)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,TRUE,TRUE,'bcrypt') RETURNING *`,
       [username, await hashPassword(password), role,
        name, initials, color,
-       pick(b, 'title') || '', pick(b, 'discipline') || '', pick(b, 'phone') || '',
+       pick(b, 'title') || '', pick(b, 'discipline') || '', cleanPhone(pick(b, 'phone')),
        email, staffingName, !!pick(b, 'finance')]
     );
     // The detail names the person and the role and STOPS. Whatever else is
@@ -397,7 +410,7 @@ router.put('/users/:id', requireAuth, asyncH(async (req, res) => {
        phone=$6, email=$7, staffing_name=$8, finance=$9, active=$10, role=$11
      WHERE id=$12 RETURNING *`,
     [val('name') || '', val('initials') || '', val('color') || '', val('title') || '',
-     val('discipline') || '', val('phone') || '', nextEmail, nextStaffing,
+     val('discipline') || '', cleanPhone(val('phone')), nextEmail, nextStaffing,
      // capability, active and role are admin-only, whoever is asking
      isAdmin ? !!val('finance') : cur.finance,
      nextActive, nextRole, id]
@@ -522,6 +535,26 @@ router.put('/me/password', requireAuth, asyncH(async (req, res) => {
   await logActivity(pool, { actor: cur.username, action: 'user.password',
     detail: `${cur.username} · changed their own password` });
   res.json({ ok: true, must_change: false, other_sessions_ended: true });
+}));
+
+// ── CHANGE YOUR OWN PHONE ───────────────────────────────────────────────────
+// The self-serve door beside the password one, and deliberately NARROW: there
+// is no id in the path and none is read from the body, so this route can only
+// ever write the SESSION'S OWN row — an admin editing somebody else's number
+// uses the Team page path (PUT /users/:id, above), which is also where the
+// admin floor lives. Not a second write path onto the roster in any deeper
+// sense: same users row, same cleanPhone() F4 hygiene, same dbToUser shape out.
+//
+// WHY IT EXISTS AT ALL (Tom, 2026-09-16): SMS notifications (Twilio, a later
+// build) will key off the USER account, and the opt-in story rides on people
+// entering their OWN number — so setting yours has to be a one-field act you
+// can do from Settings, not a favor an admin does for you.
+router.put('/me/phone', requireAuth, asyncH(async (req, res) => {
+  const phone = cleanPhone(pick(req.body || {}, 'phone'));
+  const r = await pool.query(
+    'UPDATE users SET phone=$1 WHERE id=$2 RETURNING *', [phone, req.session.userId]);
+  if (!r.rows.length) throw notFound();
+  res.json(dbToUser(r.rows[0], { self: true }));
 }));
 
 // Deletion still exists for a mistake — a username typed wrong, an account

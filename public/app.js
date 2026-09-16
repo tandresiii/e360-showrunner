@@ -4457,6 +4457,42 @@ async function commitChangePassword() {
   return render('settings');
 }
 
+/* MY PHONE — the self-serve half of users.phone (Tom, 2026-09-16). SMS
+   notifications (Twilio, a later build) will key off the USER account, and the
+   opt-in story rides on people entering their OWN number — so this is one
+   field, from Settings, on its own narrow self-only route (PUT /api/me/phone).
+   Free text on purpose: "+1 330…", "224.251.9334" and "(414) 555-0114 ext 2"
+   are all numbers a human can dial. An admin fixing somebody ELSE's number
+   uses the Team page edit dialog — the admin-floored path. */
+function openMyPhone() {
+  openModal('My phone',
+    '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px;line-height:1.6">' +
+    'Your number, on your own account. Call sheets show it to your crew' +
+    (CURRENT_USER.phone ? '' : ' — right now they have nothing to show') +
+    ', and when SMS notifications land they will send to this field.</p>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Phone', '<input id="mpVal" class="cell-in" placeholder="(414) 555-0100" value="' +
+      esc(CURRENT_USER.phone || '') + '">',
+      'Any format a human can dial. Leave it blank to take your number off the roster.') +
+    '</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:9px;margin-top:14px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('myPhoneCommit') + '>' + icon('check') + 'Save my number</button></div>');
+}
+async function commitMyPhone() {
+  var el = document.getElementById('mpVal');
+  var v = el ? String(el.value || '').trim() : '';
+  var saved;
+  try { saved = await api.setMyPhone(v); }
+  catch (e) { toast('Not saved', String((e && e.message) || e), 'err'); return; }
+  closeM();
+  toast(saved && saved.phone ? 'Phone saved' : 'Phone cleared',
+    saved && saved.phone
+      ? saved.phone + ' — on your call sheets from here on'
+      : 'Your number is off the roster');
+  return render('settings');
+}
+
 /* ============================================================================
    ONE DELEGATED LISTENER — every data-act in the app lands here
    ========================================================================== */
@@ -7925,6 +7961,9 @@ var ACTIONS = {
   /* passwords */
   changePw:       function () { return openChangePassword(); },
   changePwCommit: function () { return commitChangePassword(); },
+  /* my phone — self-serve, Settings · Your session (SMS keys off this later) */
+  editMyPhone:    function () { return openMyPhone(); },
+  myPhoneCommit:  function () { return commitMyPhone(); },
   closeModal:    function () { closeM(); closeNotifyPop(); },
   toggleTheme:   function () { toggleTheme(); },
   /* ── THE BLOCKER WAVE · editability audit 2026-09-03 ─────────────────── */

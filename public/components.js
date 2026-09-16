@@ -1236,7 +1236,13 @@ function fmtDayDate(iso) { var d = parseISO(iso); return d ? DAY_SHORT[d.getDay(
 function telHref(phone) { return 'tel:+1' + String(phone || '').replace(/\D/g, ''); }
 /* crew row identity — roster person or local hire */
 function crewName(c) { return c.username ? userName(c.username) : (c.name || ''); }
-function crewPhone(c) { return c.username ? (ROSTER[c.username] || {}).phone : c.phone; }
+/* crew.phone || user.phone — the crew line's OWN number wins ("the number for
+   THIS show"), then a roster person falls back to the number on their account
+   (users.phone), so the call sheet gets numbers for free. Mirrors the server's
+   hydrateCrew (routes/schedule.js), which resolves the same chain into the
+   assembled sheet — in demo mode the crew fixtures carry no own number for
+   roster people, so this chain IS the demo twin of that fallback. */
+function crewPhone(c) { return c.phone || (c.username ? (ROSTER[c.username] || {}).phone : '') || ''; }
 /* one B.6 leg -> a printable line: 'AA 1808 · CLT dep 5:05p → arr 7:10p' */
 function legLine(l) {
   if (!l) return '—';

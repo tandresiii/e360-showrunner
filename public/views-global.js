@@ -220,9 +220,18 @@ function teamRow(u, load, dim) {
   var canChips = can.length
     ? '<div class="can-chips">' + can.map(function (c) { return rolePill(c); }).join('') + '</div>'
     : '<span class="pill idle">— cannot assign</span>';
+  /* The phone renders for EVERYBODY when set — phone numbers ride on call
+     sheets by design (the server publishes them to the whole roster), so the
+     Team page showing them is the same disclosure, not a new one. When unset
+     the line is simply absent: unlike the email chip there is no failure mode
+     to warn about — yet. SMS (later build) will key off this field. */
   return '<tr' + (dim ? ' class="team-off"' : '') + '>' +
     '<td><div class="ev-name"><span class="avatar" style="width:34px;height:34px;background:' + esc(u.color) + '">' +
-      esc(u.initials) + '</span><div><b>' + esc(u.name) + '</b><span>' + esc(u.title || u.username) + '</span></div></div></td>' +
+      esc(u.initials) + '</span><div><b>' + esc(u.name) + '</b><span>' + esc(u.title || u.username) + '</span>' +
+      (u.phone
+        ? '<span class="mono" style="font-size:11px"><a href="' + esc(telHref(u.phone)) +
+          '" style="color:var(--muted)">' + esc(u.phone) + '</a></span>'
+        : '') + '</div></div></td>' +
     teamEmailCell(u) +
     '<td>' + rolePill(u.role) +
       (u.finance ? ' <span class="tag fin" title="The finance capability — accounting rights without the admin role. Margin is visible to admins AND finance.">finance</span>' : '') +
@@ -690,12 +699,26 @@ function viewSettings(ctx) {
   function row(k, v) { return '<div class="set-row"><span class="k">' + esc(k) + '</span><span class="v">' + v + '</span></div>'; }
   var isLight = document.documentElement.getAttribute('data-theme') === 'light';
   var demo = api.isDemo();
+  /* SELF-SERVE ON PURPOSE (Tom, 2026-09-16): SMS notifications (Twilio, a
+     later build) will key off the USER account, and the opt-in story rides on
+     people entering their OWN number — so "My phone" sits here beside the
+     password, one field, on its own narrow route (PUT /api/me/phone, self-only
+     by construction). An admin fixing somebody ELSE's number uses the Team
+     page edit dialog, which is the admin-floored path. */
+  var myPhoneRow = '<div class="set-row"><span class="k">My phone</span>' +
+    '<span class="v" style="display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">' +
+    (CURRENT_USER.phone
+      ? '<span class="mono" style="font-size:12px">' + esc(CURRENT_USER.phone) + '</span>'
+      : '<span class="pill idle" title="Call sheets show your number to your crew — and SMS notifications will use it when they land.">not set</span>') +
+    '<button class="btn sm ghost" ' + act('editMyPhone') + '>' + icon('phone') +
+    (CURRENT_USER.phone ? 'Change' : 'Add') + '</button></span></div>';
   return '<div class="page-h"><div><h1>Settings</h1><div class="sub">Workspace, integrations and the systems Showrunner connects to.</div></div></div>' +
     '<div class="set-grid">' +
     card('users', 'Your session', (demo
       ? '<p>No Showrunner server answered on boot, so this window is running the <b>modeled demo dataset</b>. Nothing here is real and nothing you do is saved.</p>' +
         row('Mode', '<span style="color:var(--warn)">Demo data</span>') +
-        row('Signed in as', esc(CURRENT_USER.name) + ' <small style="color:var(--muted)">(simulated)</small>')
+        row('Signed in as', esc(CURRENT_USER.name) + ' <small style="color:var(--muted)">(simulated)</small>') +
+        myPhoneRow
       : '<p>A live session against the Showrunner API. Role and finance capability are read from the server on every request — they are never cached in this window.</p>' +
         row('Mode', '<span style="color:var(--go)">Live · API</span>') +
         row('Signed in as', esc(CURRENT_USER.name) + ' · ' + esc(CURRENT_USER.username)) +
@@ -703,6 +726,7 @@ function viewSettings(ctx) {
         row('Password', CURRENT_USER.must_change
           ? '<span style="color:var(--warn)">temporary — change it</span>'
           : '<span style="color:var(--go)">yours</span>') +
+        myPhoneRow +
         '<div class="set-row"><span class="k">Session</span><span class="v" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">' +
         '<button class="btn sm ghost" ' + act('changePw') + '>' + icon('lock') + 'Change password</button>' +
         '<button class="btn sm ghost" ' + act('logout') + '>' + icon('lock') + 'Sign out</button>' +

@@ -287,10 +287,20 @@ async function crewRows(showId, q = pool) {
   return r.rows;
 }
 // dbToCrew + the roster row for a staffed (non-local-hire) assignment.
+//
+// PHONE FALLBACK: crew.phone || user.phone. A local hire's number lives on the
+// crew line (it is the only place it can); a roster person's number lives on
+// their ACCOUNT (users.phone — the field SMS will key off later), and nobody
+// re-types it per show. So a crew line linked to a username that carries no
+// number of its own reads the account's, and the call sheet gets numbers for
+// free. The line's OWN phone, when present, wins — "the number for THIS show"
+// beats the number on file. Read-side only: nothing here writes the fallback
+// back onto the row, and the roster-mode crew dialog never sends `phone`, so
+// the borrowed number can never be baked in by an edit.
 function hydrateCrew(row, roster) {
   const c = dbToCrew(row);
   const u = row.username ? roster.get(row.username) : null;
-  return { ...c, user: u ? dbToUser(u) : null };
+  return { ...c, phone: c.phone || (u && u.phone) || null, user: u ? dbToUser(u) : null };
 }
 
 // rosDayTag(): what a day IS relative to the show's own dates.

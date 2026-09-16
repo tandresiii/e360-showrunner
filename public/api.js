@@ -1004,6 +1004,23 @@ var api = (function () {
                       'manage people or reset a password. Make somebody else an admin first.');
     }
   }
+  /* F4 HYGIENE, the demo twin of routes/auth.js cleanPhone(): strip controls,
+     zero-widths, bidi marks and the U+0334–U+0338 combining overlay strokes
+     (the jumbled-chip bug) before trimming — never accents. Free text
+     otherwise: a phone is whatever a human can dial. Escaped, never literal. */
+  function demoCleanPhone(v) {
+    return String(v == null ? '' : v).replace(new RegExp(
+      '[\\u0000-\\u001F\\u007F-\\u009F\\u0334-\\u0338\\u200B-\\u200F\\u2028\\u2029' +
+      '\\u202A-\\u202E\\u2060\\u2066-\\u2069\\uFEFF]', 'g'), '').trim().slice(0, 60);
+  }
+  /* The demo twin of PUT /api/me/phone — self-only the same way the route is:
+     it never takes an id, it writes the signed-in person's own row. */
+  function demoSetMyPhone(phone) {
+    var u = ROSTER[CURRENT_USER.username] || CURRENT_USER;
+    u.phone = demoCleanPhone(phone);
+    if (CURRENT_USER !== u) CURRENT_USER.phone = u.phone;
+    return u;
+  }
   function demoCreateUser(b, username) {
     if (!demoIsAdmin()) throw new Error('Adding a person is an admin act');
     if (!username) throw new Error('A username is required');
@@ -1023,7 +1040,7 @@ var api = (function () {
               color: String(b.color || '').trim() || demoNextColor(),
               role: ROLE_ORDER.indexOf(b.role) >= 0 ? b.role : 'viewer',
               title: String(b.title || ''), discipline: String(b.discipline || ''),
-              phone: String(b.phone || ''), email: email,
+              phone: demoCleanPhone(b.phone), email: email,
               staffing_name: String(b.staffing_name || '').trim() || null,
               finance: !!b.finance, active: true, must_change: true };
     USERS.push(u); ROSTER[username] = u; USERS_BY_ID[id] = u;
@@ -1051,9 +1068,11 @@ var api = (function () {
                   : String(u.email || '').toLowerCase();
     if (nextEmail && nextActive) demoEmailFree(nextEmail, u.id);
 
-    ['name', 'initials', 'color', 'title', 'discipline', 'phone'].forEach(function (k) {
+    ['name', 'initials', 'color', 'title', 'discipline'].forEach(function (k) {
       if (patch[k] !== undefined) u[k] = String(patch[k] || '');
     });
+    /* phone gets the same F4 hygiene the server applies on its write paths */
+    if (patch.phone !== undefined) u.phone = demoCleanPhone(patch.phone);
     u.email = nextEmail;
     if (patch.staffing_name !== undefined) {
       u.staffing_name = String(patch.staffing_name || '').trim() || null;
@@ -1205,6 +1224,21 @@ var api = (function () {
       }
       return SR.put('/api/me/password', { current_password: current, password: next })
         .then(function (r) { CURRENT_USER.must_change = false; return r; });
+    },
+    /* MY PHONE — the narrow self-serve door beside the password one (Tom,
+       2026-09-16). SMS notifications (Twilio, a later build) will key off the
+       USER account, and the opt-in story rides on people entering their OWN
+       number. Self-only by construction: PUT /api/me/phone carries no id, so
+       it can only ever write the session's own row — an admin editing someone
+       else rides updateUser() through the Team page instead. */
+    setMyPhone: function (phone) {
+      if (!API()) return demoCall(function () { return demoSetMyPhone(phone); });
+      return SR.put('/api/me/phone', { phone: String(phone == null ? '' : phone) })
+        .then(function (r) {
+          var u = A.user(r);
+          if (u && CURRENT_USER && u.username === CURRENT_USER.username) CURRENT_USER.phone = u.phone;
+          return u;
+        });
     },
 
     /* ---- projects ------------------------------------------------------ */

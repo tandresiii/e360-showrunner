@@ -1124,6 +1124,28 @@ async function main() {
   ok('F8 · moving load-in is an EDIT and it is MATERIAL — the crew is told',
      toldSheet === 3, toldSheet);
 
+  // ── my phone — the self-serve field the sheet reads (Tom, 2026-09-16) ─────
+  // SMS (Twilio, a later build) will key off the USER account, and the opt-in
+  // story rides on people entering their OWN number — so Omar sets his from
+  // Settings, on the narrow self-only route, and his call-sheet line gets a
+  // number without anyone typing it per show (crew.phone || user.phone).
+  reach('My phone (Settings · Your session)', { seam: 'setMyPhone',
+                                                action: ['editMyPhone', 'myPhoneCommit'] });
+  const omarPhone = await PUT('/api/me/phone', { phone: '(262) 555-0175' }, { token: T.omar });
+  ok('Omar sets HIS OWN number through PUT /api/me/phone',
+     omarPhone.status === 200 && omarPhone.body.phone === '(262) 555-0175', omarPhone.body);
+  const morganId = (await GET('/api/users/morgan', { token: T.omar })).body.id;
+  ok('…and cannot set Morgan\'s — the Team path refuses a non-admin aiming at anyone else',
+     (await PUT(`/api/users/${morganId}`, { phone: '(999) 555-0000' },
+       { token: T.omar })).status === 403);
+  const sheetCrew = (await GET(`/api/shows/${SHOW}/call-sheet`, { token: T.omar })).body.crew || [];
+  const omarLine = sheetCrew.find((c) => c.username === 'omar');
+  const danaLine = sheetCrew.find((c) => c.name === 'Dana Fields');
+  ok('the sheet\'s crew row borrows the account number — crew.phone || user.phone',
+     !!omarLine && omarLine.phone === '(262) 555-0175', omarLine && omarLine.phone);
+  ok('…while Dana the local hire keeps the number typed on her line',
+     !!danaLine && danaLine.phone === '414-555-0142', danaLine && danaLine.phone);
+
   // ══════════════════════════════════════════════════════════════════════════
   section('19 · the seam / route diff — P1, measured');
   // ══════════════════════════════════════════════════════════════════════════
