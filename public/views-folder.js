@@ -240,6 +240,9 @@ function bindFolder(show) {
       document.querySelectorAll('#ftabs button').forEach(function (x) { x.classList.remove('on'); });
       b.classList.add('on');
       drawShowTab(show, b.dataset.t);
+      /* the tab rides the hash — replace, never push (app.js router half);
+         typeof-guarded so this pure-view file still loads headless/alone */
+      if (typeof routeTabChanged === 'function') routeTabChanged(show.id, b.dataset.t);
     };
   });
 }

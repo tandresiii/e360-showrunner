@@ -289,6 +289,11 @@ async function renderView(view, arg) {
     crumb([{ t: 'Settings' }]);
     applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark');
   }
+
+  /* the URL records the screen that actually LANDED (router.js). A throw
+     above never reaches this line, so the hash can never claim a screen that
+     did not render — and a failed navigation never leaves a lying URL. */
+  routeDidRender(view);
 }
 function navOn(v) { var a = document.querySelector('#nav a[data-view="' + v + '"]'); if (a) a.classList.add('on'); }
 
@@ -1681,6 +1686,7 @@ async function vMax() {
 async function vSet(fileId) {
   VIEWER.fileId = Number(fileId);
   drawViewer(await api.getShow(VIEWER.showId));
+  routeDidRender('viewer');     /* the hash names the file on stage (replace) */
 }
 async function vGo(d) {
   var show = await api.getShow(VIEWER.showId);
@@ -1691,6 +1697,7 @@ async function vGo(d) {
   list.forEach(function (x, k) { if (x.id === VIEWER.fileId) i = k; });
   VIEWER.fileId = list[(i + Number(d) + n) % n].id;
   drawViewer(show);
+  routeDidRender('viewer');     /* the hash names the file on stage (replace) */
 }
 async function printFile() {
   /* A bound spec with a staged render prints THE SHEET — from every button.
@@ -4413,7 +4420,7 @@ async function submitPwGate() {
     closePwGate();
     toast('Password set', 'You are signed out on every other device');
     await hydrateSession();
-    await render('projects');
+    await routeBoot();      /* a deep link survives the forced change too */
   } catch (e) {
     showErr(String((e && e.message) || e));
   } finally {
@@ -8036,6 +8043,124 @@ var ACTIONS = {
   toast:         function (t) { toast(t.getAttribute('data-toast') || '', t.getAttribute('data-toast-sub') || ''); }
 };
 
+/* ============================================================================
+   URL & HISTORY — the hash router's browser half  (Tom, 2026-09-16, live:
+   "how come the back button takes me to a whole new website... it needs
+   fixed. its totally annoying.")
+   ----------------------------------------------------------------------------
+   The pure half — the route table, the parser, the echo guard, the
+   replace/push policy, and the WHY of hash-over-pushState — lives in
+   router.js. This half owns the real location/history/render:
+
+     · renderView() ends in routeDidRender(), so the hash records screens
+       that actually LANDED — a failed render never leaves a lying URL.
+     · hashchange (Back/Forward, pasted links) routes through routeGo(),
+       which drives the SAME render paths a click drives — render(),
+       openFolder(), openViewer(), setFolderTab() — never a parallel
+       renderer.
+     · an unknown or stale hash lands on the dashboard with an honest 'err'
+       toast, and the bad hash is REPLACED so the URL never lies.
+     · the router sits UNDER the ACTIONS map: no data-act handler changed,
+       and the ?bind-spec=1 popup never starts it (its own shell, untouched).
+
+   ROUTER stays null in the bind popup and in any headless context, and every
+   hook below no-ops on null — demo file:// and the walk's vm both hold.
+   ========================================================================== */
+var ROUTER = null;
+
+function routerStart() {
+  if (typeof makeRouterCore !== 'function') return;             /* router.js absent */
+  if (typeof window === 'undefined' || !window.addEventListener) return; /* headless */
+  ROUTER = makeRouterCore({
+    read: function () { return String(location.hash || ''); },
+    write: function (h, replace) {
+      if (replace) {
+        /* replaceState never fires hashchange and never grows history; the
+           location fallback covers an engine that refuses it over file:// */
+        try { history.replaceState(null, '', h); return; } catch (_) {}
+        try { location.replace(h); return; } catch (_) {}
+      }
+      location.hash = h;     /* one real screen change = one history entry */
+    },
+    navigate: function (route, raw) {
+      routeGo(route, raw).catch(function (e) { console.error(e); });
+    }
+  });
+  window.addEventListener('hashchange', function () {
+    if (!ROUTER || bootGate()) return;
+    /* read location.hash NOW, not the event's snapshot — queued echoes from
+       rapid navigation collapse into the current truth */
+    ROUTER.onHashChange(String(location.hash || ''));
+  });
+}
+
+/* the id the CURRENT screen renders — the same state netRetry reads */
+function routeArgFor(view) {
+  return view === 'show' ? CUR.showId : view === 'folder' ? CUR.projectId
+    : view === 'job' ? CUR.jobId : view === 'po' ? CUR.poId
+    : view === 'viewer' ? (VIEWER && VIEWER.fileId) : null;
+}
+function routeDidRender(view) {
+  if (!ROUTER) return;
+  ROUTER.sync(view, routeArgFor(view),
+    view === 'show' && typeof activeShowTab === 'function' ? activeShowTab() : null);
+}
+/* views-folder.js calls this on every tab click — the tab rides the hash but
+   REPLACES the entry (router.js: Back leaves the screen, not the tab trail) */
+function routeTabChanged(showId, tab) {
+  if (!ROUTER || CUR.view !== 'show' || Number(showId) !== Number(CUR.showId)) return;
+  ROUTER.sync('show', CUR.showId, tab);
+}
+
+/* ROUTED navigation — Back/Forward, a pasted deep link, boot. Every branch is
+   the exact path a click drives. A route that fails to land (deleted show,
+   dead file id, a folder that is gone) leaves routeEnd() true: fall back to
+   the dashboard with an honest toast and REPLACE the stale hash — unless the
+   login screen has the floor (401), which resumes on its own. */
+async function routeGo(route, rawHash) {
+  if (!ROUTER) return;
+  ROUTER.routeBegin(rawHash);
+  try {
+    if (!route) {
+      toast('That link goes nowhere', '“' + String(rawHash || '') +
+        '” isn’t a Showrunner screen — landing on Projects.', 'err');
+      await render(landingView());
+    } else if (!route.view) {                /* the empty hash: land by role */
+      await render(landingView());
+    } else if (route.view === 'folder') {
+      await openFolder(route.arg);           /* the auto-collapse rule holds */
+    } else if (route.view === 'show') {
+      await render('show', route.arg);
+      /* land the routed tab through the same click path a person uses; a tab
+         this show does not have simply is not clicked, and the sync above
+         already re-wrote the honest overview route in its place */
+      if (route.tab && route.tab !== 'overview' && typeof setFolderTab === 'function') setFolderTab(route.tab);
+    } else if (route.view === 'viewer') {
+      await openViewer(route.arg);           /* a dead id renders nothing */
+    } else {
+      await render(route.view, route.arg);
+    }
+  } catch (e) {
+    if (e && e.status === 401) { ROUTER.routeEnd(); return; } /* login has the floor */
+    console.error(e);
+  }
+  if (ROUTER.routeEnd() && !LOGIN.open) {
+    toast('That link doesn’t resolve any more',
+      'What it pointed at was deleted or moved — landing on Projects.', 'err');
+    ROUTER.routeBegin(rawHash);              /* the fallback replaces the stale hash too */
+    await render(landingView());
+    ROUTER.routeEnd();
+  }
+}
+
+/* boot, login-without-a-resume, the pw gate — every "just arrived" path reads
+   the hash and lands on that screen; no hash = the role landing (D1). */
+async function routeBoot() {
+  if (!ROUTER) return render(landingView()); /* headless / router.js absent */
+  var raw = String(location.hash || '');
+  return routeGo(routeParse(raw), raw);
+}
+
 /* HARDENING 12. THE BOOT GATE.
    SR.probe() decides which world we are in — demo fixture or live API — and it
    is allowed up to 2.5s to do it. The shell is in index.html at parse time, so
@@ -8197,7 +8322,8 @@ async function submitLogin() {
     if (me && me.must_change) { openPwGate(null); return; }
     await hydrateSession();
     var r = LOGIN.resume; LOGIN.resume = null;
-    if (r) await r(); else await render(landingView());
+    /* no resume = a fresh arrival — honor a pasted deep link's hash */
+    if (r) await r(); else await routeBoot();
   } catch (e) {
     showErr(String((e && e.message) || e));
   } finally {
@@ -8322,6 +8448,10 @@ async function boot() {
      (INTEGRATIONS_SPEC §9.3.3 / D5) */
   if (typeof bindSpecRequested === 'function' && bindSpecRequested()) return bindSpecBoot();
 
+  /* the hash router wakes only for the REAL shell — after the bind popup has
+     had its exit, so that window's URL is never touched (Tom, 2026-09-16) */
+  routerStart();
+
   paintModeBadge();
 
   if (api.mode() === 'api') {
@@ -8332,8 +8462,9 @@ async function boot() {
        change has to be re-asserted here or reloading the page skips it. */
     if (me.must_change) { openPwGate(null); return; }
     await hydrateSession();
-    /* D1 — a tech lands on their own work, not the portfolio */
-    return render(landingView());
+    /* D1 — a tech lands on their own work, not the portfolio; a hash on the
+       arrival URL is a deep link and wins (routeBoot honors both) */
+    return routeBoot();
   }
 
   /* ---- demo mode: the mock store IS the world ---- */
@@ -8346,6 +8477,6 @@ async function boot() {
     if (shows[i].gear && shows[i].gear.pulled) await bindGearFiles(shows[i]);
   }
   await hydrateSession();
-  await render(landingView());
+  await routeBoot();
 }
 boot();

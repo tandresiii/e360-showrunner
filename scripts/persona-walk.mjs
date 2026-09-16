@@ -3612,6 +3612,148 @@ async function main() {
   ok('…GET thumb for a thumb-less photo is an honest 404',
      (await GET(`/api/photos/${thReg.body.id}/thumb/content`, { token: T.omar })).status === 404);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('50 · the Back button stays in the building  (Tom, 9/16, live)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "how come the back button takes me to a whole new website... it needs
+  // fixed. its totally annoying." The app had ZERO history integration —
+  // every screen at one URL, so Back exited the site. The fix is a hash
+  // router whose PURE core (public/router.js) is EXECUTED here in a vm —
+  // §37's lesson: the echo guard and the replace/push policy are proven by
+  // RUNNING them, never by reading them — while the browser-half wiring in
+  // app.js is held mechanically, the way §38 holds the toast kinds.
+  const RTR = (() => {
+    const ctx = {};
+    vm.createContext(ctx);
+    new vm.Script(SRC['router.js'], { filename: 'public/router.js' }).runInContext(ctx);
+    return ctx;
+  })();
+  ok('the REAL public/router.js loads headless on a ZERO-global shim — pure by construction',
+     typeof RTR.routeFor === 'function' && typeof RTR.routeParse === 'function' &&
+     typeof RTR.makeRouterCore === 'function');
+
+  // ── the route table, executed both ways ───────────────────────────────────
+  ok('navigations write the expected hashes — the shipped route table',
+     RTR.routeFor('show', 13, 'schedule') === '#/shows/13/schedule' &&
+     RTR.routeFor('show', 13, 'overview') === '#/shows/13' &&
+     RTR.routeFor('folder', 4) === '#/folders/4' &&
+     RTR.routeFor('job', 2) === '#/jobs/2' &&
+     RTR.routeFor('po', 5) === '#/pos/5' &&
+     RTR.routeFor('viewer', 9) === '#/viewer/9' &&
+     RTR.routeFor('finance') === '#/finance' &&
+     RTR.routeFor('settings') === '#/settings' &&
+     RTR.routeFor('archive') === '#/archive' &&
+     RTR.routeFor('mytasks') === '#/mytasks');
+  ok('every singleton view renderView() serves has a route, and each round-trips',
+     Object.keys(RTR.ROUTE_VIEWS).every((v) => {
+       const p = RTR.routeParse(RTR.routeFor(v));
+       return p && p.view === v;
+     }) && Object.keys(RTR.ROUTE_VIEWS).length === 16);
+  ok('a view with no route answers null — never a crash, never an invented hash',
+     RTR.routeFor('login') === null && RTR.routeFor('show', 'x') === null &&
+     RTR.routeFor('show', -3) === null);
+  ok('hashchange parses to the right view function — show + tab, folder, drill-ins',
+     JSON.stringify(RTR.routeParse('#/shows/13/schedule')) === JSON.stringify({ view: 'show', arg: 13, tab: 'schedule' }) &&
+     JSON.stringify(RTR.routeParse('#/folders/4')) === JSON.stringify({ view: 'folder', arg: 4 }) &&
+     JSON.stringify(RTR.routeParse('#/jobs/2')) === JSON.stringify({ view: 'job', arg: 2 }) &&
+     JSON.stringify(RTR.routeParse('#/viewer/9')) === JSON.stringify({ view: 'viewer', arg: 9 }));
+  ok('the two legacy link shapes keep opening — mail bodies (/#show/41 · /#folder/7) and the spec tools (/#/shows/13)',
+     RTR.routeParse('#show/41')?.view === 'show' && RTR.routeParse('#show/41')?.arg === 41 &&
+     RTR.routeParse('#folder/7')?.view === 'folder' &&
+     RTR.routeParse('#/shows/13')?.view === 'show');
+  ok('an unknown hash parses to NULL (the dashboard+toast branch), never a guess',
+     RTR.routeParse('#/nonsense') === null && RTR.routeParse('#/shows/abc') === null &&
+     RTR.routeParse('#/shows/13/bogus') === null && RTR.routeParse('#/shows//3') === null &&
+     RTR.routeParse('#/settings/9') === null);
+  ok('a hostile hash cannot crash the parser — it reads as unknown, never throws',
+     (() => { try { return RTR.routeParse({}) === null &&
+                           RTR.routeParse('#/\u0000/\u0000') === null &&
+                           RTR.routeParse(undefined)?.view === null; }
+              catch { return false; } })());
+  ok('the empty hash is the role landing, not an error',
+     RTR.routeParse('')?.view === null && RTR.routeParse('#')?.view === null &&
+     RTR.routeParse('#/')?.view === null);
+
+  // ── the core, driven the way the browser drives it ────────────────────────
+  {
+    let hash = '';
+    const writes = [], navs = [];
+    const core = RTR.makeRouterCore({
+      read: () => hash,
+      write: (h, replace) => { writes.push([h, !!replace]); hash = h; },
+      navigate: (route, raw) => navs.push([route, raw])
+    });
+    // boot deep link: the arrival entry is REUSED, never doubled
+    core.routeBegin('#/finance'); core.sync('finance');
+    ok('a boot deep link REPLACES the arrival entry — landing never doubles history',
+       writes.length === 1 && writes[0][0] === '#/finance' && writes[0][1] === true,
+       writes);
+    // a user click: exactly ONE history write, and the echo NEVER re-navigates
+    writes.length = 0;
+    core.sync('show', 13);
+    const echoRouted = core.onHashChange('#/shows/13');   // the browser echoing our own write
+    ok('THE ECHO GUARD, executed — one navigation = exactly ONE history write, and the hashchange echo routes NOTHING',
+       writes.length === 1 && writes[0][1] === false &&
+       echoRouted === false && navs.length === 0,
+       { writes, echoRouted, navs: navs.length });
+    // a tab flick: rides the hash, REPLACES — Back leaves the screen
+    writes.length = 0;
+    core.sync('show', 13, 'schedule');
+    ok('a tab flick writes the tab onto the hash with REPLACE — history holds screens, not flicks',
+       writes.length === 1 && writes[0][0] === '#/shows/13/schedule' && writes[0][1] === true,
+       writes);
+    // a redundant re-render (filter repaint, feed "more"): ZERO writes
+    writes.length = 0;
+    core.sync('show', 13, 'schedule');
+    ok('a redundant re-render writes NOTHING — duplicates never fill history',
+       writes.length === 0, writes);
+    // Back: a hash we did not write routes through navigate()
+    core.onHashChange('#/finance');
+    ok('Back/Forward (a hash we did not write) routes through the render path',
+       navs.length === 1 && navs[0][0]?.view === 'finance', navs);
+    // the viewer pages with REPLACE, like a tab
+    core.routeBegin('#/viewer/3'); core.sync('viewer', 3);
+    writes.length = 0;
+    core.sync('viewer', 9);
+    ok('viewer paging replaces too — Back exits the viewer once, not per file',
+       writes.length === 1 && writes[0][0] === '#/viewer/9' && writes[0][1] === true, writes);
+    // a routed navigation that never lands (deleted show) is DETECTED
+    core.routeBegin('#/shows/99');
+    ok('a routed navigation that never landed reports itself — the dashboard fallback’s trigger',
+       core.routeEnd() === true && core.routeEnd() === false);
+  }
+
+  // ── the browser-half wiring, held mechanically over app.js ────────────────
+  ok('index.html loads router.js, before app.js',
+     /<script src="router\.js"><\/script>[\s\S]*<script src="app\.js"><\/script>/.test(
+       fs.readFileSync(path.join(PUB, 'index.html'), 'utf8')));
+  ok('renderView() ends by recording the screen that LANDED — a failed render cannot leave a lying URL',
+     /routeDidRender\(view\);\s*\}/.test(APP_JS));
+  ok('the hashchange listener is wired inside routerStart(), window-guarded for headless, boot-gated',
+     /function routerStart\(\)[\s\S]{0,200}typeof window === 'undefined'[\s\S]{0,1200}addEventListener\('hashchange'/.test(APP_JS) &&
+     /addEventListener\('hashchange', function \(\) \{\s*\n\s*if \(!ROUTER \|\| bootGate\(\)\) return;/.test(APP_JS));
+  ok('an unknown hash lands on the dashboard with an HONEST err toast, through landingView()',
+     /if \(!route\) \{\s*\n\s*toast\('That link goes nowhere'[\s\S]{0,200}'err'\);\s*\n\s*await render\(landingView\(\)\);/.test(APP_JS));
+  ok('a stale route (deleted show) falls back to the dashboard, toasts err, and REPLACES the lying hash',
+     /if \(ROUTER\.routeEnd\(\) && !LOGIN\.open\) \{[\s\S]{0,400}'err'\);[\s\S]{0,200}ROUTER\.routeBegin\(rawHash\);[\s\S]{0,200}render\(landingView\(\)\)/.test(APP_JS));
+  ok('Back/Forward re-enter through the SAME render paths a click uses — render/openFolder/openViewer/setFolderTab, no parallel renderer',
+     /async function routeGo\(route, rawHash\)[\s\S]{0,1600}await openFolder\(route\.arg\)[\s\S]{0,900}await render\('show', route\.arg\)[\s\S]{0,900}setFolderTab\(route\.tab\)[\s\S]{0,600}await openViewer\(route\.arg\)/.test(APP_JS));
+  ok('every "just arrived" path routes the hash — boot (both modes), login without a resume, the pw gate',
+     [...APP_JS.matchAll(/routeBoot\(\)/g)].length >= 5 &&
+     /else await routeBoot\(\);/.test(APP_JS) &&
+     /return routeBoot\(\);/.test(APP_JS));
+  ok('the tab click carries its key onto the hash (views-folder.js), typeof-guarded for headless',
+     /typeof routeTabChanged === 'function'\) routeTabChanged\(show\.id, b\.dataset\.t\)/.test(SRC['views-folder.js']));
+  ok('the bind-spec popup never starts the router — bindSpecBoot() exits BEFORE routerStart()',
+     APP_JS.indexOf('return bindSpecBoot()') > 0 &&
+     APP_JS.indexOf('return bindSpecBoot()') < APP_JS.indexOf('routerStart();') &&
+     !/routerStart/.test(SRC['bind.js']));
+  ok('the router sits UNDER the actions — no ACTIONS entry writes location.hash, only routerStart’s io does',
+     [...APP_JS.matchAll(/location\.hash = /g)].length === 1 &&
+     /write: function \(h, replace\)[\s\S]{0,400}location\.hash = h;/.test(APP_JS));
+  ok('SCHEMA.md carries the frontend route table',
+     /### Frontend routes \(the hash\)/.test(fs.readFileSync(path.join(APP, 'SCHEMA.md'), 'utf8')));
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

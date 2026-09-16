@@ -1016,6 +1016,30 @@ Agent       GET  /api/agent/whoami
             ALL  /api/agent/*  ->  404 terminal guard
 ```
 
+### Frontend routes (the hash) — `public/router.js`
+
+The SPA's screens live on `location.hash` (2026-09-16, Tom live: *"how come
+the back button takes me to a whole new website... it needs fixed"*). Hash,
+not pushState paths, because the app is served at one static path in API mode
+**and** opens over `file://` in demo mode — one mechanism, zero server route
+config, refresh-safe. Back/Forward re-enter through the same `render()` paths
+a click uses; an unknown or stale hash lands on Projects with an `err` toast
+and the URL is **replaced**, never left lying.
+
+| Hash | Screen |
+|---|---|
+| *(empty)* | the role landing — Projects, or My Tasks for a tech (D1) |
+| `#/projects` `#/finance` `#/purchasing` `#/mytasks` `#/archive` `#/outbox` `#/today` `#/changes` `#/calendar` `#/team` `#/staffing` `#/contacts` `#/files` `#/templates` `#/proposals` `#/settings` | the singleton views |
+| `#/shows/:id` | a show's folder (Overview tab) |
+| `#/shows/:id/:tab` | a show tab — `schedule · pipeline · specs · gear · content · files · photos · reports · recap · financials · proofs · bookings · activity`. The tab **rides the hash** (refresh and copied links keep it) but a tab flick **replaces** the history entry: Back leaves the *screen*, never crawls back through tabs |
+| `#/folders/:id` | a season/program folder — the single-show auto-collapse rule still applies |
+| `#/jobs/:id` · `#/pos/:id` | the finance job drill-in · the PO drill-in |
+| `#/viewer/:fileId` | the multimedia viewer on that file; paging inside it replaces, like a tab |
+| `#show/:id` · `#folder/:id` | **legacy aliases** — the shape mail bodies emit (`lib/audience.js` · `lib/mentions.js` · `routes/*`); parsed forever so old notification links keep opening |
+
+`?bind-spec=1` stays outside the router entirely — the popup is its own shell
+and its URL is never touched.
+
 ### `public/api.js` → REST, for the swap pass
 
 Every mock method maps to exactly one call. Responses already come back in the
