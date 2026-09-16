@@ -1504,7 +1504,11 @@ table.tbl td.money,table.tbl th.money{text-align:right}
    Out of the working set, never out of the app. The banner explains itself and
    offers the way back; the row treatment is a dimming, never a strikethrough. */
 .arch-banner{display:flex; align-items:center; gap:12px; background:var(--surface-2); border:1px solid var(--border-strong); border-left:3px solid var(--muted); border-radius:var(--r); padding:12px 15px; margin-bottom:14px}
-.arch-banner svg{color:var(--muted); flex:none}
+/* 9/16, Tom, first-ever archived show: icon() emits UNSIZED svgs — a
+   container that forgets width/height gets a viewport-filling box glyph.
+   This rule had color and flex but no size, and nobody had ever rendered
+   the banner before today. */
+.arch-banner svg{width:20px; height:20px; color:var(--muted); flex:none}
 .arch-banner b{display:block; font-size:13px}
 .arch-banner span{display:block; color:var(--text-2); font-size:12px; line-height:1.5; margin-top:2px}
 .arch-banner .btn{margin-left:auto; flex:none}

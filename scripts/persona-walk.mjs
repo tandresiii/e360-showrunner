@@ -1159,6 +1159,19 @@ async function main() {
      /RECAP_UI\.edit = \(rb\.narrative/.test(APP_JS));
   ok('the demo twin no longer credits recap drafts to an invented owner-agent',
      !/'agent:' \+ s\.owner/.test(API_JS));
+  // 9/16, Tom, live: the Archive door flapped — visible right after archiving,
+  // gone on refresh, back after wandering through Settings — because it was
+  // count-gated on whichever rows the CLIENT happened to hold. The door is
+  // unconditional now; this holds it that way.
+  ok('the Archive door is never gated on client-loaded rows',
+     !/var archBtn = nArch/.test(SRC['views-dashboard.js']) &&
+     /act\('goArchive'\)/.test(SRC['views-dashboard.js']));
+  // ...and the archived-show banner sizes its icon: icon() emits UNSIZED
+  // svgs, so a container without a width rule renders a viewport-filling
+  // glyph (Tom's screenshot, the first archived show ever rendered).
+  ok('the arch-banner sizes its svg — an unsized icon() fills the viewport',
+     /\.arch-banner svg\{[^}]*width\s*:/.test(
+       fs.readFileSync(path.join(PUB, 'app.css'), 'utf8')));
 
   // ══════════════════════════════════════════════════════════════════════════
   section('20 · the editability wave — a cost is corrected ON THE ROW it lives on');

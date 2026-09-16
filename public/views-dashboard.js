@@ -107,15 +107,17 @@ function viewProjects(projects, exceptions) {
       '<div style="margin-top:8px"><span class="lnk" style="cursor:pointer;color:var(--accent);font-size:12px;font-weight:600" ' + act('goFinance') + '>Open Finance →</span></div>';
   }
 
-  /* F6 — the Archive door. It only appears once something is in there, and it
-     says how many, so "where did that folder go" has an answer on screen
-     rather than in somebody's memory. */
-  var nArch = archivedProjects().length;
-  var archBtn = nArch
-    ? '<button class="btn ghost" ' + act('goArchive') + ' title="' +
+  /* F6 — the Archive door. 9/16, Tom, live: it used to render only when the
+     LOADED rows contained something archived — but boot fetches active
+     folders only, so the door existed right after archiving (the row was
+     still in memory), vanished on refresh, and reappeared when any by-id
+     fetch happened to merge an archived row back in. A door that flaps with
+     navigation history is broken: it renders ALWAYS now, count-free, and the
+     view behind it fetches the archived list from the server (its "Nothing
+     is archived yet" empty state already reads fine). */
+  var archBtn = '<button class="btn ghost" ' + act('goArchive') + ' title="' +
       esc('Archived folders are out of the working set — still fully searchable and browsable.') +
-      '">' + icon('box') + 'Archive <span class="sc">' + nArch + '</span></button>'
-    : '';
+      '">' + icon('box') + 'Archive</button>';
 
   return '<div class="page-h"><div><h1>Projects</h1><div class="sub">Every event folder, from the sales call to strike — one place. Status rolls up from every show inside the folder, whatever lane set its type uses. Segment the portfolio by division below.</div></div>' +
     '<div style="display:flex;gap:9px;flex-wrap:wrap">' + archBtn +
