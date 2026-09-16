@@ -1145,6 +1145,21 @@ async function main() {
   ok('the proofs tab no longer hardcodes an approval flow with invented people',
      !/{ k: 'Internal QC'/.test(SRC['views-folder.js']));
 
+  // 9/16, Tom, live on the Big Ten recap: "i generate a draft but am given no
+  // chance to write anything" / "drafted by tonys agent. whatever the fuck
+  // that means. i am the one who generated it." Two defects, four gates:
+  // the writing surface must be discoverable, and attribution must be true.
+  ok('recap draft rows are click-to-edit — the text is the affordance',
+     /rcRow\('rc-row rc-para', editable, show, key\)/.test(SRC['views-folder.js']) &&
+     /rcRow\('rc-stcell', editable, show, key\)/.test(SRC['views-folder.js']));
+  ok('recap edit pens are visible at rest — never opacity:0 hover-secrets',
+     !/\.rc-row \.rc-pen,\.rc-stcell \.rc-stctl\{opacity:0\}/.test(
+       fs.readFileSync(path.join(PUB, 'app.css'), 'utf8')));
+  ok('generating a recap lands in an OPEN editor, not a finished-looking card',
+     /RECAP_UI\.edit = \(rb\.narrative/.test(APP_JS));
+  ok('the demo twin no longer credits recap drafts to an invented owner-agent',
+     !/'agent:' \+ s\.owner/.test(API_JS));
+
   // ══════════════════════════════════════════════════════════════════════════
   section('20 · the editability wave — a cost is corrected ON THE ROW it lives on');
   // ══════════════════════════════════════════════════════════════════════════

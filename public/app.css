@@ -1252,7 +1252,12 @@ table.tbl td.money,table.tbl th.money{text-align:right}
 .rc-para+.rc-para{margin-top:10px}
 .rc-headline{flex:1; font-size:19px; font-weight:800; letter-spacing:-.02em; line-height:1.25}
 .rc-pen{width:26px;height:26px;flex:none}
-@media(hover:hover){ .rc-row .rc-pen,.rc-stcell .rc-stctl{opacity:0} .rc-row:hover .rc-pen,.rc-row:focus-within .rc-pen,.rc-stcell:hover .rc-stctl,.rc-stcell:focus-within .rc-stctl{opacity:1} }
+/* 9/16, Tom, live: the pens were opacity:0 until hover and the draft read as
+   a finished card — "given no chance to write anything". Visible at rest now,
+   full on hover; .rc-click marks a row whose TEXT opens its own editor. */
+@media(hover:hover){ .rc-row .rc-pen,.rc-stcell .rc-stctl{opacity:.45} .rc-row:hover .rc-pen,.rc-row:focus-within .rc-pen,.rc-stcell:hover .rc-stctl,.rc-stcell:focus-within .rc-stctl{opacity:1} }
+.rc-click{cursor:pointer}
+.rc-click:hover{background:rgba(125,125,125,.08);border-radius:6px}
 .rc-hlrow{padding:5px 0; align-items:center}
 .rc-bullet{width:6px;height:6px;border-radius:50%;background:var(--accent);flex:none;margin-top:1px}
 .rc-hltx{flex:1; font-size:13px; line-height:1.5}

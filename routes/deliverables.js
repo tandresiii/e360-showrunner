@@ -129,8 +129,9 @@ async function context(req, by, q = pool) {
 // agent of the one person the gate had just turned away. Approving is the
 // higher-privilege act, so that ordering was backwards.
 //
-// Attribution is unchanged and is now coherent with the gate: generate() sets
-// generated_by = 'agent:' + show.owner, which is the person who may draft it.
+// Attribution (re-settled 2026-09-16, Tom, live): generate() credits the
+// SESSION that clicked — the 'agent:<owner>' conceit claimed an agent that
+// does not exist and misattributed an admin's click to the owner's agent.
 //
 // SETTLED — HARDENING 14 (2026-08-27). The gap this note used to record is
 // closed: the pm+ floor moved INTO canApproveRecap(), so the draft path and the
@@ -311,12 +312,14 @@ router.post('/shows/:id/recap', requireAuth, asyncH(async (req, res) => {
     const facts = await recapFacts(c, show);
     const body = buildRecapDraft(facts);
 
-    // The recap is drafted BY THE OWNER'S AGENT, not by whoever clicked. A show
-    // with no owner yet falls back to the acting session so attribution is
-    // never the literal string 'agent:'.
-    const agentUser = show.owner || req.session.username;
-    const prov = recapProvenance(show, agentUser, await showLabel(show, project, c));
-    const actor = 'agent:' + agentUser;
+    // 9/16, Tom, live: the banner said "Drafted by Tony's agent" over a draft
+    // TOM had just generated — the 8/27 "owner's agent" conceit fabricated
+    // provenance the moment a real person clicked the button. No agent drafts
+    // recaps yet: the drafter is whoever clicked, recorded plainly. When a
+    // real agent pipeline lands it will authenticate as itself and arrive
+    // through the agent surface with its own attribution.
+    const actor = req.session.username;
+    const prov = recapProvenance(show, actor, await showLabel(show, project, c));
 
     let row;
     if (existing) {
@@ -341,7 +344,7 @@ router.post('/shows/:id/recap', requireAuth, asyncH(async (req, res) => {
     await logActivity(c, {
       projectId: show.project_id,
       showId: show.id,
-      actor,                               // 22. the UI renders "Tom's agent"
+      actor,                               // the person who clicked Generate
       action: (existing ? 'regenerated' : 'drafted') + ' the post-event client recap',
       detail: (body.highlights || []).length + ' highlights · ' +
               (body.photo_ids || []).length + ' photos · awaiting review',

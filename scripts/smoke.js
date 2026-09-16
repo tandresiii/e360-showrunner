@@ -934,8 +934,8 @@ const DEL = (p, o) => call('DELETE', p, o);
   const splitDraft = await POST(`/api/shows/${S2}/recap`, {}, { token: PM2T });
   ok('recap draft: the SHOW\'s own pm CAN draft it, project owner or not',
      splitDraft.status === 200, splitDraft.body);
-  ok('...credited to agent:<show.owner> — the gate and the byline now agree',
-     splitDraft.body.generated_by === 'agent:' + pm2User, splitDraft.body.generated_by);
+  ok('...credited to the PERSON who clicked, plainly (Tom 9/16 — no invented agent)',
+     splitDraft.body.generated_by === pm2User, splitDraft.body.generated_by);
   const splitOtherPm = await POST(`/api/shows/${S2}/recap`, {}, { token: PMT });
   ok('recap draft: the PROJECT\'s pm cannot draft a show he does not own',
      splitOtherPm.status === 403, splitOtherPm.body);
@@ -943,8 +943,9 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('recap draft: a manager drafts anywhere, as cover',
      splitMgr.status === 200, splitMgr.body);
   const splitMade = await POST(`/api/shows/${S2}/recap`, {}, { token: A });
-  ok('recap draft: an admin drafts anywhere, still credited to agent:<show.owner>',
-     splitMade.status === 200 && splitMade.body.generated_by === 'agent:' + pm2User,
+  ok('recap draft: an admin drafts anywhere, credited as HIMSELF — never as the ' +
+     'owner\'s "agent" (the 9/16 live bug: Tom clicked, the banner said Tony\'s agent)',
+     splitMade.status === 200 && splitMade.body.generated_by === 'admin',
      splitMade.body.generated_by);
   const splitApprove = await POST(`/api/recaps/${splitMade.body.id}/approve`, {}, { token: PM2T });
   ok('...and the same show owner approves it — draft and approve are one set',
@@ -1017,7 +1018,8 @@ const DEL = (p, o) => call('DELETE', p, o);
   // deliverables + the content firewall (49-54)
   const recap = await POST(`/api/shows/${S}/recap`, {}, { token: A });
   ok('POST /api/shows/:id/recap generates a draft (punch 49/52)', recap.status === 200, recap.body);
-  ok('...attributed to the owner\'s agent', String(recap.body.generated_by).startsWith('agent:'),
+  ok('...attributed to the human who generated it — no \'agent:\' fabrication',
+     recap.body.generated_by === 'admin' && !String(recap.body.generated_by).startsWith('agent:'),
      recap.body.generated_by);
   ok('...with closeout provenance at confidence 100 (punch 50)',
      recap.body.provenance && recap.body.provenance.source_kind === 'closeout'

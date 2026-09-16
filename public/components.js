@@ -489,7 +489,9 @@ function poApprovalBadge(po) {
 }
 /* "via Tom's agent · 92%" — rendered ONLY for agent-filed rows */
 function provBadge(p) {
-  if (!p) return '';
+  /* no agent_user = no agent was involved (a human-generated recap) — there
+     is no badge to wear, and "via undefined's agent" is not a sentence */
+  if (!p || !p.agent_user) return '';
   var who = ROSTER[p.agent_user] ? firstName(p.agent_user) : p.agent_user;
   return '<span class="prov" title="' + esc((p.source_kind || 'email') + ' · "' + (p.source_label || '') + '"') + '">' +
     inlineIcon('bolt') + 'via ' + esc(who + '’s agent') + ' · ' + esc(Math.round(p.confidence)) + '%</span>';

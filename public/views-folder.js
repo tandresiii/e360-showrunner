@@ -2070,6 +2070,15 @@ function rcPen(show, key, title) {
 function rcDel(show, key, title) {
   return '<button class="iconbtn rc-pen" title="' + esc(title) + '" ' + act('rcDel', show.id, key) + '>' + icon('trash') + '</button>';
 }
+/* 9/16, Tom, live: "i generate a draft but am given no chance to write
+   anything." The pens were hover-hidden and the rows inert, so a document
+   you WRITE rendered as a card you look at. The text is now the affordance:
+   every line of an editable draft opens its own editor on click (buttons
+   inside the row still win their own clicks via closest('[data-act]')). */
+function rcRow(cls, editable, show, key) {
+  return '<div class="' + cls + (editable ? ' rc-click' : '') + '"' +
+    (editable ? ' title="Click to edit" ' + act('rcEdit', show.id, key) : '') + '>';
+}
 /* one open editor at a time — #rcIn (+ #rcIn2 for a stat's value) */
 function rcEditor(show, key, value, rows, second) {
   return '<div class="rc-ed">' +
@@ -2121,7 +2130,7 @@ function recapActionBar(show, rec) {
   b.push('<button class="btn sm ghost" ' + act('rcPreview', show.id) + '>' + icon('eye') + 'View sheet</button>');
   b.push('<button class="btn sm ghost" ' + act('rcPrint', show.id) + '>' + icon('print') + 'Print</button>');
   return '<div class="rc-bar">' +
-    '<span class="rc-barlbl">' + (editable ? inlineIcon('pencil') + ' Editing the draft in place' : inlineIcon('lock') + ' Read-only') + '</span>' +
+    '<span class="rc-barlbl">' + (editable ? inlineIcon('pencil') + ' Draft — click any line to edit it' : inlineIcon('lock') + ' Read-only') + '</span>' +
     '<span style="flex:1"></span>' + b.join('') + '</div>';
 }
 
@@ -2177,14 +2186,14 @@ function tabRecap(show) {
   var head = '<div class="rc-blk"><div class="rc-lbl">Headline</div>' +
     (RECAP_UI.edit === 'headline' && editable
       ? rcEditor(show, 'headline', b.headline, 2)
-      : '<div class="rc-row"><h2 class="rc-headline">' + esc(b.headline) + '</h2>' +
+      : rcRow('rc-row', editable, show, 'headline') + '<h2 class="rc-headline">' + esc(b.headline) + '</h2>' +
         (editable ? rcPen(show, 'headline', 'Edit the headline') : '') + '</div>') + '</div>';
 
   /* ---- narrative --------------------------------------------------------- */
   var paras = (b.narrative || []).map(function (p, i) {
     var key = 'n:' + i;
     if (RECAP_UI.edit === key && editable) return rcEditor(show, key, p, 5);
-    return '<div class="rc-row rc-para"><p>' + esc(p) + '</p>' +
+    return rcRow('rc-row rc-para', editable, show, key) + '<p>' + esc(p) + '</p>' +
       (editable ? rcPen(show, key, 'Edit this paragraph') + ((b.narrative.length > 1) ? rcDel(show, key, 'Remove this paragraph') : '') : '') + '</div>';
   }).join('');
   var narr = '<div class="rc-blk"><div class="rc-lbl">Narrative<span class="rc-lsub">what happened, in the client’s language</span></div>' +
@@ -2194,7 +2203,7 @@ function tabRecap(show) {
   var hls = (b.highlights || []).map(function (h, i) {
     var key = 'h:' + i;
     if (RECAP_UI.edit === key && editable) return rcEditor(show, key, h, 2);
-    return '<div class="rc-row rc-hlrow"><span class="rc-bullet"></span><span class="rc-hltx">' + esc(h) + '</span>' +
+    return rcRow('rc-row rc-hlrow', editable, show, key) + '<span class="rc-bullet"></span><span class="rc-hltx">' + esc(h) + '</span>' +
       (editable ? rcPen(show, key, 'Edit this highlight') + rcDel(show, key, 'Remove this highlight') : '') + '</div>';
   }).join('') || '<div class="empty" style="padding:14px">No highlights yet.</div>';
   var hlBlk = '<div class="rc-blk"><div class="rc-lbl">Highlights<span class="rc-lsub">from the completed lanes + the starred photos</span></div>' +
@@ -2204,7 +2213,7 @@ function tabRecap(show) {
   var stats = (b.stats || []).map(function (st, i) {
     var key = 's:' + i;
     if (RECAP_UI.edit === key && editable) return rcEditor(show, key, st.label, 1, st.value);
-    return '<div class="rc-stcell"><span>' + esc(st.label) + '</span><b>' + esc(st.value) + '</b>' +
+    return rcRow('rc-stcell', editable, show, key) + '<span>' + esc(st.label) + '</span><b>' + esc(st.value) + '</b>' +
       (editable ? '<div class="rc-stctl">' + rcPen(show, key, 'Edit this stat') + rcDel(show, key, 'Remove this stat') + '</div>' : '') + '</div>';
   }).join('') || '<div class="empty" style="padding:14px">No stats yet.</div>';
   var statBlk = '<div class="rc-blk"><div class="rc-lbl">Show stats<span class="rc-lsub">client-safe figures only — no money ever reaches this list</span></div>' +
@@ -2215,7 +2224,7 @@ function tabRecap(show) {
   var close = '<div class="rc-blk"><div class="rc-lbl">Closing</div>' +
     (RECAP_UI.edit === 'closing' && editable
       ? rcEditor(show, 'closing', b.closing, 3)
-      : '<div class="rc-row rc-para"><p>' + esc(b.closing) + '</p>' +
+      : rcRow('rc-row rc-para', editable, show, 'closing') + '<p>' + esc(b.closing) + '</p>' +
         (editable ? rcPen(show, 'closing', 'Edit the closing') : '') + '</div>') + '</div>';
 
   var firewall = '<div class="hint" style="margin-top:16px">' + icon('lock') +

@@ -3017,8 +3017,11 @@ async function rcGenerateAct(showId) {
   var had = await api.getRecap(showId);
   try {
     var rec = await api.generateRecap(showId);
-    RECAP_UI.edit = null;
     var rb = rec.body || {};
+    /* 9/16, Tom, live: "i generate a draft but am given no chance to write
+       anything" — generating now lands IN the writing: the first paragraph's
+       editor opens itself instead of presenting a finished-looking card. */
+    RECAP_UI.edit = (rb.narrative || []).length ? 'n:0' : 'headline';
     toast(had ? 'Draft regenerated' : 'Recap drafted',
       (rb.highlights || []).length + ' highlights · ' + (rb.photo_ids || []).length + ' photos — review it before anything goes out');
   } catch (e) {

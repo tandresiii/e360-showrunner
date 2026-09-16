@@ -3997,14 +3997,17 @@ var api = (function () {
           /* idempotent: same show, same record -> same body, same row. A
              regenerate is a REPLACE — it discards human edits on purpose. */
           rec.body = body;
-          rec.generated_by = 'agent:' + s.owner;
+          /* 9/16: credited to WHOEVER clicked — the 'agent:<owner>' conceit
+             fabricated an agent that does not exist (server twin agrees) */
+          rec.generated_by = ME;
           rec.generated_at = TODAY_ISO + 'T' + _nowHM();
           rec.edited_by = null; rec.edited_at = null;
-          rec.provenance = recapProvenance(s, s.owner);
+          rec.provenance = recapProvenance(s, null);
         } else {
-          rec = mkDeliverable(s, body, { off: 0, time: _nowHM() });
+          rec = mkDeliverable(s, body, { off: 0, time: _nowHM(), by: ME });
+          rec.provenance = recapProvenance(s, null);
         }
-        s.activity.unshift(mkAct('agent:' + s.owner, (again ? 'regenerated' : 'drafted') + ' the post-event client recap',
+        s.activity.unshift(mkAct(ME, (again ? 'regenerated' : 'drafted') + ' the post-event client recap',
           body.highlights.length + ' highlights · ' + body.photo_ids.length + ' photos · awaiting review', 0, _nowHM(), true));
         return ok(rec);
       }
