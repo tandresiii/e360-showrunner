@@ -544,8 +544,11 @@ var SR = (function () {
     del: function (p, b, o) { return req('DELETE', p, b, o); },
     qs: qs,
 
-    /* bytes — the NAS layer's two verbs (see bytes() above) */
+    /* bytes — the NAS layer's verbs (see bytes() above) */
     putBytes: function (p, body, o) { return bytes('PUT', p, body, o).then(function (r) { return r.json(); }); },
+    /* the one-call photo upload POSTs its bytes (routes/photos.js
+       /shows/:id/photos/upload) — same path as putBytes, different verb */
+    postBytes: function (p, body, o) { return bytes('POST', p, body, o).then(function (r) { return r.json(); }); },
     /* `o.onProgress(loaded, total)` reports the transfer as it happens. `total`
        is null when the server sent no Content-Length, and the caller must then
        show something indeterminate rather than invent a denominator.
@@ -3861,6 +3864,8 @@ var api = (function () {
     /* ================= EVENT PHOTOS =====================================
        GET  /api/shows/:id/photos    -> listPhotos(showId)
        GET  /api/photos?…            -> listAllPhotos(filters)
+       POST /api/shows/:id/photos/upload -> uploadPhoto(showId, file, opts)
+                                        [tech+ · bytes FIRST, fail = nothing]
        PUT  /api/photos/:id          -> updatePhoto(id, {caption, tags})
        PUT  /api/photos/:id/pick     -> setRecapPick(id, bool)  [pm+]
        POST /api/proposals/:id/confirm|reject -> confirmPhoto / rejectPhoto
@@ -3892,6 +3897,62 @@ var api = (function () {
       return SR.get('/api/photos' + SR.qs({ show_id: filters.showId, tag: filters.tag,
                                             pick: filters.pick ? 1 : null, status: filters.status, limit: 500 }))
         .then(function (rows) { return (rows || []).map(A.file); });
+    },
+    /* THE HUMAN DOOR (Tom, 9/16: "so theres no manual way to attach
+       photos?"). One call per picked file: the image bytes POST to
+       /shows/:id/photos/upload with the metadata on the query string, the
+       server writes the bytes through lib/storage FIRST and only then
+       creates the row — a failed byte write creates NOTHING, so the caller
+       never has ghost rows to clean up. `opts.w/h` are the browser's OWN
+       measurement of the decoded image (measureImage) or absent — never a
+       guess (HARDENING 21); `opts.takenAt` is the picked file's mtime when
+       the browser knows it.
+
+       DEMO: models the same flow in the demo store — the row registers with
+       the file's real byte count and measured pixels, wears the deterministic
+       placeholder art every demo photo wears, and says "modeled" on its face:
+       file:// has no NAS, so no byte pretends to have landed anywhere. */
+    uploadPhoto: function (showId, file, opts) {
+      opts = opts || {};
+      var name = String(opts.name || '').trim();
+      if (!name) return fail('a photo needs a name');
+      var ext = String(opts.ext || 'jpg').replace(/^\./, '');
+      if (!API()) {
+        var s = SHOWS_BY_ID[Number(showId)];
+        if (!s) return fail('show ' + showId + ' not found');
+        if (!PH_ADD_ROLES[CURRENT_USER.role]) return fail('adding photos requires tech, pm, manager or admin');
+        var w = Number(opts.w) || null, h = Number(opts.h) || null;
+        var f = mkFile({
+          name: name, ext: ext, kind: 'photo',
+          size: file && file.size ? file.size : 0,   /* the browser's real byte count */
+          dim: w && h ? w + ' x ' + h : null,        /* measured or nothing */
+          by: ME, off: 0, meta: 'uploaded by ' + ME + ' · modeled'
+        });
+        f.show_id = s.id; f.project_id = s.project_id;
+        f.taken_at = opts.takenAt || (TODAY_ISO + 'T' + _nowHM());
+        f.width = w; f.height = h;
+        f.caption = null; f.tags = [];
+        f.shot_by = ME;
+        f.recap_pick = false;
+        var p = PROJECTS_BY_ID[s.project_id];
+        f.nas_path = p ? '\\\\e360-nas\\showrunner\\P' + p.id + '-' + p.slug +
+          '\\S' + s.id + '-' + s.slug + '\\photo\\' + name + (ext ? '.' + ext : '') : '';
+        f.thumb = mkThumb(name, name, w && h ? w / h : null);
+        FILES_BY_ID[f.id] = f;
+        s.files.push(f);
+        s.activity.unshift(mkAct(ME, 'added a photo', String(name).slice(0, 64), 0, _nowHM()));
+        return ok(f);
+      }
+      return SR.postBytes('/api/shows/' + Number(showId) + '/photos/upload' + SR.qs({
+        name: name, ext: ext,
+        w: opts.w || null, h: opts.h || null,
+        taken_at: opts.takenAt || null
+      }), file).then(function (r) {
+        var f2 = A.file(r && r.photo ? r.photo : r);
+        var s2 = SHOWS_BY_ID[Number(showId)];
+        if (s2 && s2.files) s2.files.push(f2);
+        return f2;
+      });
     },
     updatePhoto: function (id, patch) {
       patch = patch || {};

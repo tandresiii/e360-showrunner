@@ -756,7 +756,12 @@ async function main() {
   };
   const payloads = [];
   {
-    const callRe = /api\.(addFile|addFinancialDoc|replaceChainFile)\s*\(/g;
+    // uploadPhoto joined the list with the Photos tab's human door (9/16):
+    // it, too, creates a files row from a UI gesture. Its own caller shows
+    // apiMode() (for the mode-specific toast wording), which would EXEMPT it
+    // from the demo-guard rule below — so §47 holds its payload to the
+    // no-size/no-dim line unconditionally, using this same extraction.
+    const callRe = /api\.(addFile|addFinancialDoc|replaceChainFile|uploadPhoto)\s*\(/g;
     let cm;
     while ((cm = callRe.exec(APP_JS))) {
       let i = callRe.lastIndex, depth = 1;
@@ -3260,6 +3265,92 @@ async function main() {
      comp.specRenderEmbedHTML({ node: 'content', rev: 1 }, { showId: SHOW }) === null);
   ok('the diagram-download machinery is GONE from the source, not just unmounted',
      !/specDownloadRenderAct/.test(APP_JS) && !/specRenderFileName/.test(APP_JS));
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('47 · the Photos tab gets its human door  (Tom, 9/16)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // 2026-09-16, live, closing out a show. The Photos tab's empty state said
+  // "Photos land here when your agent syncs them" and offered a person NOTHING
+  // — the agent pipeline it described does not run yet, so the photo feature,
+  // the recap picks it feeds and the client recap's images had zero human path
+  // in production (DESIGN_GAPS D5). Tom: "so theres no manual way to attach
+  // photos?" The house rule this broke: the UI must never promise fictional
+  // actors, and every needed affordance must exist for a real human.
+  reach('Add photos', { seam: 'uploadPhoto', action: 'photoAdd' });
+  {
+    const vf = SRC['views-folder.js'];
+    const emptyAt = vf.indexOf('No photos on this show yet');
+    ok('the empty state leads with the HUMAN door — Add photos is its primary button',
+       emptyAt > 0 && vf.slice(emptyAt, emptyAt + 1200).includes("act('photoAdd'"),
+       { emptyAt });
+    ok('the fictional-actor promise is GONE — no line says photos only land when an agent syncs them',
+       !/Photos land here when your agent syncs them/.test(vf));
+    ok('the agent-sync story is framed as what will ALSO happen once agents run — not the only way',
+       /agents run, they will <b>also<\/b> fill this gallery/.test(vf));
+    ok('the NAS path line is kept on the empty state',
+       vf.slice(Math.max(0, emptyAt), emptyAt + 2000).includes('phNasHint(show)'));
+    ok('the populated gallery bar carries the same door — not only the empty state',
+       (vf.match(/act\('photoAdd'/g) || []).length >= 2,
+       (vf.match(/act\('photoAdd'/g) || []).length);
+    ok('the button renders behind canAddPhotos() — the tech+ mirror of the route floor (server is the gate)',
+       /canAddPhotos\(\)/.test(vf) && /PH_ADD_ROLES = \{ admin: 1, manager: 1, pm: 1, tech: 1 \}/.test(SRC['data.js']));
+    // the failure toast wears the error face — §38's rule, pinned by name for
+    // this incident's own toast the way Tom's three screenshots are
+    ok('“Photo not added” exists in app.js and passes the ERROR kind',
+       /toast\('Photo not added',[\s\S]{0,140}'err'\)/.test(APP_JS));
+    // HARDENING 21, held UNCONDITIONALLY on this call site. §12b's scan
+    // exempts demo-guarded functions, and photoAddAct references apiMode()
+    // for its toast wording — so the generic scan alone would let a stamped
+    // size/dim ride back in here. This uses §12b's own extraction, minus the
+    // exemption: the payload carries measureImage's w/h or nothing, ever.
+    const upl = payloads.filter((p) => p.fn === 'uploadPhoto');
+    ok('the api.uploadPhoto call site is in the §12b extraction', upl.length >= 1,
+       upl.map((p) => p.owner).join(', '));
+    ok('HARDENING 21 · the uploadPhoto payload carries NO size and NO dim — measured w/h or nothing, no exemption',
+       upl.every((p) => !/(^|[{,\s])(size|dim)\s*:/.test(stripComments(p.text))),
+       upl.map((p) => p.owner + '()').join(' · '));
+  }
+
+  // the live half, in this walk's PRODUCTION SHAPE (no storage): the one-call
+  // route is bytes-FIRST, so on a server with no byte layer it must refuse
+  // honestly AND leave the gallery exactly as it was — a receipt row pointing
+  // at bytes that never landed is the ghost-row bug this route exists to
+  // never have.
+  const phBefore = await GET(`/api/shows/${SHOW}/photos`, { token: T.omar });
+  ok('(precondition) the show’s gallery reads', phBefore.status === 200, phBefore.status);
+  const phTry = await call('POST',
+    `/api/shows/${SHOW}/photos/upload?name=walk-frame&ext=jpg&w=4032&h=3024`,
+    { token: T.omar, raw: Buffer.from('jpeg bytes a tech picked') });
+  ok('a tech’s upload on a storage-less server is a 501 naming STORAGE_ROOT — never a silent write to a dying disk',
+     phTry.status === 501 && /STORAGE_ROOT/.test(phTry.body?.error || ''), phTry);
+  const phAfter = await GET(`/api/shows/${SHOW}/photos`, { token: T.omar });
+  ok('…and it created NOTHING — no ghost row behind the failure toast',
+     phAfter.status === 200 && phAfter.body.length === phBefore.body.length
+     && !phAfter.body.some((f) => f.name === 'walk-frame'),
+     { before: phBefore.body.length, after: phAfter.body.length });
+
+  // §37's lesson, applied to the new seam: reach() proves api.uploadPhoto
+  // EXISTS; only running it proves the browser half executes. The REAL
+  // loaded api.js drives the same route and must surface the server's own
+  // refusal verbatim — never swallow it into a green.
+  tab.SR.setToken(T.omar);
+  const seamErr = await tab.api.uploadPhoto(SHOW, Buffer.from('jpeg bytes'),
+    { name: 'seam-frame', ext: 'jpg' }).then(() => null, (e) => e);
+  ok('the REAL api.uploadPhoto executes and surfaces the storage refusal verbatim',
+     !!seamErr && /STORAGE_ROOT/.test(String((seamErr && seamErr.message) || '')),
+     String(seamErr).slice(0, 160));
+
+  // the floor, against a DISCRIMINATING identity one rung below it: a viewer
+  // must bounce off the ROLE gate (403) — not the storage 501 — proving the
+  // gate sits in front of the byte layer, on the server, not in the button.
+  const vic = await POST('/api/users',
+    { username: 'vic', password: PW, role: 'viewer', name: 'Vic Viewer' }, { token: A });
+  ok('a viewer exists to discriminate the floor', vic.status === 200, vic.body);
+  const VICT = (await POST('/api/auth/login', { username: 'vic', password: PW })).body.token;
+  const phViewer = await call('POST', `/api/shows/${SHOW}/photos/upload?name=vic-frame&ext=jpg`,
+    { token: VICT, raw: Buffer.from('jpeg bytes') });
+  ok('the floor is tech+: a viewer is 403 from the role gate, before storage is ever consulted',
+     phViewer.status === 403, phViewer);
 
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);

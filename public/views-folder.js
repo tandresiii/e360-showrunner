@@ -1983,11 +1983,19 @@ function photoCard(f) {
 function tabPhotos(show) {
   var photos = photosForShow(show.id);
 
-  /* ---- empty state — quiet; the agent fills this in ----------------------- */
+  /* ---- empty state — the HUMAN door first (Tom, 9/16: "so theres no manual
+     way to attach photos?"). The old copy promised an agent pipeline that
+     does not run yet and offered a person nothing; now the button is the
+     primary door, and the agent-sync story is framed as what will ALSO
+     happen once agents run — never as the only way in. ------------------- */
   if (!photos.length) {
     return '<div class="gear-empty">' + icon('cam') +
-      '<div style="font-weight:600;font-size:14px">Photos land here when your agent syncs them</div>' +
-      '<div style="font-size:12.5px;margin-top:7px;max-width:480px;margin-left:auto;margin-right:auto;line-height:1.5">Shoot the show — each teammate’s agent sorts, names and tags their camera roll into this event’s NAS folder and the gallery fills in by itself. Confident matches file directly; uncertain ones wait as <b>proposed</b> for a human eye.</div>' +
+      '<div style="font-weight:600;font-size:14px">No photos on this show yet</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:480px;margin-left:auto;margin-right:auto;line-height:1.5">Add them straight from your machine — each one files into this event’s NAS photo folder and appears here.</div>' +
+      (canAddPhotos()
+        ? '<div style="margin-top:14px"><button class="btn primary" ' + act('photoAdd', show.id) + '>' + icon('plus') + 'Add photos</button></div>'
+        : '<div class="perm-note" style="margin-top:14px">Adding photos requires tech, pm, manager or admin.</div>') +
+      '<div style="font-size:12px;margin-top:14px;max-width:480px;margin-left:auto;margin-right:auto;line-height:1.5;color:var(--text-2)">Once teammates’ agents run, they will <b>also</b> fill this gallery — sorting, naming and tagging each camera roll into the same folder. Confident matches file directly; uncertain ones wait as <b>proposed</b> for a human eye.</div>' +
       '<div class="mono" style="margin-top:14px;font-size:11px;color:var(--muted);word-break:break-all">' + esc(phNasHint(show)) + '</div></div>';
   }
 
@@ -2007,6 +2015,9 @@ function tabPhotos(show) {
   }).join('');
   var bar = '<div class="ph-bar">' + chips + '<span style="flex:1"></span>' +
     (propN ? '<span class="pill warn"><span class="dot"></span>' + propN + ' proposed</span>' : '') +
+    (canAddPhotos()
+      ? '<button class="btn sm ghost" ' + act('photoAdd', show.id) + '>' + icon('plus') + 'Add photos</button>'
+      : '') +
     '</div>';
 
   /* ---- apply the filter --------------------------------------------------- */

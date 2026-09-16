@@ -53,8 +53,9 @@
 //   PUT    /api/photos/:id/pick         recap_pick     [pm+ only]
 //   PATCH  /api/photos/:id/thumb        thumb_path     [pm+ / uploader / NAS]
 //   GET    /api/shows/:id/recap-picks   the recap strip (48)
-//   POST   /api/shows/:id/photos        human upload   [tech+]
+//   POST   /api/shows/:id/photos        human upload, metadata   [tech+]
 //   PUT    /api/photos/:id/content      raw bytes      [pm+ OR the uploader]
+//   POST   /api/shows/:id/photos/upload one call, bytes FIRST    [tech+]
 // ════════════════════════════════════════════════════════════════════════════
 
 'use strict';
@@ -597,6 +598,109 @@ router.put('/photos/:id/content',
     fileCache.invalidatePath(row.nas_path);   // new bytes at this path
     await pool.query('UPDATE files SET size=$1 WHERE id=$2', [req.body.length, id]);
     res.json({ ok: true, size: result.size != null ? result.size : req.body.length });
+  })
+);
+
+// POST /api/shows/:id/photos/upload — the ONE-CALL human upload.
+//
+// 9/16, Tom, live, closing out a show: "so theres no manual way to attach
+// photos?" There wasn't — the two routes above existed and nothing in the
+// product called them (DESIGN_GAPS D5). This is the route the Photos tab's
+// "Add photos" button posts each picked file to.
+//
+// It deliberately INVERTS the metadata-first contract of the pair above. That
+// contract is agent-shaped: the row is the receipt, the bytes follow, and a
+// failed push leaves a row to retry against. A person picking twelve frames
+// off a laptop wants the opposite deal — either the photo is in the gallery
+// with its bytes on the NAS, or NOTHING happened. Twelve receipt rows pointing
+// at nothing after a NAS hiccup is a cleanup job, not a retry affordance.
+//
+// So: BYTES FIRST, through the same lib/storage driver as every other byte in
+// the app. storage.put() runs before any INSERT; when it fails, the error goes
+// back with the storage layer's own status (501 not-configured · 502
+// unreachable · 507 share full · 413 too large) and the gallery is exactly as
+// it was — no row is created, ever, on a failed write.
+//
+// The body is the image (application/octet-stream), so the metadata rides the
+// query string: name (required) · ext · w/h (MEASURED pixels — the browser
+// decoded the actual file; absent means unknown, never guessed: HARDENING 21)
+// · taken_at (the picked file's own mtime when the browser knows it; the
+// upload moment otherwise, same stand-in as the POST above) · caption.
+//
+// tech+ — the photo family's write floor, same as POST /shows/:id/photos above
+// and POST /api/files: the techs are the ones with the camera. Curation stays
+// pm+ (/pick). thumb_path stays NULL: the NAS watcher PATCHes :id/thumb when
+// it renders one, and the gallery draws its placeholder until then (46).
+router.post('/shows/:id/photos/upload',
+  requireAuth, requireRole('tech'),
+  express.raw({ type: 'application/octet-stream', limit: '100mb' }),
+  asyncH(async (req, res) => {
+    const showId = idParam(req);
+    const show = await loadShowOr404(showId);
+    const project = await loadProject(show.project_id);
+    if (!project) throw notFound('parent project not found');
+
+    const q = req.query || {};
+    const name = String(pick(q, 'name') || '').trim();
+    if (!name) throw badRequest('name required (?name= — the body is the image)');
+    const ext = String(pick(q, 'ext') || 'jpg').replace(/^\./, '');
+    if (!Buffer.isBuffer(req.body) || !req.body.length) {
+      throw badRequest('empty body — send the image as application/octet-stream');
+    }
+
+    let takenAt = pick(q, 'taken_at');
+    if (takenAt === undefined || takenAt === null || takenAt === '') {
+      takenAt = new Date();
+    } else {
+      const d = new Date(takenAt);
+      if (isNaN(d.getTime())) throw badRequest('taken_at must be an ISO datetime');
+      takenAt = d;
+    }
+    const width = num(pick(q, 'w'), null);
+    const height = num(pick(q, 'h'), null);
+    const dim = width && height ? `${width} x ${height}` : null;
+    const caption = String(pick(q, 'caption') || '').trim() || null;
+
+    const nasPath = buildNasPath(project, show, { kind: 'photo', name, ext });
+
+    // BYTES FIRST — a failure here creates nothing (see the header above).
+    await storage.put(nasPath, req.body);
+    fileCache.invalidatePath(nasPath);   // the path may have held earlier bytes
+    // Bytes landed, so the show's folder demonstrably exists — this clears the
+    // 9/11 folder-warn chip exactly the way PUT /files/:id/content does.
+    await pool.query(
+      `UPDATE shows SET storage_folder_at=NOW(), storage_folder_error=NULL WHERE id=$1`,
+      [show.id]);
+
+    let out;
+    try {
+      out = await withTx(async (c) => {
+        const r = await c.query(
+          `INSERT INTO files (project_id, show_id, name, ext, kind, nas_path, size, uploaded_by,
+                              status, taken_at, width, height, caption, tags, shot_by, recap_pick, dim, meta)
+           VALUES (NULL,$1,$2,$3,'photo',$4,$5,$6,'filed',$7,$8,$9,$10,$11::text[],$12,FALSE,$13,$14)
+           RETURNING *`,
+          [show.id, name, ext, nasPath, req.body.length, req.session.username,
+           takenAt, width, height, caption, [], req.session.username, dim,
+           'uploaded by ' + req.session.username]);
+        const created = r.rows[0];
+        await logActivity(c, {
+          projectId: project.id, showId: show.id, actor: req.session.username,
+          action: 'photo.add',
+          detail: `${photoLabel(created) || name} — ${req.body.length.toLocaleString()} bytes`
+        });
+        return created;
+      });
+    } catch (e) {
+      // The bytes landed and the record did not — the one state this route
+      // must not leave behind is inverted here, so take the bytes back.
+      // Best-effort: the INSERT's error is the story either way, and an
+      // orphan byte-file is strictly less misleading than a ghost row.
+      try { await storage.remove(nasPath); } catch (_) { /* the throw below carries the cause */ }
+      throw e;
+    }
+    // thumb_path stays NULL — the NAS watcher fills it via PATCH :id/thumb.
+    res.json(dbToFile(out));
   })
 );
 

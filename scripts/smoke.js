@@ -1037,6 +1037,116 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('POST /api/recaps/:id/sent records a HUMAN send (no outbound path exists)',
      sent.status === 200 && /no outbound/i.test(JSON.stringify(sent.body)), sent.body);
 
+  // ── 4c. the human photo upload — one call, bytes FIRST ───────────────────
+  // 9/16, Tom, live, closing out a show: "so theres no manual way to attach
+  // photos?" The Photos tab's Add-photos button posts each picked file here.
+  // The route inverts the metadata-first contract on purpose: storage.put()
+  // runs BEFORE any INSERT, so a failed byte write creates NOTHING — a person
+  // never inherits ghost rows from a NAS hiccup. These assertions pin all
+  // three sides: real bytes land and read back byte-identical; the tech+
+  // floor holds against a discriminating identity a rung BELOW it; and both
+  // failure shapes (no body · storage refuses the write) leave the gallery
+  // exactly as it was.
+  section('4c. human photo upload — bytes first, create nothing on failure');
+  const phCount = async (sid) =>
+    ((await GET(`/api/shows/${sid}/photos`, { token: A })).body || []).length;
+  const phN0 = await phCount(S);
+
+  // the happy path, as the TECH — the floor itself must be IN, or the floor
+  // is really pm+ wearing a tech label
+  const upBytes = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+                                 Buffer.from(TAG + ' real image bytes, round-tripped')]);
+  const up = await call('POST',
+    `/api/shows/${S}/photos/upload?name=${TAG}-dock-push&ext=jpg&w=4032&h=3024&taken_at=2026-11-12T08:02:00Z`,
+    { token: TECHT, raw: upBytes });
+  ok('POST /api/shows/:id/photos/upload — a tech uploads a real frame', up.status === 200, up.body);
+  ok('...the row is a filed photo with the REAL byte count, never a stamp',
+     up.body.kind === 'photo' && up.body.status === 'filed' && Number(up.body.size) === upBytes.length,
+     { kind: up.body.kind, size: up.body.size, want: upBytes.length });
+  ok('...measured pixels are recorded exactly as measured',
+     Number(up.body.width) === 4032 && Number(up.body.height) === 3024 && up.body.dim === '4032 x 3024',
+     { w: up.body.width, h: up.body.height, dim: up.body.dim });
+  ok('...under the mechanical \\photo\\ folder (punch 45)',
+     String(up.body.nas_path).includes('\\photo\\'), up.body.nas_path);
+  ok('...thumb_path stays NULL — the NAS watcher PATCHes it in; the gallery draws its placeholder until then',
+     up.body.thumb_path == null, up.body.thumb_path);
+  ok('...credited to the uploader as shooter and uploader',
+     up.body.uploaded_by === techUser && up.body.shot_by === techUser,
+     { by: up.body.uploaded_by, shot: up.body.shot_by });
+  const upBack = await call('GET', `/api/files/${up.body.id}/content`, { token: TECHT, wantBytes: true });
+  ok('...and the bytes read back BYTE-IDENTICAL through the download route',
+     upBack.status === 200 && Buffer.compare(upBack.bytes, upBytes) === 0,
+     { status: upBack.status, len: upBack.bytes ? upBack.bytes.length : null });
+  ok('...the gallery lists it', (await phCount(S)) === phN0 + 1);
+  const upAct = await pool.query(
+    `SELECT detail FROM activity WHERE show_id=$1 AND action='photo.add' ORDER BY id DESC LIMIT 1`, [S]);
+  ok('...and the activity row carries the real byte count',
+     / bytes$/.test(upAct.rows[0] ? upAct.rows[0].detail : ''), upAct.rows[0]);
+
+  // no measurement offered -> nothing recorded (HARDENING 21: absent, never guessed)
+  const upNoDim = await call('POST', `/api/shows/${S}/photos/upload?name=${TAG}-unmeasured&ext=jpg`,
+    { token: TECHT, raw: upBytes });
+  ok('an upload with no ?w=&h= records NO pixels and NO dim — unknown stays unknown',
+     upNoDim.status === 200 && upNoDim.body.width == null && upNoDim.body.height == null
+     && upNoDim.body.dim == null,
+     { w: upNoDim.body.width, h: upNoDim.body.height, dim: upNoDim.body.dim });
+
+  // the floor, against a DISCRIMINATING identity one rung below it. Every
+  // other identity in this file (pm/manager/admin) is ABOVE tech and proves
+  // nothing about the floor's placement.
+  const viewUser = TAG + 'view';
+  await POST('/api/users', { username: viewUser, password: 'smokepass123', role: 'viewer',
+                             name: 'SMOKE VIEWER' }, { token: A });
+  const VIEWT = (await POST('/api/auth/login', { username: viewUser, password: 'smokepass123' })).body.token;
+  const phN1 = await phCount(S);
+  const upViewer = await call('POST', `/api/shows/${S}/photos/upload?name=${TAG}-viewer-frame&ext=jpg`,
+    { token: VIEWT, raw: upBytes });
+  ok('FLOOR: a viewer is 403 — the tech+ role gate sits in front of the byte layer',
+     upViewer.status === 403, upViewer);
+  ok('...and no session at all is 401',
+     (await call('POST', `/api/shows/${S}/photos/upload?name=${TAG}-anon&ext=jpg`,
+                 { raw: upBytes })).status === 401);
+  ok('...neither attempt created anything', (await phCount(S)) === phN1);
+
+  // failure shape 1: NO BYTES. A JSON body is not an octet stream; the route
+  // must refuse before anything is written or inserted.
+  const upEmpty = await call('POST', `/api/shows/${S}/photos/upload?name=${TAG}-empty&ext=jpg`,
+    { token: TECHT, body: { nope: true } });
+  ok('an upload with no octet-stream body is a 400 naming the contract',
+     upEmpty.status === 400 && /octet-stream/.test(upEmpty.body?.error || ''), upEmpty.body);
+  ok('...and created nothing', (await phCount(S)) === phN1);
+
+  // failure shape 2: THE BYTE WRITE ITSELF FAILS. The show's kind folders
+  // exist from birth (the 9/11 eager skeleton), so the block sits on the
+  // TARGET FILE PATH itself: a directory squatting exactly where the bytes
+  // would land makes the local driver's write refuse — a stand-in for "the
+  // NAS said no" that needs no NAS. The route must surface the failure and
+  // leave NO row behind (the whole point of bytes-first; the metadata-first
+  // pair above deliberately behaves the other way, and this test is what
+  // keeps the two contracts from blurring).
+  {
+    const fs = require('fs');
+    const { toLocalPath } = require('../lib/storage');
+    // derive S2's photo kind-dir from a registered (byteless) metadata row
+    const reg = await POST(`/api/shows/${S2}/photos`, { name: TAG + '-derive-path', ext: 'jpg' },
+      { token: A });
+    ok('(fixture) a metadata photo registers on the second show', reg.status === 200, reg.body);
+    const photoDirNas = String(reg.body.nas_path).slice(0, String(reg.body.nas_path).lastIndexOf('\\'));
+    const blockedLocal = toLocalPath(photoDirNas + '\\' + TAG + '-blocked.jpg');
+    fs.mkdirSync(blockedLocal, { recursive: true });   // a DIRECTORY where the file goes
+    const phN2 = await phCount(S2);
+    const upBlocked = await call('POST', `/api/shows/${S2}/photos/upload?name=${TAG}-blocked&ext=jpg`,
+      { token: TECHT, raw: upBytes });
+    ok('a failed byte write surfaces as an error, never a green 200',
+       upBlocked.status >= 500, { status: upBlocked.status, body: upBlocked.body });
+    ok('...and created NOTHING — no ghost row behind the failure',
+       (await phCount(S2)) === phN2 &&
+       !((await GET(`/api/shows/${S2}/photos`, { token: A })).body || [])
+         .some((f) => f.name === TAG + '-blocked'));
+    fs.rmdirSync(blockedLocal);                          // unblock for later sections
+    await DEL(`/api/files/${reg.body.id}`, { token: A }); // the fixture row goes too
+  }
+
   // ── 5. the agent API ──────────────────────────────────────────────────────
   section('5. agent API — key, whoami, match, propose, confirm');
   const keyRes = await POST('/api/keys', { label: TAG + " Tom's M365 agent",

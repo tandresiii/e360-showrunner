@@ -2915,10 +2915,64 @@ async function schedDeleteAct(itemId) {
 }
 
 /* ============================================================================
-   EVENT PHOTO ACTIONS — recap-pick toggle · confirm/reject proposals ·
-   tag filter · inline caption edit · global-files mode (photo pass).
-   Every mutation goes through api.* then re-renders from fresh data.
+   EVENT PHOTO ACTIONS — add photos (the human door) · recap-pick toggle ·
+   confirm/reject proposals · tag filter · inline caption edit · global-files
+   mode (photo pass). Every mutation goes through api.* then re-renders from
+   fresh data.
    ========================================================================== */
+/* ADD PHOTOS — the human door (Tom, 9/16, live, closing out a show: "so
+   theres no manual way to attach photos?"). One multi-file picker
+   (accept="image/*"); each picked file is measured browser-side — REAL
+   pixels or nothing, never a guess (HARDENING 21) — and goes up through
+   api.uploadPhoto, which is bytes-FIRST on the server: a failed byte write
+   creates NOTHING, so a failure toast here never has a ghost row behind it.
+   Per-file failures name the file and the storage layer's own reason, and
+   the loop keeps going — one bad frame must not eat the other eleven. */
+async function photoAddAct(showId) {
+  if (apiMode() && !(await api.uploadsEnabled())) {
+    toast('No storage on this server',
+      'Photos need their bytes, and the NAS wiring is not configured — nothing would land. Ask Tom.', 'err');
+    return;
+  }
+  var inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = 'image/*';
+  inp.multiple = true;
+  inp.addEventListener('change', async function () {
+    var files = Array.prototype.slice.call(inp.files || []);
+    if (!files.length) return;
+    var added = 0;
+    for (var i = 0; i < files.length; i++) {
+      var file = files[i];
+      var g = guessFileKind(file.name);
+      var dims = await measureImage(file);       /* real pixels or nothing */
+      try {
+        await api.uploadPhoto(showId, file, {
+          name: g.base, ext: g.ext || 'jpg',
+          w: dims ? dims.w : null, h: dims ? dims.h : null,
+          /* the file's own mtime — real, browser-reported metadata, the best
+             stand-in this layer has for the shutter moment (no EXIF here;
+             the NAS watcher can backfill a truer value later) */
+          takenAt: file.lastModified > 0 ? new Date(file.lastModified).toISOString() : null
+        });
+        added += 1;
+      } catch (e) {
+        /* bytes-first on the server: this failure created NOTHING — name
+           the file and pass the storage layer's own message through */
+        toast('Photo not added', file.name + ' — ' + String(e && e.message || e), 'err');
+      }
+    }
+    if (added) {
+      toast(added === 1 ? 'Photo added' : added + ' photos added',
+        apiMode()
+          ? 'Bytes are on the NAS under \\photo\\ — thumbnails fill in when the NAS watcher renders them'
+          : 'Modeled in the demo store — no NAS on file://, the bytes stayed on your machine');
+    }
+    if (CUR.view === 'show') return refreshShowTab(showId, 'photos');
+    if (CUR.view === 'files') return render('files');
+  });
+  inp.click();
+}
 async function photoPickAct(fileId) {
   var cur = await api.getFile(fileId);
   if (!cur) return;
@@ -7385,6 +7439,7 @@ var ACTIONS = {
   schedSave:       function () { return schedSaveAct(); },
   schedDelete:     function (t, id) { return schedDeleteAct(id); },
   /* event photos (photo pass) */
+  photoAdd:      function (t, id) { return photoAddAct(id); },
   photoPick:     function (t, id) { return photoPickAct(id); },
   photoConfirm:  function (t, id) { return photoConfirmAct(id); },
   photoReject:   function (t, id) { return photoRejectAct(id); },

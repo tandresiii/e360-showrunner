@@ -3548,6 +3548,13 @@ function demoCrewNames() {
    ========================================================================== */
 var PH_EDIT_ROLES = { admin: 1, manager: 1, pm: 1 };   /* curation: picks + captions */
 function canEditPhoto(f) { return !!PH_EDIT_ROLES[CURRENT_USER.role] || f.uploaded_by === ME; }
+/* WHO MAY ADD PHOTOS — the family's write floor, mirroring the server's tech+
+   gate on POST /shows/:id/photos and /shows/:id/photos/upload (routes/
+   photos.js): the techs are the ones with the camera, and pushing uploads to
+   pm+ would put them back to emailing a zip. Curation stays PH_EDIT_ROLES.
+   The server is the gate; this only decides what the UI offers. */
+var PH_ADD_ROLES = { admin: 1, manager: 1, pm: 1, tech: 1 };
+function canAddPhotos() { return !!(CURRENT_USER && PH_ADD_ROLES[CURRENT_USER.role]); }
 
 /* ---- deterministic placeholder art (stands in for the NAS thumbnail) ----- */
 function _phHash(s) {
