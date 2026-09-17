@@ -716,7 +716,8 @@ function tplEditor(id, projects) {
         '<button class="btn primary" ' + act('tplSave', meta.id) + '>' + icon('check') + 'Save template</button></div>'
       : '<div class="perm-note" style="margin:0">' + inlineIcon('lock') + ' Templates are manager+ to change — the grid is readable by everyone.</div>') +
     '</div>' +
-    '<div class="hint" style="margin:0 0 16px">' + icon('bolt') + 'Offsets are <b>T-minus days from ' + esc(anchor) + '</b>. Edit names and offsets inline, remove or add rows — nothing is written until <b>Save</b> commits the whole grid. Shows seeded from <b>this</b> template after a save inherit the change; the other ' + (sibs - 1) + ' template' + (sibs - 1 === 1 ? '' : 's') + ' of this type, and every show already seeded, are untouched.</div>' +
+    '<div class="hint" style="margin:0 0 16px">' + icon('bolt') + 'Offsets are <b>T-minus days from ' + esc(anchor) + '</b>. Edit names and offsets inline, remove or add rows — nothing is written until <b>Save</b> commits the whole grid. Shows seeded from <b>this</b> template after a save inherit the change; shows already seeded keep their steps' +
+    (sibs > 1 ? ', and the type’s other ' + (sibs - 1) + ' template' + (sibs - 1 === 1 ? '' : 's') + ' never move' : '') + '.</div>' +
     lanesHTML +
     (canEdit
       ? '<button class="addlane" ' + toastAttrs('Lanes are the event type’s config',
