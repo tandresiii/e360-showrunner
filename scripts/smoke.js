@@ -6048,6 +6048,102 @@ const DEL = (p, o) => call('DELETE', p, o);
      (await GET('/api/templates/led', { token: A })).body.id === seededLed);
 
   // ══════════════════════════════════════════════════════════════════════════
+  section('18b. seeding is IDEMPOTENT BY STEP TITLE — the seed door stays open');
+  // ══════════════════════════════════════════════════════════════════════════
+  // The defect: the Pipeline tab only offered "Seed pipeline" on a pipeline
+  // with ZERO steps, because the route had no duplicate protection — called
+  // twice it inserted the whole SOP twice. So hand-adding ONE task closed the
+  // door forever and the only way back was deleting your own task. The dedup
+  // now lives in the route (idempotent by title, case/trim-insensitive, any
+  // lane), which is what lets the UI keep the door open.
+  const idemTpl = await POST('/api/templates', {
+    name: TAG + ' idempotency SOP', event_type: 'led',
+    steps: [
+      { lane: 'venue', title: TAG + ' Confirm rigging points', due_offset_days: -14 },
+      { lane: 'gear',  title: TAG + ' Stage the spares',       due_offset_days: -7 },
+      // depends on a title the SHOW will already carry by hand, not on a
+      // sibling in this template — that is the wiring case that used to dangle
+      { lane: 'gear',  title: TAG + ' Load the truck',          due_offset_days: -2,
+        depends_on_title: TAG + ' HAND-ADDED chase the rigging plot' }
+    ]
+  }, { token: MGRT });
+  ok('18b a manager banks the idempotency SOP', idemTpl.status === 200, idemTpl.body);
+  const IDT = idemTpl.body.id;
+
+  const idemShow = await POST('/api/shows', {
+    project_id: P, name: TAG + ' idempotent seed', event_date: '2026-12-01'
+  }, { token: A });
+  ok('18b a show is born with an EMPTY pipeline (no template asked for)',
+     idemShow.status === 200 && (idemShow.body.steps || []).length === 0, idemShow.body.steps);
+  const IDS = idemShow.body.id;
+
+  // the hand-added task — the one the old UI gate punished you for typing.
+  // Cased DIFFERENTLY from the template row below on purpose: the match is
+  // case/trim-insensitive, so ' STAGE THE SPARES ' must still read as a dupe.
+  const handTask = await POST('/api/steps', {
+    show_id: IDS, lane: 'gear', title: TAG + ' HAND-ADDED chase the rigging plot',
+    owner: pmUser, due_offset_days: -30, risk: true
+  }, { token: A });
+  ok('18b a pm hand-adds one task', handTask.status === 200, handTask.body);
+  const HAND = handTask.body.id;
+  const handBefore = (await pool.query('SELECT * FROM steps WHERE id=$1', [HAND])).rows[0];
+  // a second hand-added row that COLLIDES with a template title, differing only
+  // in case and surrounding whitespace
+  const dupeTask = await POST('/api/steps', {
+    show_id: IDS, lane: 'gear', title: '  ' + (TAG + ' STAGE THE SPARES').toUpperCase() + '  '
+  }, { token: A });
+  ok('18b ...and one whose title collides with a template row (case + whitespace)',
+     dupeTask.status === 200, dupeTask.body);
+
+  // (a) THE DEFECT ITSELF: seeding a show that already has hand-added tasks
+  const tSeed1 = await POST(`/api/shows/${IDS}/instantiate-template`,
+    { template_id: IDT }, { token: A });
+  ok('18b (a) seeding a NON-EMPTY pipeline lands the template AROUND the hand work',
+     tSeed1.status === 200 && tSeed1.body.instantiated_steps === 2, tSeed1.body);
+  ok('18b (a) ...and reports the collided row as skipped, not as new work',
+     tSeed1.body.skipped_steps === 1, tSeed1.body);
+  const handAfter = (await pool.query('SELECT * FROM steps WHERE id=$1', [HAND])).rows[0];
+  ok('18b (a) the hand-added task is UNTOUCHED — same lane, title, owner, offset, risk',
+     !!handAfter && handAfter.title === handBefore.title && handAfter.lane === handBefore.lane
+     && handAfter.owner === handBefore.owner && handAfter.risk === handBefore.risk
+     && handAfter.due_offset_days === handBefore.due_offset_days, { handBefore, handAfter });
+  ok('18b (a) the case/whitespace collision created NO second row',
+     (await pool.query(
+       `SELECT COUNT(*)::int AS n FROM steps WHERE show_id=$1 AND lower(btrim(title))=lower($2)`,
+       [IDS, TAG + ' Stage the spares'])).rows[0].n === 1);
+  const afterFirst = (await pool.query(
+    'SELECT COUNT(*)::int AS n FROM steps WHERE show_id=$1', [IDS])).rows[0].n;
+  ok('18b (a) the board is exactly hand(2) + new(2)', afterFirst === 4, afterFirst);
+
+  // (c) dependency wiring across the seam: a NEW step whose depends_on_title
+  // names a step that was ALREADY on the show must reach that real row
+  const truck = (await pool.query(
+    'SELECT * FROM steps WHERE show_id=$1 AND title=$2', [IDS, TAG + ' Load the truck'])).rows[0];
+  ok('18b (c) a new step depending on an ALREADY-PRESENT title wires to that step’s id',
+     !!truck && truck.depends_on === HAND, { depends_on: truck && truck.depends_on, hand: HAND });
+
+  // (b) the reason the UI gate existed at all — call it twice
+  const tSeed2 = await POST(`/api/shows/${IDS}/instantiate-template`,
+    { template_id: IDT }, { token: A });
+  ok('18b (b) a SECOND seed inserts ZERO new steps', tSeed2.status === 200
+     && tSeed2.body.instantiated_steps === 0, tSeed2.body);
+  ok('18b (b) ...and says so — all three template rows skipped',
+     tSeed2.body.skipped_steps === 3, tSeed2.body);
+  ok('18b (b) the row count did not move — the SOP cannot land twice',
+     (await pool.query('SELECT COUNT(*)::int AS n FROM steps WHERE show_id=$1',
+       [IDS])).rows[0].n === afterFirst);
+  ok('18b (b) no title on the board is duplicated',
+     (await pool.query(
+       `SELECT COUNT(*)::int AS n FROM (SELECT lower(btrim(title)) t FROM steps
+          WHERE show_id=$1 GROUP BY 1 HAVING COUNT(*) > 1) d`, [IDS])).rows[0].n === 0);
+  ok('18b (b) an all-skipped seed still logs — a silent no-op reads as a broken button',
+     (await pool.query(
+       `SELECT COUNT(*)::int AS n FROM activity WHERE show_id=$1 AND action='template.instantiate'`,
+       [IDS])).rows[0].n === 2);
+  ok('18b (b) the re-seed did not re-point the hand-added task’s depends_on',
+     (await pool.query('SELECT depends_on FROM steps WHERE id=$1', [HAND])).rows[0].depends_on == null);
+
+  // ══════════════════════════════════════════════════════════════════════════
   section('19. proposal overrides — "this belongs to THAT show" reaches the record');
   // ══════════════════════════════════════════════════════════════════════════
   // E4: the seam forwarded `overrides` and the client posted {} — so a folder-

@@ -7093,8 +7093,21 @@ async function seedPipelineAct(showId) {
   var r;
   try { r = await api.instantiateTemplate(showId, templateId); }
   catch (e) { toast('Not seeded', String(e && e.message || e), 'err'); return; }
-  toast('Pipeline seeded', (r.instantiated_steps || 0) + ' steps landed' +
-    (show.event_date ? ', back-scheduled off ' + fmtDate(show.event_date) : ' — set an event date to back-schedule them'));
+  /* Seeding is idempotent by step title, so this call can legitimately land
+     NOTHING — every template title was already on the show. Reporting that as
+     "Pipeline seeded · 18 steps" would be a lie about work that did not
+     happen, and the person would go looking for rows that are not new. Say
+     what landed, say what was skipped, and change the headline when nothing
+     landed at all. */
+  var landed = r.instantiated_steps || 0;
+  var skipped = r.skipped_steps || 0;
+  var detail = landed + ' step' + (landed === 1 ? '' : 's') + ' landed';
+  if (landed) {
+    detail += show.event_date ? ', back-scheduled off ' + fmtDate(show.event_date)
+      : ' — set an event date to back-schedule them';
+  }
+  if (skipped) detail += ' · ' + skipped + ' already on this show, skipped';
+  toast(landed ? 'Pipeline seeded' : 'Nothing new to seed', detail);
   await updateMineCount();
   return refreshShowTab(showId, 'pipeline');
 }

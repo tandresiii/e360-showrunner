@@ -1256,7 +1256,8 @@ async function main() {
      (await POST('/api/jobs', { project_id: PROJ, client: 'sneak' }, { token: T.pat })).status === 403);
 
   reach('Add show (season dashboard)', { seam: 'createShow', action: ['addShow', 'nsCommit'] });
-  reach('Seed pipeline (empty Pipeline tab)', { seam: 'instantiateTemplate', action: 'seedPipeline' });
+  reach('Seed pipeline (Pipeline tab — empty AND non-empty)',
+    { seam: 'instantiateTemplate', action: 'seedPipeline' });
   const wshow = await POST('/api/shows',
     { project_id: PROJ, name: 'AVCA Second Serve', venue: 'UW Field House', event_date: plus(90) },
     { token: T.brenden });
@@ -1276,6 +1277,127 @@ async function main() {
                         WHERE show_id=$1 AND due_date <> ''`, [WS2])).rows[0].n > 0);
   ok('the season toast no longer points at a control that does not exist',
      !/open a show and seed it there/.test(SRC['views-dashboard.js']));
+
+  // The seed door used to SLAM SHUT the moment somebody hand-added one task:
+  // tabPipeline offered it only on a pipeline with ZERO steps, because the
+  // route had no duplicate protection. The dedup moved to the server, so the
+  // door stays open on a board with steps on it. Both halves are asserted —
+  // the flow through the real route, and the affordance over the source.
+  const wseed2 = await POST(`/api/shows/${WS2}/instantiate-template`,
+    { template_id: tplLed.body.id }, { token: T.brenden });
+  ok('seeding AGAIN lands nothing — idempotent by step title, not by a UI gate',
+     wseed2.status === 200 && wseed2.body.instantiated_steps === 0
+     && wseed2.body.skipped_steps > 0, wseed2.body);
+  ok('…and no title on that board is doubled', (await pool.query(
+     `SELECT COUNT(*)::int AS n FROM (SELECT lower(btrim(title)) t FROM steps
+        WHERE show_id=$1 GROUP BY 1 HAVING COUNT(*) > 1) d`, [WS2])).rows[0].n === 0);
+  // a hand-added task must not close the door OR be disturbed by a re-seed
+  const wHand = await POST('/api/steps',
+    { show_id: WS2, lane: 'logistics', title: 'chase the venue about the rigging plot' },
+    { token: T.brenden });
+  ok('a pm hand-adds their own task to the seeded board', wHand.status === 200, wHand.body);
+  const wseed3 = await POST(`/api/shows/${WS2}/instantiate-template`,
+    { template_id: tplLed.body.id }, { token: T.brenden });
+  ok('…and re-seeding still lands nothing new',
+     wseed3.status === 200 && wseed3.body.instantiated_steps === 0, wseed3.body);
+  ok('…with the hand-added task untouched', (await pool.query(
+     'SELECT title, lane FROM steps WHERE id=$1', [wHand.body.id])).rows[0].title
+     === 'chase the venue about the rigging plot');
+
+  const pipeSrc = SRC['views-folder.js'].slice(
+    SRC['views-folder.js'].indexOf('function tabPipeline'),
+    SRC['views-folder.js'].indexOf('function chainStrip'));
+  ok('tabPipeline KEEPS the big empty-state seed block',
+     /editable && !allSteps\(show\)\.length/.test(pipeSrc));
+  ok('…and a NON-empty pipeline now carries a Seed pipeline button of its own',
+     /editable && allSteps\(show\)\.length[\s\S]{0,180}seedPipeline/.test(pipeSrc));
+  ok('…in the sched-bar, beside Add task',
+     /sched-bar[\s\S]{0,500}seedPipeline[\s\S]{0,260}addTask/.test(pipeSrc));
+  ok('…so the door exists on BOTH states — two seedPipeline sites in tabPipeline',
+     (pipeSrc.match(/seedPipeline/g) || []).length === 2,
+     (pipeSrc.match(/seedPipeline/g) || []).length);
+  // the toast may not claim work it did not do
+  const seedActSrc = APP_JS.slice(APP_JS.indexOf('async function seedPipelineAct'),
+    APP_JS.indexOf('async function seedPipelineAct') + 2400);
+  ok('the seed toast reads skipped_steps — it can say what was ALREADY there',
+     /skipped_steps/.test(seedActSrc));
+  ok('…and an all-skipped seed does not report a fake success',
+     /Nothing new to seed/.test(seedActSrc));
+  // ── DEMO TWIN PARITY, EXECUTED — not scanned ───────────────────────────────
+  // The file:// demo seeds from its own local store. A demo that duplicates
+  // steps where the server dedupes is exactly the lie the twin exists to
+  // prevent, and a regex over _seedLocalPipeline would not have caught it.
+  // Same eight-global shim as section 37, one global changed: location
+  // .protocol 'file:' is probe()'s demo trapdoor, so nothing reaches a server.
+  // This harness carries the RENDER half too, so the files load in the same
+  // order index.html gives them. Nothing is stubbed but the browser edges: a
+  // demo that seeds correctly and never draws the button is still broken.
+  const demoTab = (() => {
+    const store = new Map();
+    const ctx = {
+      fetch: () => Promise.reject(new Error('demo mode must not reach the network')),
+      localStorage: {
+        getItem: (k) => (store.has(k) ? store.get(k) : null),
+        setItem: (k, v) => store.set(k, String(v)),
+        removeItem: (k) => store.delete(k)
+      },
+      location: { protocol: 'file:' },
+      setTimeout, clearTimeout, AbortController, console,
+      document: { addEventListener: () => {}, querySelector: () => null, querySelectorAll: () => [] },
+      navigator: { userAgent: 'walk' }
+    };
+    ctx.window = ctx;
+    vm.createContext(ctx);
+    for (const f of ['data.js', 'api.js', 'components.js', 'views-notes.js', 'views-folder.js']) {
+      new vm.Script(SRC[f], { filename: 'public/' + f }).runInContext(ctx);
+    }
+    return ctx;
+  })();
+  ok('the REAL public/api.js loads headless with file:// as its trapdoor',
+     (await demoTab.SR.probe()) === 'demo');
+  const dEvt = await demoTab.api.createEvent({
+    name: 'WALK demo seed parity', type: 'led', venue: 'Demo Hall', event_date: plus(60)
+  });
+  const dSeeded = dEvt.instantiated_steps || 0;
+  ok('a demo event opens with a seeded pipeline', dSeeded > 0, dEvt.instantiated_steps);
+  const dShowId = dEvt.show.id;
+  // the hand-added task the old UI gate punished you for typing
+  const dHand = await demoTab.api.createStep({
+    show_id: dShowId, lane: 'logistics', title: 'chase the venue about the rigging plot'
+  });
+  ok('…a demo pm hand-adds their own task', !!dHand && !!dHand.id, dHand);
+  const dSeed = await demoTab.api.instantiateTemplate(dShowId, null);
+  ok('DEMO TWIN: re-seeding lands ZERO — the file:// demo dedupes by title too',
+     dSeed.instantiated_steps === 0, dSeed);
+  ok('…and skips exactly what the first seed had already laid down',
+     dSeed.skipped_steps === dSeeded, { skipped: dSeed.skipped_steps, seeded: dSeeded });
+  const dShow = await demoTab.api.getShow(dShowId);
+  ok('…the demo board did not double', (dShow.steps || []).length === dSeeded + 1,
+     (dShow.steps || []).length);
+  ok('…and the hand-added task is still on it, untouched',
+     (dShow.steps || []).filter((s) => s.title === 'chase the venue about the rigging plot')
+       .length === 1);
+  ok('…no title on the demo board is duplicated',
+     new Set((dShow.steps || []).map((s) => String(s.title).trim().toLowerCase())).size
+       === (dShow.steps || []).length);
+
+  // THE AFFORDANCE, RENDERED — the defect was a door that vanished, so the
+  // walk draws the tab from the file:// demo and looks for it. Both states:
+  // the big empty-state block on a bare pipeline, the sched-bar button on a
+  // board with steps. Exactly one door each — never zero, never two.
+  const dFullHtml = demoTab.tabPipeline(dShow);
+  ok('DEMO RENDER · a NON-EMPTY pipeline draws the Seed pipeline button',
+     /seedPipeline/.test(dFullHtml));
+  ok('…once, in the sched-bar, and NOT as the big empty-state block',
+     (dFullHtml.match(/seedPipeline/g) || []).length === 1
+     && /sched-bar/.test(dFullHtml) && !/No pipeline on this show yet/.test(dFullHtml));
+  const dEmptyShow = await demoTab.api.getShow(
+    (await demoTab.api.createShow(dShow.project_id,
+      { name: 'WALK demo empty board', seed_template: false, event_date: plus(60) })).id);
+  ok('…and an EMPTY pipeline still gets the original empty-state block, untouched',
+     (dEmptyShow.steps || []).length === 0
+     && /No pipeline on this show yet/.test(demoTab.tabPipeline(dEmptyShow))
+     && (demoTab.tabPipeline(dEmptyShow).match(/seedPipeline/g) || []).length === 1);
 
   // ══════════════════════════════════════════════════════════════════════════
   section('23 · a note taken back, a key minted once');

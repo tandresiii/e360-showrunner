@@ -4426,22 +4426,13 @@ var api = (function () {
         ALL_SHOWS.push(show); SHOWS_BY_ID[sid] = show;
         ALL_JOBS.push(job); JOBS_BY_ID[jid] = job;
 
-        /* the event TYPE's template supplies the lane set + the T-minus pipeline */
-        var instantiated = 0;
-        if (b.seed_template !== false) {
-          var tpl = TEMPLATE_STEPS[type] || {};
-          var evt = show.event_date ? new Date(show.event_date + 'T00:00:00') : null;
-          typeDef(type).lanes.forEach(function (lane) {
-            (tpl[lane.key] || []).forEach(function (t) {
-              var st = mkStep(lane.key, t.name, 'todo', null, -Math.abs(t.off));
-              st.show_id = sid; st.sort_order = show.steps.length;
-              st.due_date = evt ? isoDate(addDays(evt, st.due_offset_days)) : '';
-              delete st._dep_title;
-              show.steps.push(st); STEPS_BY_ID[st.id] = st;
-              instantiated++;
-            });
-          });
-        }
+        /* the event TYPE's template supplies the lane set + the T-minus
+           pipeline. This was an inline COPY of _seedLocalPipeline and had
+           already drifted from it — the helper exists precisely so all three
+           seed identically, so call it. A brand-new show has no steps, which
+           makes the idempotency rule a no-op here and the counts unchanged. */
+        var instantiated = b.seed_template === false
+          ? 0 : _seedLocalPipeline(show, type).inserted;
         if (b.scope && b.scope.kind) _applyScopeLocal(show, b.scope);
         show.activity.unshift(mkAct(ME, 'opened the event',
           name + ' · ' + type + (show.venue ? ' · ' + show.venue : '') +
@@ -5451,7 +5442,7 @@ var api = (function () {
         var show = _mkLocalShow(p, body, sid);
         p.shows.push(show);
         ALL_SHOWS.push(show); SHOWS_BY_ID[sid] = show;
-        var seeded = body.seed_template === false ? 0 : _seedLocalPipeline(show, p.type);
+        var seeded = body.seed_template === false ? 0 : _seedLocalPipeline(show, p.type).inserted;
         show.activity.unshift(mkAct(ME, 'show.create',
           name + (seeded ? ' (+' + seeded + ' steps)' : ''), 0, _nowHM(), true));
         show.instantiated_steps = seeded;
@@ -5472,9 +5463,13 @@ var api = (function () {
       if (!API()) {
         var s = SHOWS_BY_ID[Number(showId)];
         if (!s) return fail('show ' + showId + ' not found');
-        var n = _seedLocalPipeline(s, s.type || 'led');
-        if (n) s.activity.unshift(mkAct(ME, 'template.instantiate', n + ' steps seeded', 0, _nowHM(), true));
-        return ok({ ok: true, instantiated_steps: n });
+        var r = _seedLocalPipeline(s, s.type || 'led');
+        if (r.inserted) {
+          s.activity.unshift(mkAct(ME, 'template.instantiate',
+            r.inserted + ' steps seeded' + (r.skipped ? ' (' + r.skipped + ' skipped)' : ''),
+            0, _nowHM(), true));
+        }
+        return ok({ ok: true, instantiated_steps: r.inserted, skipped_steps: r.skipped });
       }
       return SR.post('/api/shows/' + Number(showId) + '/instantiate-template',
         { template_id: Number(templateId) });
@@ -5803,21 +5798,33 @@ var api = (function () {
   /* The event TYPE's template supplies the lane set + the T-minus pipeline —
      the demo twin of instantiateTemplateOnShow, shared by createEvent,
      createShow and instantiateTemplate so all three seed identically. */
+  /* IDEMPOTENT BY TITLE, case/trim-insensitive, across ALL lanes — the
+     server's rule mirrored, so a file:// demo and API mode answer the same
+     question the same way. A title already on the show is skipped, never
+     duplicated; hand-added tasks are never touched, only counted as occupied
+     titles. Returns { inserted, skipped } so the toast reads identically in
+     both modes. */
   function _seedLocalPipeline(show, type) {
     var tpl = TEMPLATE_STEPS[type] || {};
     var evt = show.event_date ? new Date(show.event_date + 'T00:00:00') : null;
-    var n = 0;
+    var key = function (s) { return String(s == null ? '' : s).trim().toLowerCase(); };
+    /* prototype-free: a step titled "constructor" must not read as a duplicate */
+    var seen = Object.create(null);
+    (show.steps || []).forEach(function (s) { seen[key(s.title)] = true; });
+    var inserted = 0, skipped = 0;
     typeDef(type).lanes.forEach(function (lane) {
       (tpl[lane.key] || []).forEach(function (t) {
+        if (seen[key(t.name)]) { skipped++; return; }
+        seen[key(t.name)] = true;
         var st = mkStep(lane.key, t.name, 'todo', null, -Math.abs(t.off));
         st.show_id = show.id; st.sort_order = show.steps.length;
         st.due_date = evt ? isoDate(addDays(evt, st.due_offset_days)) : '';
         delete st._dep_title;
         show.steps.push(st); STEPS_BY_ID[st.id] = st;
-        n++;
+        inserted++;
       });
     });
-    return n;
+    return { inserted: inserted, skipped: skipped };
   }
   /* TEMP-{yy}-{seq}, off the local store — the demo twin of mintTempJobNumber */
   function _mintLocalTempNumber() {

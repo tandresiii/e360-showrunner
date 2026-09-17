@@ -622,7 +622,16 @@ function tabPipeline(show) {
   }).join('');
   /* B3. Every step in the system came from a template; a PM could not add
      "chase the venue about the rigging plot". */
+  /* The seed door STAYS OPEN on a non-empty pipeline. It used to close the
+     instant somebody hand-added one task — the empty-state block below was the
+     only way in — and the only route back was deleting your own task. The
+     server is idempotent by step title now, so seeding a board that already
+     has steps lands what is missing and skips the rest; the gate no longer has
+     to live in the UI. Ghost beside Add task: it is the occasional door, not
+     the everyday one. */
   var bar = '<div class="sched-bar" style="margin-bottom:12px"><span style="flex:1"></span>' +
+    (editable && allSteps(show).length ? '<button class="btn sm ghost" ' +
+      act('seedPipeline', show.id) + '>' + icon('bolt') + 'Seed pipeline</button>' : '') +
     (editable ? '<button class="btn sm primary" ' + act('addTask', show.id) + '>' + icon('plus') +
       'Add task</button>' : '') + '</div>';
   /* An EMPTY pipeline used to be a dead end with bad directions: the only

@@ -393,7 +393,7 @@ router.post('/shows', requireRole('pm'), asyncH(async (req, res) => {
     }
     let instantiated = 0;
     const templateId = intOrNull(pick(b, 'template_id'));
-    if (templateId) instantiated = await instantiateTemplateOnShow(c, templateId, show, project);
+    if (templateId) instantiated = (await instantiateTemplateOnShow(c, templateId, show, project)).inserted;
     await logActivity(c, { projectId: project.id, showId: show.id, actor: req.actor,
       action: 'show.create', accent: true,
       detail: (name || show.venue || '') + (instantiated ? ` (+${instantiated} steps)` : '') });
@@ -627,7 +627,7 @@ router.post('/events', requireRole('pm'), asyncH(async (req, res) => {
       if (t.rows.length) templateId = t.rows[0].id;
     }
     let instantiated = 0;
-    if (templateId) instantiated = await instantiateTemplateOnShow(c, templateId, show, proj);
+    if (templateId) instantiated = (await instantiateTemplateOnShow(c, templateId, show, proj)).inserted;
 
     // F4. A scope line may be entered at creation. Silently ignored when empty,
     // because most events are opened before anyone knows the cabinet count.
@@ -1511,13 +1511,17 @@ router.post('/shows/:id/instantiate-template', requireRole('pm'), asyncH(async (
   if (!canEditProject(req.session, project)) throw forbidden('Not allowed to modify this show');
   const templateId = intOrNull(pick(req.body, 'template_id'));
   if (!templateId) throw badRequest('template_id required');
-  const count = await withTx(async (c) => {
-    const n = await instantiateTemplateOnShow(c, templateId, show, project);
+  const out = await withTx(async (c) => {
+    const r = await instantiateTemplateOnShow(c, templateId, show, project);
+    // an all-skipped seed still logs: "0 new" is the honest answer to "did
+    // that button do anything", and a silent no-op reads as a broken control
     await logActivity(c, { projectId: project.id, showId: show.id, actor: req.actor,
-      action: 'template.instantiate', detail: `${n} steps from template ${templateId}`, accent: true });
-    return n;
+      action: 'template.instantiate', accent: true,
+      detail: `${r.inserted} steps from template ${templateId}` +
+              (r.skipped ? ` (${r.skipped} already on the show, skipped)` : '') });
+    return r;
   });
-  res.json({ ok: true, instantiated_steps: count });
+  res.json({ ok: true, instantiated_steps: out.inserted, skipped_steps: out.skipped });
 }));
 
 // Materialize template_steps -> steps on a show. Computes due_date from the
@@ -1525,16 +1529,50 @@ router.post('/shows/:id/instantiate-template', requireRole('pm'), asyncH(async (
 // the freshly-created step id. Lanes the show's type does not declare are
 // SKIPPED (not an error): the print template on a 'both' show still lands its
 // print lanes, which is exactly what a combined event needs.
+//
+// IDEMPOTENT BY STEP TITLE on the show, case/trim-insensitive, ANY lane — the
+// same stance the spreadsheet importer takes by piece name. A template step
+// whose title is already here is skipped, never duplicated. That is what lets
+// the seed door stay OPEN on a pipeline somebody has already hand-added tasks
+// to: the template lands AROUND their work, and a second call inserts nothing.
+// The dedup belongs here, not in a UI gate that vanishes the moment a person
+// types their own task.
+//
+// Hand-added steps are never rewritten — they only occupy titles. The map
+// starts life holding the show's EXISTING step ids, so a newly-inserted step
+// whose depends_on_title names a step that was already on the show wires to
+// that real row instead of dangling. Only steps THIS call inserted get
+// depends_on written; re-pointing a step that predates the call is an edit
+// nobody asked for.
+//
+// Returns { inserted, skipped } — inserted is NEW rows only, and skipped is
+// what lets a caller's toast say "already on this show" instead of implying
+// work that did not happen.
 async function instantiateTemplateOnShow(c, templateId, show, project) {
   const tpl = (await c.query(
     'SELECT * FROM template_steps WHERE template_id=$1 ORDER BY sort_order ASC, id ASC',
     [templateId])).rows;
-  if (!tpl.length) return 0;
+  if (!tpl.length) return { inserted: 0, skipped: 0 };
   const allowed = await lanesForType(project ? project.type : 'led', c);
   const usable = tpl.filter((t) => allowed.includes(t.lane));
-  const titleToId = {};
+  const key = (s) => String(s == null ? '' : s).trim().toLowerCase();
+  // A Map, not an object literal: a step legitimately titled "constructor" or
+  // "__proto__" must not match the prototype chain and read as a duplicate.
+  const titleToId = new Map();
   let sort = 0;
+  const cur = await c.query('SELECT id, title, sort_order FROM steps WHERE show_id=$1', [show.id]);
+  for (const s of cur.rows) {
+    if (!titleToId.has(key(s.title))) titleToId.set(key(s.title), s.id);
+    // seeded rows land AFTER whatever is already on the board; on an empty
+    // pipeline this still starts at 0, which is the behaviour create relies on
+    if ((s.sort_order || 0) >= sort) sort = (s.sort_order || 0) + 1;
+  }
+  const landed = [];
+  let skipped = 0;
   for (const ts of usable) {
+    // in-template duplicates join the ledger as rows land, so a template that
+    // lists a title twice creates it once
+    if (titleToId.has(key(ts.title))) { skipped += 1; continue; }
     const due = (show.event_date && ts.due_offset_days != null)
       ? addDays(show.event_date, ts.due_offset_days) : '';
     const ins = await c.query(
@@ -1543,15 +1581,17 @@ async function instantiateTemplateOnShow(c, templateId, show, project) {
        VALUES ($1,$2,$3,'todo',$4,$5,$6,$7,$8,$9) RETURNING id`,
       [show.id, ts.lane, ts.title, ts.owner_role, due, ts.due_offset_days,
        ts.evidence_type || 'none', ts.auto_source || 'none', sort++]);
-    titleToId[ts.title] = ins.rows[0].id;
+    titleToId.set(key(ts.title), ins.rows[0].id);
+    landed.push(ts);
   }
-  for (const ts of usable) {
-    if (ts.depends_on_title && titleToId[ts.depends_on_title]) {
-      await c.query('UPDATE steps SET depends_on=$1 WHERE id=$2',
-        [titleToId[ts.depends_on_title], titleToId[ts.title]]);
+  for (const ts of landed) {
+    if (!ts.depends_on_title) continue;
+    const dep = titleToId.get(key(ts.depends_on_title));
+    if (dep) {
+      await c.query('UPDATE steps SET depends_on=$1 WHERE id=$2', [dep, titleToId.get(key(ts.title))]);
     }
   }
-  return usable.length;
+  return { inserted: landed.length, skipped };
 }
 
 // ════════════════════════════════════════════════════════════════════════════

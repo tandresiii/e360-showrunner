@@ -341,7 +341,7 @@ async function confirmProject(c, proposal, overrides, session) {
     const t = await c.query(
       'SELECT id FROM event_type_templates WHERE event_type=$1 ORDER BY id LIMIT 1', [proj.type]);
     if (t.rows.length) {
-      instantiated = await core.instantiateTemplateOnShow(c, t.rows[0].id, show, proj);
+      instantiated = (await core.instantiateTemplateOnShow(c, t.rows[0].id, show, proj)).inserted;
     }
   }
 
