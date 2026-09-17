@@ -46,7 +46,8 @@ const { pool, initDB } = require('./lib/db');
 const { seedAll } = require('./lib/seed');
 const { apiRateLimit, purgeExpiredSessions } = require('./lib/auth');
 const { purgeIdempotency, expireStaleProposals } = require('./lib/agent');
-const { STORAGE_ROOT, NAS_ROOT, storage, storageInfo, storageReady } = require('./lib/storage');
+const { STORAGE_ROOT, NAS_ROOT, storage, storageInfo, storageReady,
+        storageWedgeRetries } = require('./lib/storage');
 // The read-through byte cache. A CACHE — the argument is in its header.
 const fileCache = require('./lib/filecache');
 
@@ -206,6 +207,14 @@ app.get('/api/health', async (req, res) => {
                // be perfectly ready and still be about to lose everything.
                storageEphemeralRisk: !!si.ephemeralRisk,
                storageError: si.error || null,
+               // 9/17: how often the driver has had to ride PAST a wedged
+               // Synology WebDAV worker (424 "Set uid or gid error") by
+               // retrying on a fresh connection. Zeroes mean the NAS has not
+               // wedged since this process started; a rising count with
+               // recovered:true means the app is absorbing a NAS fault that is
+               // still there, which is exactly the thing that would otherwise
+               // be invisible until a backup failed. lib/storage.js, THE WEDGE.
+               storageWedgeRetries: storageWedgeRetries(),
                // Same doctrine for the scheduler: PRESENCE booleans only, read
                // from env, never a value — so "not configured" can be diagnosed
                // from outside without a login or a guess at which variable the

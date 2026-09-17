@@ -144,6 +144,13 @@ const DEL = (p, o) => call('DELETE', p, o);
 
   const health = await GET('/api/health');
   ok('GET /api/health', health.status === 200 && health.body.ok === true, health.body);
+  // 9/17: the Synology wedge counter, ADDITIVE — a monitor that reads this
+  // endpoint sees how often the driver had to ride past a poisoned WebDAV
+  // worker, and zeroes mean it has not happened since this process started.
+  const swr = health.body.storageWedgeRetries;
+  ok('/api/health carries the ADDITIVE storageWedgeRetries block, at rest',
+     !!swr && swr.count === 0 && swr.lastAt === null && swr.lastVerb === null &&
+     swr.recovered === null, swr);
 
   // ── 3. auth ───────────────────────────────────────────────────────────────
   section('3. auth — bcrypt, durable sessions, legacy upgrade');

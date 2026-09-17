@@ -133,7 +133,26 @@ function makeDavServer({ root, base = '/showrunner', user, pass: password, tls: 
     failMkcol: false,        // refuse MKCOL with 409 (no permission to create)
     dsmMkcol500: false,      // DSM dialect: 500 (not 405) for MKCOL on an existing collection (live, 9/11)
     dsmPut500: false,        // DSM dialect: 500 (not 409) for PUT into a missing collection (live, 9/11, act three)
-    outOfSpace: false        // answer 507 to PUT (share full)
+    outOfSpace: false,       // answer 507 to PUT (share full)
+    // ── THE POISONED WORKER (live, 9/17) ──────────────────────────────────
+    // A DSM Apache worker whose setuid failed answers everything it is handed
+    // with 424 "Set uid or gid error" (or 500 carrying the same text on a
+    // write verb), having done NO work. Modelled PER PATH: a path listed here
+    // wedges on its FIRST hit and is then healthy, which is what the LAN
+    // forensics showed — the next request on a new connection gets a fresh
+    // worker. `wedgeAlways` is the NAS that is wedged everywhere, the case the
+    // one-retry cap has to survive.
+    wedgePaths: new Set(),   // decoded paths that wedge once
+    wedgeAlways: false,      // every request wedges
+    wedgeStatus: 424,        // 424 is the live signature; 500 + body is the other dialect
+    wedgeHits: 0,            // how many wedge answers this server has given
+    wedgeSeen: new Map(),    // method+path -> attempts, the runaway guard below
+    wedgeRunaway: false,     // set when one request is attempted a THIRD time
+    // The ambiguous one: a poisoned worker whose lock-database failure carried
+    // no signature at all — a bare 500 that reads exactly like DSM's
+    // exists-dialect. First hit of the path only.
+    bare500Paths: new Set(),
+    connections: 0           // TCP connections accepted — "the retry rode a FRESH one"
   };
 
   function decodePath(urlPath) {
@@ -167,7 +186,11 @@ function makeDavServer({ root, base = '/showrunner', user, pass: password, tls: 
   }
 
   const handler = async (req, res) => {
-    state.requests.push({ method: req.method, path: req.url });
+    // `conn` is the identity of the TCP connection the request arrived on —
+    // the only way to assert "the retry rode a FRESH connection" from here,
+    // because a keep-alive socket carries many requests.
+    state.requests.push({ method: req.method, path: req.url,
+                          conn: req.socket ? req.socket._connId : null });
     const send = (code, body, headers) => {
       const finish = () => {
         res.writeHead(code, headers || {});
@@ -176,6 +199,30 @@ function makeDavServer({ root, base = '/showrunner', user, pass: password, tls: 
       if (state.stallMs) setTimeout(finish, state.stallMs);
       else finish();
     };
+    // The wedge answers BEFORE anything else, credentials included: a worker
+    // that cannot become the share's owner never gets as far as the request.
+    const wedgePath = decodeURIComponent(req.url.split('?')[0]);
+    if (state.wedgeAlways || state.wedgePaths.has(wedgePath)) {
+      const seenKey = req.method + ' ' + wedgePath;
+      const n = (state.wedgeSeen.get(seenKey) || 0) + 1;
+      state.wedgeSeen.set(seenKey, n);
+      // A THIRD attempt at the same request is the runaway the driver's
+      // one-retry cap exists to prevent. The fake refuses to sustain it, so a
+      // driver that retried forever fails this suite with a line rather than
+      // hanging it.
+      if (n > 2) state.wedgeRunaway = true;
+      else {
+        state.wedgePaths.delete(wedgePath);
+        state.wedgeHits += 1;
+        await drain(req);
+        return send(state.wedgeStatus, 'Set uid or gid error\n');
+      }
+    }
+    if (state.bare500Paths.has(wedgePath)) {
+      state.bare500Paths.delete(wedgePath);
+      await drain(req);
+      return send(500, 'Internal Server Error');
+    }
     if (!authOk(req)) {
       return send(401, 'Unauthorized', { 'WWW-Authenticate': 'Basic realm="webdav"' });
     }
@@ -273,6 +320,10 @@ function makeDavServer({ root, base = '/showrunner', user, pass: password, tls: 
     ? https.createServer({ cert: TEST_CERT, key: TEST_KEY }, handler)
     : http.createServer(handler);
   server.on('clientError', (e, sock) => { try { sock.destroy(); } catch (_) {} });
+  // Counted and STAMPED here and nowhere else: a keep-alive socket carries
+  // many requests, so "a NEW connection" is only observable at the TCP level.
+  let connSeq = 0;
+  server.on('connection', (sock) => { state.connections += 1; sock._connId = ++connSeq; });
   return { server, state };
 }
 function drain(req) {
@@ -511,6 +562,164 @@ async function call(method, p, { token, body, raw, headers = {} } = {}) {
      putReal500 && /507|PUT/.test(String(putReal500.message)), String(putReal500 && putReal500.message));
   dav.state.outOfSpace = false;
   dav.state.dsmPut500 = false;
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('3c. THE WEDGE — the Synology worker whose setuid failed (live, 9/17)');
+  // Diagnosed on the LAN on 2026-09-17: a DSM Apache worker that fails its
+  // setuid keeps answering, and answers 424 "Set uid or gid error" to
+  // everything (500 with the same text on a write verb), having done nothing
+  // at all. It dies with its connection, so the retry has to ride a NEW one —
+  // which is the whole assertion below, and the reason every case here first
+  // WARMS the pool: with a cold pool a retry would open a connection anyway
+  // and the freshness assertion would pass while proving nothing.
+  const wedged = P('P9-deep', 'S9-nest', 'spec', 'wedged.txt');
+  await storage.put(wedged, Buffer.from('wedge me'));
+  const davPathOf = (nasPath) => decodeURIComponent(storage._remotePath(nasPath));
+  const warm = () => storage.exists(wedged);        // leaves one idle pooled socket
+  const sameConn = (rows) => rows.length === 2 && rows[0].conn != null && rows[0].conn === rows[1].conn;
+
+  await warm();
+  let conn0 = dav.state.connections;
+  let wc0 = S.storageWedgeRetries();
+  ok('CONTROL: with a warm pool a clean GET reuses the socket and opens NO connection',
+     (await storage.get(wedged)).toString() === 'wedge me' && dav.state.connections === conn0,
+     dav.state.connections - conn0);
+
+  await warm();
+  conn0 = dav.state.connections;
+  dav.state.requests.length = 0;
+  dav.state.wedgeHits = 0;
+  dav.state.wedgePaths.add(davPathOf(wedged));
+  // Through throws() on purpose: when the wedge is NOT absorbed the answer is
+  // an exception, and it belongs on this line as a red assertion rather than
+  // aborting the suite three sections early.
+  const wGot = await throws(() => storage.get(wedged));
+  ok('a 424 "Set uid or gid error" is absorbed — the bytes arrive anyway',
+     !wGot.threw && wGot.value.toString() === 'wedge me', wGot.message || wGot.value);
+  const wGets = dav.state.requests.filter((r) => r.method === 'GET');
+  ok('...by exactly ONE retry: the NAS saw the GET twice and no more',
+     dav.state.wedgeHits === 1 && wGets.length === 2,
+     dav.state.requests.map((r) => r.method).join(','));
+  ok('...and the retry rode a FRESH connection — the poisoned worker is never reused',
+     !sameConn(wGets) && dav.state.connections === conn0 + 1, wGets);
+  const wc1 = S.storageWedgeRetries();
+  ok('...counted for /api/health, naming the verb, marked recovered',
+     wc1.count === wc0.count + 1 && wc1.lastVerb === 'GET' && wc1.recovered === true &&
+     typeof wc1.lastAt === 'string', wc1);
+
+  await warm();
+  conn0 = dav.state.connections;
+  dav.state.requests.length = 0;
+  const wPut = P('P9-deep', 'S9-nest', 'spec', 'wedged-put.txt');
+  dav.state.wedgePaths.add(davPathOf(wPut));
+  const wPutR = await throws(() => storage.put(wPut, Buffer.from('put through the wedge')));
+  const wPuts = dav.state.requests.filter((r) => r.method === 'PUT');
+  ok('a wedged PUT is retried too, and the bytes really land on the far side',
+     !wPutR.threw && wPutR.value.ok === true && fs.readFileSync(
+       path.join(davRoot, 'P9-deep', 'S9-nest', 'spec', 'wedged-put.txt'), 'utf8') === 'put through the wedge',
+     wPutR.message);
+  ok('...on a fresh connection, and WITHOUT dragging in the missing-parent fallback',
+     wPuts.length === 2 && !sameConn(wPuts) &&
+     dav.state.requests.filter((r) => r.method === 'MKCOL').length === 0,
+     dav.state.requests.map((r) => r.method).join(','));
+
+  await warm();
+  dav.state.wedgeStatus = 500;                      // the write-verb dialect
+  const w500 = P('P9-deep', 'S9-nest', 'spec', 'wedged-500.txt');
+  dav.state.wedgePaths.add(davPathOf(w500));
+  const w500r = await throws(() => storage.put(w500, Buffer.from('five hundred')));
+  ok('the OTHER signature — 500 whose BODY says "Set uid or gid" — is a wedge as well',
+     !w500r.threw && w500r.value.ok === true, w500r.message || w500r.value);
+  dav.state.wedgeStatus = 424;
+
+  // The ambiguous case, and the reason it cannot be read as a wedge by status:
+  // a poisoned worker whose lock-database failure carried no body signature
+  // answers a bare 500, which is exactly what DSM's exists-dialect answers.
+  // So the dialect fallback decides FIRST, and only a driver about to FAIL the
+  // operation spends a fresh connection on it.
+  await warm();
+  const wc2 = S.storageWedgeRetries();
+  dav.state.requests.length = 0;
+  const ambDir = '/showrunner/P9-amb';
+  dav.state.bare500Paths.add(ambDir);
+  const ambR = await throws(() => storage.mkdirs(P('P9-amb', 'S9-amb', 'spec', 'a.txt')));
+  const ambMk = dav.state.requests.filter((r) => r.method === 'MKCOL' && r.path === ambDir);
+  ok('an AMBIGUOUS bare 500 — no signature, and PROPFIND says the folder is NOT there — ' +
+     'buys one fresh connection before the driver gives up',
+     !ambR.threw && ambR.value.ok === true && ambR.value.created.includes('P9-amb'),
+     ambR.message || ambR.value);
+  ok('...and that retry rode a fresh connection, counted like any other',
+     ambMk.length === 2 && !sameConn(ambMk) &&
+     S.storageWedgeRetries().count === wc2.count + 1, { ambMk, w: S.storageWedgeRetries() });
+
+  // NO FALSE POSITIVES. The two DSM dialects proved in section 3 are 500s that
+  // are not failures at all; reading either as a wedge would retry a request
+  // that succeeded and put a fiction in the health block.
+  const wc3 = S.storageWedgeRetries();
+  dav.state.dsmMkcol500 = true;
+  const noWedgeMk = await throws(() => storage.mkdirs(P('P9-deep', 'S9-nest', 'spec', 'dialect.jpg')));
+  dav.state.dsmMkcol500 = false;
+  dav.state.dsmPut500 = true;
+  const noWedgePut = await throws(() => storage.put(P('P9-dialect', 'S9-d', 'spec', 'd.txt'),
+                                                    Buffer.from('d')));
+  dav.state.dsmPut500 = false;
+  ok('DSM\'s 500-on-MKCOL-exists and 500-on-PUT-into-a-missing-parent are NOT wedges — ' +
+     'the dialect fallbacks still own them and no retry is spent',
+     !noWedgeMk.threw && !noWedgePut.threw &&
+     S.storageWedgeRetries().count === wc3.count, S.storageWedgeRetries());
+  const wc4 = S.storageWedgeRetries();
+  dav.state.outOfSpace = true;
+  const fullNoRetry = await throws(() => storage.put(wedged, Buffer.from('x')));
+  dav.state.outOfSpace = false;
+  ok('...and a 507 full share is still a 507 on the first answer — a fresh connection ' +
+     'cannot empty a disk, so none is spent',
+     fullNoRetry.threw && fullNoRetry.status === 507 &&
+     S.storageWedgeRetries().count === wc4.count, S.storageWedgeRetries());
+
+  // THE DOUBLE WEDGE — both attempts poisoned. The cap is the whole safety
+  // property: two attempts, then the honest error, never a loop.
+  await warm();
+  dav.state.requests.length = 0;
+  dav.state.wedgeHits = 0;
+  dav.state.wedgeSeen.clear();
+  dav.state.wedgeRunaway = false;
+  const wc5 = S.storageWedgeRetries();
+  dav.state.wedgeAlways = true;
+  const doubleGet = await throws(() => storage.get(wedged));
+  ok('a NAS wedged on BOTH connections surfaces the honest error and stops',
+     doubleGet.threw && doubleGet.status === 502 && doubleGet.code === 'dav-wedged', doubleGet);
+  ok('...naming the fault, and saying nothing was lost',
+     /Set uid or gid/.test(doubleGet.message) && /nothing was lost/i.test(doubleGet.message),
+     doubleGet.message);
+  ok('...after exactly TWO attempts — the one-retry cap, and no runaway',
+     dav.state.wedgeHits === 2 && dav.state.requests.length === 2 &&
+     dav.state.wedgeRunaway === false,
+     { hits: dav.state.wedgeHits, sent: dav.state.requests.map((r) => r.method).join(',') });
+  const wc6 = S.storageWedgeRetries();
+  ok('...counted once, marked NOT recovered — health tells the truth about a NAS still wedged',
+     wc6.count === wc5.count + 1 && wc6.recovered === false, wc6);
+
+  dav.state.requests.length = 0;
+  dav.state.wedgeSeen.clear();
+  const doublePut = await throws(() => storage.put(P('P9-wedge', 'S9-w', 'spec', 'never.txt'),
+                                                   Buffer.from('never lands')));
+  const attempts = {};
+  for (const r of dav.state.requests) {
+    const k = r.method + ' ' + r.path;
+    attempts[k] = (attempts[k] || 0) + 1;
+  }
+  ok('a WRITE against a fully wedged NAS fails honestly too, through the folder fallbacks',
+     doublePut.threw && doublePut.status === 502 && /Set uid or gid|424/.test(doublePut.message),
+     doublePut);
+  ok('...with NO request attempted more than twice anywhere in that chain',
+     Object.values(attempts).every((n) => n <= 2) && dav.state.wedgeRunaway === false, attempts);
+  ok('...and nothing was written', !fs.existsSync(path.join(davRoot, 'P9-wedge')));
+  dav.state.wedgeAlways = false;
+  dav.state.wedgeSeen.clear();
+  dav.state.wedgePaths.clear();
+  const wRecover = await throws(() => storage.get(wedged));
+  ok('the driver recovers the moment the NAS stops wedging',
+     !wRecover.threw && wRecover.value.toString() === 'wedge me', wRecover.message);
 
   // ══════════════════════════════════════════════════════════════════════════
   section('4. PUT / GET / stream / exists / stat');
