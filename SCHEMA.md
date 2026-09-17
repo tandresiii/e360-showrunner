@@ -1586,6 +1586,7 @@ surfaces the one real operator edit (field width 225 vs 222).
 | `BACKUP_HOUR_UTC` | `8` | when the nightly fires. 08:00 UTC ≈ 3am Central; being a UTC anchor it drifts an hour across DST, deliberately |
 | `BACKUP_KEEP` | `14` | retention: the newest N daily dumps kept on the NAS |
 | `BACKUP_KEEP_MONTHLY` | `6` | retention: additionally the FIRST dump of each of the last M calendar months |
+| `BACKUP_BUFFER_MAX_BYTES` | `268435456` (256 MB) | the largest dump read into memory so its PUT carries a **replayable** body and the wedge retry covers the nightly. Effective value is the smaller of this and `MAX_UPLOAD_BYTES` — a buffered body over that is a 413. A dump above it streams, as before, and cannot be replayed |
 | `PG_DUMP_PATH` | *(unset = `pg_dump` on PATH)* | test seam + escape hatch; the production image installs `postgresql-client-18` from pgdg (Dockerfile) |
 | `DIGEST_ENABLED` | *(unset = on)* | `0` disables the **scheduled** morning digest; `POST /api/admin/digest` (admin) still works |
 | `DIGEST_HOUR_UTC` | `12` | when the morning digest fires. 12:00 UTC ≈ 7am Central; a UTC anchor, so the wall-clock hour drifts across DST like `BACKUP_HOUR_UTC` — and the per-day ledger means the shift can never double-deliver |
@@ -1600,12 +1601,17 @@ Every night at `BACKUP_HOUR_UTC` the app runs `pg_dump -Fc` on its own
 `DATABASE_URL` and ships the file **through the storage driver** to
 `_backups/showrunner-YYYY-MM-DDTHHmm.dump` — a **reserved prefix** no file
 row, cascade or UI browser ever touches. The landing is **read back and
-size-verified** before the run may record `ok`. Scheduling is a self-rearming
-`setTimeout` chain armed at boot (no cron, no new dependency); overlapping
-runs are refused (409); retention (`BACKUP_KEEP` + `BACKUP_KEEP_MONTHLY`)
-deletes **only** names matching the backup pattern under the `_backups/`
-prefix, and only after a verified landing — both locks are mutation-tested in
-smoke. `/api/health` carries an additive `backup` block whose `stale: true`
+size-verified** before the run may record `ok`. The dump is **buffered** (up
+to `BACKUP_BUFFER_MAX_BYTES`, itself capped by `MAX_UPLOAD_BYTES`) so the PUT
+body can be sent twice — that is what lets the driver’s wedge retry ride the
+nightly past a poisoned Synology worker, the fault that ate the 9/15 and 9/17
+dumps. A dump over the cap streams exactly as it always did; a wedge then
+fails it honestly and the ledger row names the degradation. Scheduling is a
+self-rearming `setTimeout` chain armed at boot (no cron, no new dependency);
+overlapping runs are refused (409); retention (`BACKUP_KEEP` +
+`BACKUP_KEEP_MONTHLY`) deletes **only** names matching the backup pattern
+under the `_backups/` prefix, and only after a verified landing — both locks
+are mutation-tested in smoke. `/api/health` carries an additive `backup` block whose `stale: true`
 means *no verified dump in 26h while enabled*. `POST /api/admin/backup` and
 `GET /api/admin/backups` (both admin) are the manual trigger and the
 ledger-beside-NAS-listing view; the Settings **Backups** card renders them.

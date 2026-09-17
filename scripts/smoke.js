@@ -6699,6 +6699,98 @@ const DEL = (p, o) => call('DELETE', p, o);
     const hb3 = (await GET('/api/health')).body.backup;
     ok('...and a fresh verified landing flips it back', hb3.stale === false, hb3);
 
+    // ── THE WEDGE, on the one write it could still kill (live, 9/17) ───────
+    // Every other write in the app rides past a poisoned Synology worker since
+    // e4bfed9 — but only because the driver can send the body a second time,
+    // and until today the nightly handed it a STREAM. That is exactly why the
+    // 9/15 and 9/17 dumps are missing from the NAS while user uploads that hit
+    // the same fault the same day landed on a retry. So: the real pipeline,
+    // the real webdav driver, and the same fake NAS the storage suite drives
+    // (scripts/fake-webdav.js), with a worker that refuses the dump's PUT.
+    // Only THIS run's byte calls are diverted — the section's own pile, and
+    // every other caller of the driver, are untouched.
+    const { makeDavServer, listen, close } = require('./fake-webdav');
+    const wRoot = bkFs.mkdtempSync(bkPath.join(require('os').tmpdir(), 'sr-bk-dav-'));
+    const wDav = makeDavServer({ root: wRoot, base: '/showrunner', user: 'svc-bk', pass: 'bk-pass' });
+    const wPort = await listen(wDav.server);
+    const wDriver = bkS.makeWebdavDriver({
+      NAS_WEBDAV_URL: `http://127.0.0.1:${wPort}/showrunner`,
+      NAS_WEBDAV_USER: 'svc-bk', NAS_WEBDAV_PASS: 'bk-pass', NAS_WEBDAV_TIMEOUT_MS: '10000'
+    });
+    const wOps = ['exists', 'mkdirs', 'put', 'stat', 'list', 'remove'];
+    const wReal = {};
+    for (const op of wOps) { wReal[op] = bkS.storage[op]; bkS.storage[op] = (...a) => wDriver[op](...a); }
+
+    // ONE wedge, on the dump's PUT. The name carries a minute-resolution
+    // timestamp this suite cannot know in advance, so the fake is armed by
+    // predicate and counts its own hits (scripts/fake-webdav.js, wedgeWhen).
+    let wPutHits = 0;
+    wDav.state.wedgeWhen = (m) => m === 'PUT' && wPutHits++ < 1;
+    const wBefore = bkS.storageWedgeRetries();
+    const wRow = await backup.runBackup({ trigger: 'schedule' });
+    wDav.state.wedgeWhen = null;
+    const wName = String(wRow.path || '').split('\\').pop();
+    const wLanded = bkPath.join(wRoot, '_backups', wName);
+    ok('THE WEDGE ON THE NIGHTLY — a poisoned worker refuses the dump PUT and the run STILL ' +
+       'lands VERIFIED, because the dump body is a BUFFER the driver can replay (hand it a ' +
+       'stream, as 9/15 and 9/17 did, and this line goes red)',
+       wRow.status === 'ok' && wDav.state.wedgeHits === 1 && wRow.bytes > 10000 &&
+       bkFs.existsSync(wLanded) && bkFs.statSync(wLanded).size === wRow.bytes,
+       { row: wRow, hits: wDav.state.wedgeHits, landed: bkFs.existsSync(wLanded) });
+    const wPuts = wDav.state.requests.filter((r) => r.method === 'PUT');
+    ok('...by exactly ONE replay of that PUT, on a FRESH connection, with no runaway',
+       wPuts.length === 2 && wPuts[0].conn !== wPuts[1].conn && wDav.state.wedgeRunaway === false,
+       wDav.state.requests.map((r) => r.method).join(','));
+    const wAfter = bkS.storageWedgeRetries();
+    ok('...counted for /api/health as a recovered PUT — the NAS fault the app absorbed is visible',
+       wAfter.count === wBefore.count + 1 && wAfter.lastVerb === 'PUT' && wAfter.recovered === true,
+       wAfter);
+
+    // THE DOUBLE WEDGE — both attempts poisoned. Two tries, then the truth.
+    wDav.state.requests.length = 0;
+    wDav.state.wedgeHits = 0;
+    wDav.state.wedgeSeen.clear();
+    wDav.state.wedgeRunaway = false;
+    wDav.state.wedgeWhen = (m) => m === 'PUT';
+    const wFail = await backup.runBackup({ trigger: 'schedule' });
+    wDav.state.wedgeWhen = null;
+    ok('a NAS wedged on BOTH attempts is an HONEST FAILED row — the fault named, no bytes and ' +
+       'no path claimed',
+       wFail.status === 'failed' && /Set uid or gid/.test(wFail.error || '') &&
+       wFail.bytes === null && wFail.path === null, wFail);
+    ok('...after exactly TWO attempts at the PUT — the one-retry cap holds on this path too',
+       wDav.state.requests.filter((r) => r.method === 'PUT').length === 2 &&
+       wDav.state.wedgeHits === 2 && wDav.state.wedgeRunaway === false,
+       { puts: wDav.state.requests.filter((r) => r.method === 'PUT').length,
+         hits: wDav.state.wedgeHits });
+    ok('...and the verified dump from the run before is untouched — a failed run eats nothing',
+       bkFs.existsSync(wLanded) && bkFs.statSync(wLanded).size === wRow.bytes);
+
+    // THE FALLBACK, SAID OUT LOUD. A dump too big to buffer streams exactly as
+    // it always did — and a streamed body cannot be replayed, so the ledger row
+    // must NAME that degradation instead of reading like an ordinary NAS fault.
+    // Forced here with a 1-byte cap; the real one is 256MB, itself capped by
+    // the driver's buffered-body ceiling.
+    wDav.state.requests.length = 0;
+    wDav.state.wedgeHits = 0;
+    wDav.state.wedgeSeen.clear();
+    process.env.BACKUP_BUFFER_MAX_BYTES = '1';
+    wDav.state.wedgeWhen = (m) => m === 'PUT';
+    const wStream = await backup.runBackup({ trigger: 'schedule' });
+    wDav.state.wedgeWhen = null;
+    delete process.env.BACKUP_BUFFER_MAX_BYTES;
+    ok('a dump OVER the buffer cap still STREAMS — and when a wedge then kills it, the row says ' +
+       'why: streamed, unreplayable, cap named. Honest degradation, never a silent fork',
+       wStream.status === 'failed' && /Set uid or gid/.test(wStream.error || '') &&
+       /STREAMED/.test(wStream.error || '') && /buffer cap/.test(wStream.error || ''), wStream);
+    ok('...and the NAS saw that streamed PUT exactly ONCE — an unreplayable body is never replayed',
+       wDav.state.requests.filter((r) => r.method === 'PUT').length === 1 &&
+       wDav.state.wedgeHits === 1, wDav.state.requests.map((r) => r.method).join(','));
+
+    for (const op of wOps) bkS.storage[op] = wReal[op];
+    await close(wDav.server);
+    bkFs.rmSync(wRoot, { recursive: true, force: true });
+
     // tidy: the pile dir and the tool env, so a re-run starts clean
     bkFs.rmSync(BK_DIR, { recursive: true, force: true });
     if (bkEnvSave.PG_DUMP_PATH === undefined) delete process.env.PG_DUMP_PATH;
