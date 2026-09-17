@@ -5800,6 +5800,10 @@ var api = (function () {
       var name = String(body.name || '').trim();
       if (!name) return fail('a template needs a name');
       if (!API()) {
+        /* built BEFORE the id is minted: the library seeds itself off
+           DEMO_TPL_SEQ too, and a row numbered ahead of it would take the
+           standard chip off the template that actually holds it */
+        var lib = demoTpls();
         var src = _demoTplById(body.copy_from);
         var type = src ? src.event_type : body.event_type;
         if (!EVENT_TYPES[type]) return fail('unknown event type "' + type + '"');
@@ -5811,7 +5815,7 @@ var api = (function () {
            original on the first edit — the same rule the server's copy keeps. */
         if (body.steps !== undefined) row.steps = _demoStepsIn(body.steps, type);
         else if (src) row.steps = _demoStepsIn(src.steps, type);
-        demoTpls().push(row);
+        lib.push(row);
         return ok(_demoTplShape(row));
       }
       return SR.post('/api/templates', body);
