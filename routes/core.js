@@ -392,6 +392,9 @@ router.post('/shows', requireRole('pm'), asyncH(async (req, res) => {
       }
     }
     let instantiated = 0;
+    // The Add-show dialog's Template select sends the id it chose; seeding
+    // anything else here (the type's standard, say) would put steps on the
+    // board the person did not ask for. No template_id = no pipeline.
     const templateId = intOrNull(pick(b, 'template_id'));
     if (templateId) instantiated = (await instantiateTemplateOnShow(c, templateId, show, project)).inserted;
     await logActivity(c, { projectId: project.id, showId: show.id, actor: req.actor,
@@ -619,12 +622,14 @@ router.post('/events', requireRole('pm'), asyncH(async (req, res) => {
        owner, job.id, parseInt(pick(b, 'cabinets'), 10) || 0])).rows[0];
 
     // The event TYPE's template supplies the lane set + the T-minus pipeline.
-    // Explicit template_id wins; otherwise the first template for this type.
+    // A type may own MANY named templates; the New Event dialog picks one and
+    // sends template_id, and THAT one must be what lands — falling back to the
+    // standard here would make every template but one unreachable, which is the
+    // defect this wave exists to fix. seed_template:false is "start empty".
+    // Only a caller that named NO template gets the type's standard.
     let templateId = intOrNull(pick(b, 'template_id'));
     if (!templateId && pick(b, 'seed_template', true) !== false) {
-      const t = await c.query(
-        'SELECT id FROM event_type_templates WHERE event_type=$1 ORDER BY id LIMIT 1', [type]);
-      if (t.rows.length) templateId = t.rows[0].id;
+      templateId = await standardTemplateId(type, c);
     }
     let instantiated = 0;
     if (templateId) instantiated = (await instantiateTemplateOnShow(c, templateId, show, proj)).inserted;
@@ -1363,6 +1368,23 @@ router.delete('/steps/:id', requireRole('pm'), asyncH(async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 // TEMPLATES  (seeded from templates.json by lib/seed.js — punch item B)
 // ════════════════════════════════════════════════════════════════════════════
+// A type owns a LIBRARY of named templates, not one SOP. Tom, 2026-09-17:
+// "we should be able to have many templates for many job types. And when we
+// seed them — we can decide which template we want."
+//
+// THE STANDARD. Every template is equal except one: the type's OLDEST row is
+// its standard, and that is a contract, not a preference. Agents and every
+// other non-interactive caller (routes/proposals.js confirming an agent's
+// folder, an API client posting an event with no template_id) cannot answer a
+// picker, so they need ONE deterministic answer per type. Humans pick; machines
+// get the standard. Both resolve through here so the rule lives in one place.
+async function standardTemplateId(eventType, c) {
+  const q = c || pool;
+  const r = await q.query(
+    'SELECT id FROM event_type_templates WHERE event_type=$1 ORDER BY id LIMIT 1', [eventType]);
+  return r.rows.length ? r.rows[0].id : null;
+}
+
 router.get('/templates', asyncH(async (req, res) => {
   const eventType = pick(req.query, 'event_type');
   const r = eventType
@@ -1376,19 +1398,31 @@ router.get('/templates', asyncH(async (req, res) => {
   }
   const types = await pool.query('SELECT * FROM event_types ORDER BY sort_order');
   const typeByKey = new Map(types.rows.map((t) => [t.key, t]));
+  // the type's standard, marked HERE so the library chip and what a machine
+  // actually seeds can never disagree — one rule, read once per type
+  const std = new Map();
+  for (const row of r.rows) {
+    const cur = std.get(row.event_type);
+    if (cur == null || row.id < cur) std.set(row.event_type, row.id);
+  }
   res.json(r.rows.map((row) => dbToTemplate(row, {
     steps: byTpl.get(row.id) || [],
+    standard: std.get(row.event_type) === row.id,
     // the front-end's listTemplates() shape: each entry carries its type def
     def: typeByKey.get(row.event_type) || null
   })));
 }));
 
-// api.getTemplate(type) keys by EVENT TYPE; the REST id also works.
+// api.getTemplate(key) keys by EVENT TYPE or by id. Asked by TYPE it answers
+// that type's STANDARD (the oldest row) — the machine answer, unchanged. The
+// library screen and the human pickers read GET /templates, which lists every
+// named template of every type; nothing that offers a CHOICE resolves by type.
 router.get('/templates/:key', asyncH(async (req, res) => {
   const key = String(req.params.key);
   const r = /^\d+$/.test(key)
     ? await pool.query('SELECT * FROM event_type_templates WHERE id=$1', [parseInt(key, 10)])
-    : await pool.query('SELECT * FROM event_type_templates WHERE event_type=$1 ORDER BY id LIMIT 1', [key]);
+    : await pool.query('SELECT * FROM event_type_templates WHERE id=$1',
+      [await standardTemplateId(key)]);
   if (!r.rows.length) throw notFound();
   const t = r.rows[0];
   const steps = await pool.query(
@@ -1408,19 +1442,44 @@ router.get('/event-types', asyncH(async (req, res) => {
   });
 }));
 
+// A NEW template — blank, from a posted grid, or DUPLICATED from another.
+// Duplicate-and-tweak is the everyday move ("this job is last year's job with
+// three changes"), so `copy_from` names a template and the new row gets its own
+// COPIES of every step row. Copies, never shared rows: editing the duplicate
+// must not reach back into the original, which is the whole point of having
+// two. The copy inherits the source's event_type — the lane set belongs to the
+// TYPE, so a cross-type duplicate would carry rows in lanes the new type never
+// declared. Explicit `steps` win over `copy_from` (that is Save-as-new).
 router.post('/templates', requireRole('manager'), asyncH(async (req, res) => {
   const b = req.body || {};
   const name = pick(b, 'name');
   if (!name) throw badRequest('name required');
-  const eventType = oneOf(pick(b, 'event_type'), PROJECT_TYPES, 'led');
+  const copyFrom = intOrNull(pick(b, 'copy_from') || pick(b, 'source_template_id'));
+  let src = null;
+  if (copyFrom) {
+    src = (await pool.query('SELECT * FROM event_type_templates WHERE id=$1', [copyFrom])).rows[0];
+    if (!src) throw notFound('Template to duplicate not found');
+  }
+  const eventType = src
+    ? src.event_type
+    : oneOf(pick(b, 'event_type'), PROJECT_TYPES, 'led');
+  if (src && has(b, 'event_type') && pick(b, 'event_type') !== src.event_type) {
+    throw badRequest('a duplicate keeps its source’s event type — the lane set belongs to the type');
+  }
   const allowed = await lanesForType(eventType);
   const t = await withTx(async (c) => {
     const ins = await c.query(
       'INSERT INTO event_type_templates (name, event_type, description) VALUES ($1,$2,$3) RETURNING *',
-      [name, eventType, pick(b, 'description') || '']);
+      [name, eventType, pick(b, 'description', src ? src.description : '') || '']);
     const tid = ins.rows[0].id;
     let i = 0;
-    for (const s of (pick(b, 'steps') || [])) {
+    let rows = pick(b, 'steps') || [];
+    if (src && !has(b, 'steps')) {
+      rows = (await c.query(
+        'SELECT * FROM template_steps WHERE template_id=$1 ORDER BY sort_order ASC, id ASC',
+        [src.id])).rows.map((s) => ({ ...s, sort_order: null }));
+    }
+    for (const s of rows) {
       const lane = pick(s, 'lane');
       if (!allowed.includes(lane) || !s.title) continue;
       await c.query(
@@ -1435,7 +1494,11 @@ router.post('/templates', requireRole('manager'), asyncH(async (req, res) => {
     }
     return ins.rows[0];
   });
-  res.json(dbToTemplate(t));
+  const steps = await pool.query(
+    'SELECT * FROM template_steps WHERE template_id=$1 ORDER BY sort_order ASC, id ASC', [t.id]);
+  // the caller that just duplicated needs the rows back to count them without a
+  // second round trip — same shape PUT answers
+  res.json(dbToTemplate(t, { steps: steps.rows.map(dbToTemplateStep) }));
 }));
 
 // ── the editability wave: the SOP is finally WRITABLE ────────────────────────
@@ -1490,9 +1553,10 @@ router.put('/templates/:id', requireRole('manager'), asyncH(async (req, res) => 
 // DELETE removes a template AND its rows. Shows already seeded keep their
 // steps — instantiation COPIES rows, it never references them — so deleting a
 // template rewrites no history; it only changes what the next show seeds from.
-// Deleting a type's oldest template promotes the next-oldest to default (the
-// seed pick is ORDER BY id LIMIT 1); deleting the last one leaves the type
-// seeding nothing, which the create flow already survives.
+// Deleting a type's STANDARD promotes the next-oldest (standardTemplateId is
+// ORDER BY id LIMIT 1); deleting the LAST one leaves the type with an empty
+// library, which every seed path already survives — the create flow seeds
+// nothing and the pickers offer only "start empty".
 router.delete('/templates/:id', requireRole('manager'), asyncH(async (req, res) => {
   const cur = (await pool.query('SELECT * FROM event_type_templates WHERE id=$1',
     [idParam(req)])).rows[0];
@@ -2073,6 +2137,7 @@ router.delete('/shows/:id/scheduler-link', requireRole('pm'), asyncH(async (req,
 
 module.exports = router;
 module.exports.instantiateTemplateOnShow = instantiateTemplateOnShow;
+module.exports.standardTemplateId = standardTemplateId;
 module.exports.buildSchedulerPayloads = buildSchedulerPayloads;
 module.exports.deriveBookingCategory = deriveBookingCategory;
 module.exports.mapEventType = mapEventType;

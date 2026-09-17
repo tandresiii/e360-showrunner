@@ -338,11 +338,14 @@ async function confirmProject(c, proposal, overrides, session) {
   const wantTemplate = overrides.instantiateTemplate !== undefined
     ? overrides.instantiateTemplate : payload.instantiateTemplate;
   if (wantTemplate && show) {
-    const t = await c.query(
-      'SELECT id FROM event_type_templates WHERE event_type=$1 ORDER BY id LIMIT 1', [proj.type]);
-    if (t.rows.length) {
-      instantiated = (await core.instantiateTemplateOnShow(c, t.rows[0].id, show, proj)).inserted;
-    }
+    // THE STANDARD, DELIBERATELY. A type owns a library of named templates and
+    // every HUMAN seed point now asks which one; this path has no human to ask
+    // — an agent proposed the folder and confirm is one click on a queue row —
+    // so it resolves the type's standard (oldest by id) and nothing else. A
+    // picker here would either block the confirm or silently guess. The
+    // standard is the contract machines seed against.
+    const tid = await core.standardTemplateId(proj.type, c);
+    if (tid) instantiated = (await core.instantiateTemplateOnShow(c, tid, show, proj)).inserted;
   }
 
   const created = { projects: [proj.id], jobs: [job.id],

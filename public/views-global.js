@@ -529,61 +529,113 @@ function viewStaffingLink(b, d) {
 }
 
 /* ============================================================================
-   TEMPLATES ADMIN — editable per-type lane + step grid, T-minus offsets.
+   TEMPLATES — a LIBRARY of named templates, grouped by event type.
    ----------------------------------------------------------------------------
-   THE EDITOR IS REAL NOW. Every button here used to be a toast while the grid
-   rendered fully-styled inputs over rows nothing could save — the audit's
-   sharpest "fake affordance" finding after the season buttons. The grid stages
-   its edits in the DOM (rename inline, remove a row, add a row) and Save
-   commits the WHOLE grid in one PUT, so a half-saved SOP cannot exist.
+   Tom, 2026-09-17: "When I create a template and save it — I don't name it, and
+   have no means to create a new different one. We should be able to have many
+   templates for many job types."
 
-   Which template is "the" template: GET /templates/:type answers the type's
-   OLDEST row — the same one createEvent and Seed-pipeline seed from — so Save
-   edits the live SOP in place and the hint's promise ("every show seeded from
-   this template inherits the change") is finally true. "Bank a copy" POSTs a
-   snapshot; the versions list names every row of the type and lets a manager
-   delete one (deleting the live SOP promotes the next-oldest).
+   This screen used to render ONE card per event TYPE and call every other row
+   of that type a "version" of a single live SOP — so a second template for a
+   type could be banked and never again reached, named or seeded. The library is
+   the honest model: every template is a first-class row with a NAME. The old
+   versions list became this library and its banking button became Duplicate;
+   neither framing is left on the page, because two mental models for one thing
+   is how a screen teaches somebody the wrong one.
+
+   THE STANDARD is the one asymmetry left, and it is a contract, not a rank:
+   the type's oldest row is what every NON-INTERACTIVE caller seeds — agent
+   proposal confirms, an API client posting an event with no template_id. Humans
+   pick; machines get the standard. The chip says so and nothing else does.
+
+   The grid still stages its edits in the DOM (rename inline, remove a row, add
+   a row) and Save commits the WHOLE grid in one PUT, so a half-saved template
+   cannot exist. The lane set still belongs to the TYPE, not the template.
    ========================================================================== */
-var curTpl = 'led';
-/* the shaped records the seam answered — the editor reads and writes THESE,
+/* the selected template's id — the editor addresses ONE row now, not "the
+   type's live SOP" */
+var curTplId = null;
+/* the shaped records the seam answered — the library reads and writes THESE,
    never TEMPLATE_STEPS directly, so demo and API render one code path */
-var TPL_CACHE = { list: [], versions: {} };
+var TPL_CACHE = { list: [], types: [] };
 function tplFolderCount(projects, type) { return projects.filter(function (p) { return p.type === type; }).length; }
-function tplByType(type) {
+function tplById(id) {
   var hit = null;
-  (TPL_CACHE.list || []).forEach(function (t) { if (t.event_type === type) hit = t; });
+  (TPL_CACHE.list || []).forEach(function (t) {
+    if (t.meta && Number(t.meta.id) === Number(id)) hit = t;
+  });
   return hit;
+}
+function tplsOfType(type) {
+  return (TPL_CACHE.list || []).filter(function (t) { return t.event_type === type; });
+}
+/* lanes belong to the TYPE; steps to the template */
+function tplStepCount(t) {
+  var d = (t && t.def) || typeDef(t && t.event_type);
+  return (d.lanes || []).reduce(function (a, l) {
+    return a + (((t && t.steps) || {})[l.key] || []).length; }, 0);
 }
 /* the client mirror of the three routes' requireRole('manager') floor */
 function canEditTemplates() {
   return CURRENT_USER.role === 'admin' || CURRENT_USER.role === 'manager';
 }
 
-function viewTemplates(projects, tpls) {
+function viewTemplates(projects, tpls, types) {
   TPL_CACHE.list = tpls || [];
-  if (!tplByType(curTpl) && TPL_CACHE.list.length) curTpl = TPL_CACHE.list[0].event_type;
-  var cards = TPL_CACHE.list.map(function (t) {
+  TPL_CACHE.types = (types && types.length) ? types : (TPL_CACHE.list.map(function (t) {
     var d = t.def || typeDef(t.event_type);
-    var nSteps = (d.lanes || []).reduce(function (a, l) { return a + ((t.steps && t.steps[l.key]) || []).length; }, 0);
-    return '<button class="tpl-card ' + (t.event_type === curTpl ? 'on' : '') + '" ' + act('selectTpl', null, t.event_type) + '>' +
-      '<div class="ti">' + icon(d.icon) + '</div><b>' + esc(d.label) + ' template</b><div class="td">' + esc((t.meta && t.meta.desc) || 'Custom event type.') + '</div>' +
-      '<div class="tm">' + typeTag(t.event_type) + '<span><b>' + (d.lanes || []).length + '</b> lanes</span><span><b>' + nSteps + '</b> steps</span><span><b>' + tplFolderCount(projects, t.event_type) + '</b> folders</span></div>' +
-      '</button>';
+    return { key: t.event_type, label: d.label, icon: d.icon, anchor: d.anchor, lanes: d.lanes || [] };
+  }));
+  if (!tplById(curTplId)) {
+    curTplId = TPL_CACHE.list.length ? Number(TPL_CACHE.list[0].meta.id) : null;
+  }
+  var canEdit = canEditTemplates();
+  var groups = TPL_CACHE.types.map(function (ty) {
+    var mine = tplsOfType(ty.key);
+    var cards = mine.map(function (t) {
+      var d = t.def || typeDef(t.event_type);
+      var id = Number(t.meta.id);
+      return '<button class="tpl-card ' + (id === Number(curTplId) ? 'on' : '') + '" ' +
+        act('selectTpl', id) + '>' +
+        '<div class="ti">' + icon(d.icon) + '</div><b>' + esc(t.meta.name || (d.label + ' template')) + '</b>' +
+        '<div class="td">' + esc(t.meta.desc || 'No description.') + '</div>' +
+        '<div class="tm">' + typeTag(t.event_type) +
+        (t.meta.standard
+          ? '<span class="pill go" title="The type’s standard — what agent confirms and any caller that names no template seed from."><span class="dot"></span>standard</span>'
+          : '') +
+        '<span><b>' + (d.lanes || []).length + '</b> lanes</span>' +
+        '<span><b>' + tplStepCount(t) + '</b> steps</span>' +
+        '<span title="Folders of this event type. Instantiation COPIES rows, so per-template usage is not tracked — this is the type’s reach."><b>' +
+        tplFolderCount(projects, ty.key) + '</b> folders</span></div></button>';
+    }).join('');
+    var empty = mine.length ? '' :
+      '<div class="empty" style="padding:18px;flex:1;min-width:240px">No ' + esc(ty.label) +
+      ' template yet — a new ' + esc(ty.label) + ' event seeds an empty pipeline until there is one.</div>';
+    return '<div style="margin-bottom:18px">' +
+      '<div style="display:flex;gap:9px;align-items:center;margin-bottom:9px;flex-wrap:wrap">' +
+      typeTag(ty.key) + '<b style="font-size:13.5px">' + esc(ty.label) + '</b>' +
+      '<span class="mini">' + mine.length + ' template' + (mine.length === 1 ? '' : 's') + ' · ' +
+      (ty.lanes || []).length + ' lanes</span></div>' +
+      '<div class="tpl-cards" style="margin:0">' + cards + empty +
+      (canEdit ? '<button class="tpl-card add" ' + act('tplNew', null, ty.key) + '>' + icon('plus') +
+        'New ' + esc(ty.label) + ' template</button>' : '') + '</div></div>';
   }).join('');
-  return '<div class="page-h"><div><h1>Templates</h1><div class="sub">The SOP for each event TYPE, encoded once. Applying a template seeds a show’s lanes, tasks and T-minus due dates.</div></div>' +
-    '<button class="btn" ' + act('addEventType') + '>' + icon('plus') + 'Add event type</button></div>' +
-    '<div class="callout"><div class="ci">' + icon('layers') + '</div><div><b>Event types are extensible</b>' +
-    '<p>Each type owns its own lane set — LED, Print and LED + Print here. Adding a new type (e.g. <b>Motion Graphics</b>) is a single config entry in <code>EVENT_TYPES</code> plus, optionally, a <code>TEMPLATE_STEPS</code> block. Nothing in the dashboard, folder, pipeline or this grid is hardcoded to a lane — they all read the config.</p></div></div>' +
-    '<div class="tpl-cards">' + cards + '<button class="tpl-card add" ' + act('addEventType') + '>' + icon('plus') + 'Add event type</button></div>' +
-    '<div id="tplEditor">' + tplEditor(curTpl, projects) + '</div>';
+
+  return '<div class="page-h"><div><h1>Templates</h1><div class="sub">A library of named templates, grouped by event type. Seeding a show copies one template’s lanes, tasks and T-minus due dates onto it.</div></div>' +
+    '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
+    (canEdit ? '<button class="btn primary" ' + act('tplNew') + '>' + icon('plus') + 'New template</button>' : '') +
+    '<button class="btn ghost" ' + act('addEventType') + '>' + icon('plus') + 'Add event type</button></div></div>' +
+    '<div class="callout"><div class="ci">' + icon('layers') + '</div><div><b>Many templates, one lane set per type</b>' +
+    '<p>A type can own as many templates as the work has shapes — a full season build, a one-day turn, last year’s job with three changes. <b>Duplicate</b> an existing one and tweak it; that is the everyday move. The <b>standard</b> chip marks the one an agent-confirmed folder seeds from, because a machine cannot answer a picker. Lane sets still belong to the TYPE (<code>EVENT_TYPES</code>), never to one template.</p></div></div>' +
+    groups +
+    '<div id="tplEditor">' + tplEditor(curTplId, projects) + '</div>';
 }
-function selectTpl(type, projects) {
-  curTpl = type;
+function selectTpl(id, projects) {
+  curTplId = Number(id);
   document.querySelectorAll('.tpl-card').forEach(function (c) { c.classList.remove('on'); });
-  var idx = (TPL_CACHE.list || []).map(function (t) { return t.event_type; }).indexOf(type);
-  var cards = $('#scroll').querySelectorAll('.tpl-card');
-  if (cards[idx]) cards[idx].classList.add('on');
-  $('#tplEditor').innerHTML = tplEditor(type, projects);
+  var hit = $('#scroll').querySelector('.tpl-card[data-act="selectTpl"][data-id="' + Number(id) + '"]');
+  if (hit) hit.classList.add('on');
+  $('#tplEditor').innerHTML = tplEditor(curTplId, projects);
 }
 /* the role column is DISPLAY: template roles are planning slugs from
    templates.json ('lead_tech', …), not the five login roles, and offering the
@@ -619,15 +671,23 @@ function tplRowHTML(s) {
       ? '<button class="rowdel" title="Remove step — staged until Save" ' + act('tplRowDel') + '>' + icon('trash') + '</button>'
       : '<span></span>') + '</div>';
 }
-function tplEditor(type, projects) {
-  var rec = tplByType(type);
-  var t = (rec && rec.def) || typeDef(type);
+function tplEditor(id, projects) {
+  var rec = tplById(id);
+  if (!rec) {
+    return '<div class="empty" style="padding:26px">No template selected. ' +
+      (canEditTemplates()
+        ? 'Pick one above, or start a new one — blank, or a duplicate of any template here.'
+        : 'Pick one above to read its grid.') + '</div>';
+  }
+  var type = rec.event_type;
+  var t = rec.def || typeDef(type);
   var anchor = t.anchor || 'Event';
-  var steps = (rec && rec.steps) || {};
-  var meta = (rec && rec.meta) || {};
+  var steps = rec.steps || {};
+  var meta = rec.meta || {};
   var nSteps = (t.lanes || []).reduce(function (a, l) { return a + ((steps[l.key]) || []).length; }, 0);
   var used = tplFolderCount(projects, type);
   var canEdit = canEditTemplates();
+  var sibs = tplsOfType(type).length;
   var lanesHTML = (t.lanes || []).map(function (l) {
     var laneSteps = steps[l.key] || [];
     var rows = laneSteps.map(tplRowHTML).join('') ||
@@ -639,46 +699,93 @@ function tplEditor(type, projects) {
         : '') + '</div>';
   }).join('');
 
-  /* versions: every template row of this type, live-marked, deletable.
-     A server fact — the demo says so instead of inventing a history. */
-  var versions = TPL_CACHE.versions[type] || [];
-  /* live = oldest id, the server's own seed-pick rule; the sorted list's head */
-  var liveId = versions.length ? versions[0].id : (meta.id || null);
-  var versionsHTML = '';
-  if (api.isDemo()) {
-    versionsHTML = '<div class="perm-note" style="margin-top:14px">' + inlineIcon('layers') +
-      ' Versions live on the server — the demo has only its built-in config, and Save rewrites it in this tab only.</div>';
-  } else if (versions.length) {
-    versionsHTML = '<div class="panel" style="margin-top:16px"><h3>Versions of the ' + esc(t.label) + ' SOP · ' + versions.length + '</h3>' +
-      versions.map(function (v) {
-        var isLive = v.id === liveId;
-        return '<div class="set-row"><span class="k" style="text-transform:none;letter-spacing:0">' + esc(v.name) + '</span>' +
-          '<span class="v" style="display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">' +
-          '<span class="mini">' + v.steps + ' steps · ' + esc(fmtDate(String(v.created_at || '').slice(0, 10))) + '</span>' +
-          (isLive ? '<span class="pill go"><span class="dot"></span>live — seeds new shows</span>' : '<span class="pill idle">banked</span>') +
-          (canEdit ? '<button class="btn sm ghost" ' + act('tplDelete', v.id, type) + '>' + icon('trash') + 'Delete</button>' : '') +
-          '</span></div>';
-      }).join('') +
-      '<div class="perm-note">' + inlineIcon('bolt') + ' The OLDEST version is the live SOP — it is what New Event and Seed pipeline copy from. Deleting it promotes the next one; instantiation copies rows, so shows already seeded keep their steps either way.</div></div>';
-  }
-
   return '<div class="ed-head"><div class="et"><div class="ti" style="width:36px;height:36px;border-radius:9px;background:var(--surface-3);display:grid;place-items:center;color:var(--accent)">' + icon(t.icon) + '</div>' +
-    '<div><h2>' + esc(t.label) + ' template</h2><div class="sub" style="color:var(--muted);font-size:12.5px;margin-top:2px">' + typeTag(type) + ' &nbsp; ' + (t.lanes || []).length + ' lanes · ' + nSteps + ' steps · anchored to <b style="color:var(--text-2)">' + esc(anchor) + '</b> · used by ' + used + ' folder' + (used === 1 ? '' : 's') +
-    (meta.name ? ' · <b style="color:var(--text-2)">' + esc(meta.name) + '</b>' : '') + '</div></div></div>' +
+    '<div><h2>' + esc(meta.name || (t.label + ' template')) + '</h2>' +
+    '<div class="sub" style="color:var(--muted);font-size:12.5px;margin-top:2px">' + typeTag(type) +
+    (meta.standard ? ' <span class="pill go"><span class="dot"></span>standard</span>' : '') +
+    ' &nbsp; ' + (t.lanes || []).length + ' lanes · ' + nSteps + ' steps · anchored to <b style="color:var(--text-2)">' + esc(anchor) + '</b>' +
+    ' · ' + sibs + ' template' + (sibs === 1 ? '' : 's') + ' for this type · used by ' + used + ' folder' + (used === 1 ? '' : 's') +
+    (meta.created_at ? ' · created ' + esc(fmtDate(String(meta.created_at).slice(0, 10))) : '') + '</div>' +
+    (meta.desc ? '<div style="color:var(--text-2);font-size:12.5px;margin-top:6px;max-width:640px;line-height:1.5">' + esc(meta.desc) + '</div>' : '') +
+    '</div></div>' +
     (canEdit
       ? '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
-        '<button class="btn ghost" ' + act('tplBank', null, type) + ' title="POST a snapshot copy of this grid as a banked version — the live SOP is untouched">' + icon('layers') + 'Bank a copy</button>' +
-        '<button class="btn primary" ' + act('tplSave', null, type) + '>' + icon('check') + 'Save template</button></div>'
-      : '<div class="perm-note" style="margin:0">' + inlineIcon('lock') + ' The SOP is manager+ to change — the grid is readable by everyone.</div>') +
+        '<button class="btn sm ghost" ' + act('tplRename', meta.id) + ' title="Rename this template and rewrite its description — the name is what every picker shows">' + icon('pencil') + 'Rename</button>' +
+        '<button class="btn sm ghost" ' + act('tplDuplicate', meta.id) + ' title="A new template of this type carrying its own COPIES of these rows — edit the copy and this one never moves">' + icon('layers') + 'Duplicate</button>' +
+        '<button class="btn sm ghost" ' + act('tplDelete', meta.id) + '>' + icon('trash') + 'Delete</button>' +
+        '<button class="btn primary" ' + act('tplSave', meta.id) + '>' + icon('check') + 'Save template</button></div>'
+      : '<div class="perm-note" style="margin:0">' + inlineIcon('lock') + ' Templates are manager+ to change — the grid is readable by everyone.</div>') +
     '</div>' +
-    '<div class="hint" style="margin:0 0 16px">' + icon('bolt') + 'Offsets are <b>T-minus days from ' + esc(anchor) + '</b>. Edit names and offsets inline, remove or add rows — nothing is written until <b>Save</b> commits the whole grid' + (canEdit ? '' : '') + '. Every show seeded from this template after a save inherits the change; shows already seeded keep their steps.</div>' +
+    '<div class="hint" style="margin:0 0 16px">' + icon('bolt') + 'Offsets are <b>T-minus days from ' + esc(anchor) + '</b>. Edit names and offsets inline, remove or add rows — nothing is written until <b>Save</b> commits the whole grid. Shows seeded from <b>this</b> template after a save inherit the change; the other ' + (sibs - 1) + ' template' + (sibs - 1 === 1 ? '' : 's') + ' of this type, and every show already seeded, are untouched.</div>' +
     lanesHTML +
     (canEdit
       ? '<button class="addlane" ' + toastAttrs('Lanes are the event type’s config',
           'A lane set belongs to the TYPE (EVENT_TYPES + lanes), not to one template — adding a lane is a config change, and this wave did not build that editor. The rows above are real; this button is honest about not being.') + '>' +
         icon('plus') + 'Add lane to ' + esc(t.label) + '</button>'
-      : '') +
-    versionsHTML;
+      : '');
+}
+
+/* ── the New-template / Duplicate door ────────────────────────────────────
+   ONE dialog, two entrances: "New template" (pick the type, name it, start
+   blank or FROM an existing one) and Duplicate on the editor (the same dialog
+   with the source pre-chosen and the type locked). Duplicate-and-tweak is the
+   everyday move — a recurring job is last year's template with three changes —
+   so the base select lists every template of the chosen type and the write
+   copies the step rows server-side.
+   The type select cannot change after creation (the lane set belongs to the
+   type, and PUT /templates refuses a retype), so it is asked ONCE, here. */
+function tplNewDialog(typeKey, sourceId) {
+  var types = TPL_CACHE.types || [];
+  var src = sourceId ? tplById(sourceId) : null;
+  var type = src ? src.event_type : (typeKey || (types.length ? types[0].key : 'led'));
+  var typeOpts = types.map(function (ty) {
+    return '<option value="' + esc(ty.key) + '"' + (ty.key === type ? ' selected' : '') + '>' +
+      esc(ty.label) + ' · ' + (ty.lanes || []).length + ' lanes</option>';
+  }).join('');
+  var baseOpts = '<option value="">Blank — no steps</option>' + tplsOfType(type).map(function (t) {
+    var id = Number(t.meta.id);
+    return '<option value="' + id + '"' + (src && id === Number(sourceId) ? ' selected' : '') + '>' +
+      esc(t.meta.name || 'unnamed') + ' · ' + tplStepCount(t) + ' steps' +
+      (t.meta.standard ? ' (standard)' : '') + '</option>';
+  }).join('');
+  /* openModal esc()s its own title — an already-escaped one would show its
+     entities */
+  openModal(src ? 'Duplicate · ' + (src.meta.name || 'template') : 'New template',
+    '<div class="hint" style="margin:0 0 12px">' + icon('layers') + '<span>A template belongs to ONE event ' +
+    'type, because the lane set does. Start <b>blank</b> and build the grid, or start from an existing ' +
+    'template — a duplicate carries its own copies of every step, so editing it never touches the original.' +
+    '</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+    finLabelWrap('Event type', '<select id="tnType" class="cell-in"' + (src ? ' disabled' : '') + ' ' +
+      actChange('tplNewType') + '>' + typeOpts + '</select>',
+      src ? 'A duplicate keeps its source’s type.' : 'Decides the lane set. It cannot change later.') +
+    finLabelWrap('Start from', '<select id="tnBase" class="cell-in">' + baseOpts + '</select>',
+      'Blank, or a copy of another template of this type.') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Template name', '<input id="tnName" class="cell-in" placeholder="e.g. LED — one-day turn" value="' +
+      esc(src ? (src.meta.name || '') + ' (copy)' : '') + '">',
+      'What every picker shows. Name it for the JOB SHAPE, not the client.') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Description', '<input id="tnDesc" class="cell-in" placeholder="when this one is the right one to seed" value="' +
+      esc(src ? (src.meta.desc || '') : '') + '">') + '</div>' +
+    _foot(act('tplNewCommit'), src ? 'Duplicate' : 'Create template', 'plus'));
+}
+
+/* Rename + describe, the halves PUT /templates has always taken and no screen
+   ever asked for — the defect Tom named first ("I don't name it"). */
+function tplRenameDialog(id) {
+  var rec = tplById(id);
+  if (!rec) return;
+  openModal('Rename · ' + (rec.meta.name || 'template'),
+    '<div class="hint" style="margin:0 0 12px">' + icon('pencil') + '<span>The name is what the library card, ' +
+    'the New Event picker and the Seed-pipeline picker all show. The grid is untouched.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Template name', '<input id="trName" class="cell-in" value="' +
+      esc(rec.meta.name || '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Description', '<input id="trDesc" class="cell-in" placeholder="when this one is the right one to seed" value="' +
+      esc(rec.meta.desc || '') + '">') + '</div>' +
+    _foot(act('tplRenameCommit', id), 'Save name', 'check'));
 }
 function addEventType() {
   openModal('Add event type', '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px;line-height:1.6">Types are config-driven and extensible. To add one (e.g. <b>Motion Graphics</b>):</p>' +

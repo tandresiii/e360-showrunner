@@ -246,13 +246,12 @@ async function renderView(view, arg) {
     navOn('files');
 
   } else if (view === 'templates') {
-    /* the editor renders the SEAM's answer now — server templates in API mode,
-       the built-in config in demo — plus the version list for the open type */
+    /* the LIBRARY: every named template of every type, plus the type catalogue
+       — a type that owns no template still needs a group and a New door */
     var tprojects = await api.listProjects();
     var tpls = await api.listTemplates();
-    var vlist = await api.listTemplateVersions(curTpl).catch(function () { return []; });
-    TPL_CACHE.versions[curTpl] = vlist;
-    s.innerHTML = viewTemplates(tprojects, tpls);
+    var ttypes = await api.listEventTypes().catch(function () { return []; });
+    s.innerHTML = viewTemplates(tprojects, tpls, ttypes);
     crumb([{ t: 'Templates' }]);
 
   } else if (view === 'proposals') {
@@ -1757,24 +1756,46 @@ function downloadFileSmart(fileId) {
    Default is nobody — creating an event does not spam the company — and one
    click adds everyone.
    ========================================================================== */
-var NEW_EVENT = { type: 'led' };
+var NEW_EVENT = { type: 'led', tpls: [] };
 
-function openNew() {
-  NEW_EVENT = { type: 'led' };
+/* THE TEMPLATE PICKER, one builder for every human seed moment (New Event, Add
+   show). A type owns MANY named templates; the STANDARD is preselected because
+   it is what an unattended create would have seeded — the preselection changes
+   nothing, the choice is the person's. "None" is a real answer, not a failure
+   state: a show whose pipeline is built by hand is legitimate, and a type whose
+   library is empty has nothing else to offer. */
+function tplPickerOptions(tpls, type) {
+  var mine = (tpls || []).filter(function (t) { return t.event_type === type; });
+  var std = null;
+  mine.forEach(function (t) { if (t.meta && t.meta.standard) std = Number(t.meta.id); });
+  if (std == null && mine.length) std = Number(mine[0].meta.id);
+  return mine.map(function (t) {
+    var id = Number(t.meta.id);
+    return '<option value="' + id + '"' + (id === std ? ' selected' : '') + '>' +
+      esc(t.meta.name || 'unnamed') + ' · ' + tplStepCount(t) + ' steps' +
+      (t.meta.standard ? ' (standard)' : '') + '</option>';
+  }).join('') +
+    '<option value=""' + (mine.length ? '' : ' selected') + '>None — start empty</option>';
+}
+
+async function openNew() {
+  NEW_EVENT = { type: 'led', tpls: [] };
+  /* loaded ONCE here and carried to step 2 — the type cards count what the
+     library actually holds instead of the built-in config's step blocks */
+  NEW_EVENT.tpls = await api.listTemplates().catch(function () { return []; });
   openModal('New event · pick a type',
-    '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px">The type decides the lane set and the ' +
-    'T-minus pipeline that gets seeded, and which scope numbers you are asked for. Types are extensible ' +
-    '— adding one is a config entry, not a deploy.</p>' +
+    '<p style="margin:0 0 14px;color:var(--text-2);font-size:13px">The type decides the lane set and which ' +
+    'scope numbers you are asked for. You pick WHICH of that type’s templates seeds the pipeline on the ' +
+    'next step. Types are extensible — adding one is a config entry, not a deploy.</p>' +
     '<div class="tpl-cards" style="margin:0">' + Object.keys(EVENT_TYPES).map(function (type) {
       var t = typeDef(type);
-      var n = Object.keys(TEMPLATE_STEPS[type] || {}).reduce(function (a, k) {
-        return a + (TEMPLATE_STEPS[type][k] || []).length; }, 0);
-      return '<button class="tpl-card" ' + act('newEventType', null, type) + '><div class="ti">' + icon(t.icon) + '</div><b>' + esc(t.label) + '</b><div class="td">' + t.lanes.length + ' lanes · ' + n + ' steps · anchored to ' + esc(t.anchor) + '</div></button>';
+      var n = NEW_EVENT.tpls.filter(function (x) { return x.event_type === type; }).length;
+      return '<button class="tpl-card" ' + act('newEventType', null, type) + '><div class="ti">' + icon(t.icon) + '</div><b>' + esc(t.label) + '</b><div class="td">' + t.lanes.length + ' lanes · ' + n + ' template' + (n === 1 ? '' : 's') + ' · anchored to ' + esc(t.anchor) + '</div></button>';
     }).join('') + '</div>');
 }
 
 function newEventForm(type) {
-  NEW_EVENT = { type: type };
+  NEW_EVENT.type = type;
   var t = typeDef(type);
   var isLed = type === 'led' || type === 'both';
   var isPrint = type === 'print' || type === 'both';
@@ -1790,13 +1811,20 @@ function newEventForm(type) {
 
   openModal('New ' + t.label + ' event',
     '<div class="hint" style="margin:0 0 12px">' + icon(t.icon) + '<span>Opens a <b>folder</b>, its first ' +
-    '<b>show</b>, and a <b>job</b> on a temporary number — one act, one transaction. The ' +
-    esc(t.label) + ' template seeds ' + t.lanes.length + ' lanes of T-minus steps off the event date. ' +
-    'The real QuickBooks number lands when you confirm the deal.</span></div>' +
+    '<b>show</b>, and a <b>job</b> on a temporary number — one act, one transaction. The template you pick ' +
+    'below seeds its T-minus steps across the ' + t.lanes.length + ' ' + esc(t.label) + ' lanes, ' +
+    'back-scheduled off the event date. The real QuickBooks number lands when you confirm the deal.</span></div>' +
 
     '<div class="fin-inputs" style="grid-template-columns:1.6fr 1fr">' +
     finLabelWrap('Event name', '<input id="neName" class="cell-in" placeholder="what we call it — e.g. LOVB Madison — Match 1">') +
     finLabelWrap('Client', '<input id="neClient" class="cell-in" placeholder="who is paying">') +
+    '</div>' +
+    /* THE PICKER. Every template of this type by NAME — the whole point of the
+       library is that the second one is reachable. Standard preselected. */
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Template', '<select id="neTpl" class="cell-in">' +
+      tplPickerOptions(NEW_EVENT.tpls, type) + '</select>',
+      'Which ' + esc(t.label) + ' template seeds the pipeline. “None” opens the show with an empty board.') +
     '</div>' +
     '<div class="fin-inputs" style="grid-template-columns:1.6fr 1fr">' +
     finLabelWrap('Venue', '<input id="neVenue" class="cell-in" placeholder="Fiserv Forum — Milwaukee, WI">') +
@@ -1849,6 +1877,10 @@ async function commitNewEvent() {
   var anyScope = ['linear_feet', 'cabinet_count', 'cabinet_type', 'pitch', 'print_pieces', 'print_sqft']
     .some(function (k) { return scope[k] !== null && scope[k] !== ''; });
 
+  /* the picker's answer rides the composite. An empty value is "None — start
+     empty", and seed_template:false is what stops the server reaching for the
+     type's standard on the caller's behalf. */
+  var tplId = v('neTpl');
   stageNotifies();
   var r;
   try {
@@ -1857,6 +1889,7 @@ async function commitNewEvent() {
       owner: v('neOwner') || ME,
       load_in_date: v('neLoadIn'), event_date: v('neEvent'), strike_date: v('neStrike'),
       cabinets: num2('neCabs') || 0,
+      template_id: tplId ? Number(tplId) : null, seed_template: !!tplId,
       scope: anyScope ? scope : undefined
     });
   } catch (e) {
@@ -1867,7 +1900,8 @@ async function commitNewEvent() {
   var suffix = await sendNotifies('show', r.show.id,
     'opened the event “' + name + '”' + (r.show.venue ? ' at ' + r.show.venue : '') + ' —');
   toast('Opened ' + name,
-    (r.instantiated_steps || 0) + ' steps seeded · job ' + (r.job ? r.job.qb_job_number : '—') +
+    (tplId ? (r.instantiated_steps || 0) + ' steps seeded' : 'empty pipeline — no template asked for') +
+    ' · job ' + (r.job ? r.job.qb_job_number : '—') +
     ' (temporary until it is confirmed)' + suffix);
   await updateMineCount();
   return render('show', r.show.id);
@@ -7019,6 +7053,7 @@ async function openAddShow(projectId) {
   if (!p) return;
   PENDING_NEWSHOW = { projectId: Number(projectId), type: p.type };
   var t = typeDef(p.type);
+  var tpls = await api.listTemplates().catch(function () { return []; });
   var pocOpts = '<option value="">— nobody yet —</option>' + activeUsers().map(function (u) {
     return '<option value="' + esc(u.username) + '">' + esc(u.name) + '</option>';
   }).join('');
@@ -7037,9 +7072,14 @@ async function openAddShow(projectId) {
     finLabelWrap(t.anchor, '<input id="nsEvent" class="cell-in" type="date">') +
     finLabelWrap('Strike', '<input id="nsStrike" class="cell-in" type="date">') +
     '</div>' +
-    '<label class="pu-cap"><input type="checkbox" id="nsSeed" checked>' +
-    '<span><b>Seed the pipeline</b> — the ' + esc(t.label) + ' template’s T-minus steps, back-scheduled ' +
-    'off the ' + esc(t.anchor.toLowerCase()) + '.</span></label>' +
+    /* the same picker New Event carries: WHICH of this type's templates seeds
+       this show. The checkbox it replaces could only say yes-or-no to whichever
+       template happened to be oldest. */
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Template', '<select id="nsTpl" class="cell-in">' +
+      tplPickerOptions(tpls, p.type) + '</select>',
+      'Its T-minus steps, back-scheduled off the ' + esc(t.anchor.toLowerCase()) +
+      '. “None” adds the show with an empty board.') + '</div>' +
     notifyRow() +
     _foot(act('nsCommit'), 'Add show', 'plus'));
 }
@@ -7048,14 +7088,9 @@ async function nsCommit() {
   var p = PENDING_NEWSHOW;
   var name = _v('nsName');
   if (!name) { toast('A show needs a name', 'Type what we call this one, or cancel'); return; }
-  var seed = _c('nsSeed');
-  var templateId = null;
-  if (seed) {
-    /* the type's template id, resolved the same way New Event resolves it —
-       first template for the type; none on this server = an honest note */
-    var tpl = await api.getTemplate(p.type).catch(function () { return null; });
-    templateId = tpl && tpl.meta ? tpl.meta.id : null;
-  }
+  var picked = _v('nsTpl');
+  var seed = !!picked;
+  var templateId = picked ? Number(picked) : null;
   stageNotifies();
   var show;
   try {
@@ -7070,8 +7105,8 @@ async function nsCommit() {
   closeM();
   var suffix = await sendNotifies('show', show.id, 'added the show “' + name + '” —');
   var seeded = show.instantiated_steps || 0;
-  toast('Show added', name + (seeded ? ' · +' + seeded + ' steps seeded' : (seed && apiMode() && !templateId
-    ? ' — no template for this type on the server, pipeline left empty' : '')) + suffix);
+  toast('Show added', name + (seeded ? ' · +' + seeded + ' steps seeded'
+    : (seed ? ' — that template landed no steps' : ' — empty board, no template asked for')) + suffix);
   await updateMineCount();
   return render('show', show.id);
 }
@@ -7080,16 +7115,46 @@ async function nsCommit() {
    POST /shows/:id/instantiate-template had no caller, and the empty Pipeline
    tab's only advice was a toast pointing at a season control that was itself a
    toast. The primary button in the empty state now does the real thing. */
+/* BOTH doors (the empty-state block and the sched-bar ghost) land here.
+   ZERO templates for the type -> the honest note. EXACTLY ONE -> seed it, no
+   dialog: making somebody confirm a choice they do not have is friction, not
+   safety. MORE THAN ONE -> the picker, because the second template of a type
+   being unreachable is the whole defect. */
 async function seedPipelineAct(showId) {
   var show = await api.getShow(showId);
   if (!show) return;
-  var tpl = await api.getTemplate(show.type || 'led').catch(function () { return null; });
-  var templateId = tpl && tpl.meta ? tpl.meta.id : null;
-  if (apiMode() && !templateId) {
+  var type = show.type || 'led';
+  var tpls = (await api.listTemplates().catch(function () { return []; }))
+    .filter(function (t) { return t.event_type === type; });
+  if (!tpls.length) {
     toast('No template for this event type',
-      'Templates seed from templates.json — this server has no ' + (show.type || 'led') + ' template to instantiate');
+      'The ' + typeLabel(type) + ' library is empty — make one on the Templates screen and seed from it');
     return;
   }
+  if (tpls.length > 1) return openSeedPicker(showId, show, tpls);
+  return seedPipelineWith(showId, Number(tpls[0].meta.id), show);
+}
+function openSeedPicker(showId, show, tpls) {
+  openModal('Seed the pipeline · ' + (show.name || 'show'),
+    '<div class="hint" style="margin:0 0 12px">' + icon('bolt') + '<span>This event type has ' + tpls.length +
+    ' templates. The one you pick copies its T-minus steps onto the board' +
+    (show.event_date ? ', back-scheduled off ' + esc(fmtDate(show.event_date)) : ' — set an event date to back-schedule them') +
+    '. Seeding is idempotent by step title, so a title already on this board is skipped, never doubled.</span></div>' +
+    tpls.map(function (t) {
+      return '<button class="btn ghost" style="width:100%;justify-content:flex-start;margin-bottom:8px" ' +
+        act('seedTplPick', showId, String(t.meta.id)) + '>' + icon('layers') +
+        '<span style="text-align:left"><b>' + esc(t.meta.name || 'unnamed') + '</b>' +
+        (t.meta.standard ? ' <span class="pill go"><span class="dot"></span>standard</span>' : '') +
+        '<span style="display:block;color:var(--muted);font-size:11.5px;margin-top:2px">' +
+        tplStepCount(t) + ' steps' + (t.meta.desc ? ' · ' + esc(t.meta.desc) : '') + '</span></span></button>';
+    }).join('') +
+    '<div style="display:flex;justify-content:flex-end;margin-top:4px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Cancel</button></div>');
+}
+async function seedPipelineWith(showId, templateId, show) {
+  show = show || await api.getShow(showId);
+  if (!show) return;
+  closeM();
   var r;
   try { r = await api.instantiateTemplate(showId, templateId); }
   catch (e) { toast('Not seeded', String(e && e.message || e), 'err'); return; }
@@ -7397,13 +7462,14 @@ async function ragSetAct(showId, val) {
   return render('show', Number(showId));
 }
 
-/* ── A5 · THE TEMPLATE EDITOR'S REAL WRITES ───────────────────────────────────
-   The grid stages everything (rename inline, tplRowDel, tplAddStep) and the
-   two save buttons commit the WHOLE grid: Save = PUT on the live SOP (the
-   type's oldest template — the one createEvent seeds from), Bank = POST a
-   snapshot. tplCollect reads the DOM back with full fidelity — the data-
-   attributes carry owner_role / evidence_type / auto_source / depends_on so a
-   Save cannot strip the flex automation off an event type. */
+/* ── THE TEMPLATE LIBRARY'S WRITES ────────────────────────────────────────────
+   Save PUTs the OPEN template by id — not "the type's live SOP", which is what
+   made a second template of a type unreachable. New/Duplicate POST (with
+   copy_from for a duplicate, so the server copies the step ROWS and the copy is
+   independent), Rename PUTs name+description, Delete removes one.
+   tplCollect reads the DOM back with full fidelity — the data- attributes carry
+   owner_role / evidence_type / auto_source / depends_on so a Save cannot strip
+   the flex automation off a template. */
 function tplCollect() {
   var steps = [];
   document.querySelectorAll('#tplEditor .lane-edit').forEach(function (laneEl) {
@@ -7430,48 +7496,75 @@ function tplCollect() {
   });
   return steps;
 }
-async function tplSaveAct(type) {
-  var rec = tplByType(type);
+async function tplSaveAct(id) {
+  var rec = tplById(id);
+  if (!rec) return;
   var steps = tplCollect();
   if (!steps.length) {
     toast('Nothing to save', 'Every row is unnamed — type step names first, or cancel'); return;
   }
-  var id = rec && rec.meta ? rec.meta.id : null;
-  try { await api.updateTemplate(id, { event_type: type, steps: steps }); }
+  try { await api.updateTemplate(rec.meta.id, { steps: steps }); }
   catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
-  toast('Template saved', steps.length + ' steps — every show seeded from the ' +
-    typeLabel(type) + ' template from now on inherits this grid');
+  toast('Template saved', steps.length + ' steps in “' + (rec.meta.name || 'this template') +
+    '” — shows seeded from THIS template from now on inherit the grid; the type’s other templates are untouched');
   return render('templates');
 }
-async function tplBankAct(type) {
-  var rec = tplByType(type);
-  var steps = tplCollect();
-  if (!steps.length) { toast('Nothing to bank', 'The grid is empty'); return; }
-  var base = (rec && rec.meta && rec.meta.name) || (typeLabel(type) + ' SOP');
-  try {
-    await api.createTemplateVersion({
-      name: base + ' — banked ' + TODAY_ISO,
-      event_type: type,
-      description: 'Banked copy of the ' + typeLabel(type) + ' SOP grid (' + TODAY_ISO + ')',
-      steps: steps
-    });
-  } catch (e) { toast('Not banked', String(e && e.message || e), 'err'); return; }
-  toast('Copy banked', 'A snapshot of this grid is in the versions list — the live SOP is untouched');
+/* the New-template door and Duplicate are the same dialog; which one it is
+   depends only on whether a source was pre-chosen */
+function tplNewAct(typeKey) { tplNewDialog(typeKey || null, null); }
+function tplDuplicateAct(id) { tplNewDialog(null, Number(id)); }
+/* the base list is per-TYPE, so changing the type has to redraw the dialog —
+   offering a print template as the base for an LED one would be a lie the
+   server would then refuse */
+function tplNewTypeAct() { tplNewDialog(_v('tnType'), null); }
+async function tplNewCommitAct() {
+  var name = _v('tnName');
+  if (!name) { toast('A template needs a name', 'Name it for the job shape — that is what every picker shows'); return; }
+  var base = _v('tnBase');
+  var body = { name: name, event_type: _v('tnType'), description: _v('tnDesc') };
+  /* copy_from makes the SERVER copy the step rows — the copy owns its own,
+     which is the entire reason to have two templates */
+  if (base) body.copy_from = Number(base);
+  var made;
+  try { made = await api.createTemplate(body); }
+  catch (e) { toast('Not created', String(e && e.message || e), 'err'); return; }
+  closeM();
+  /* the server answers a flat steps array; the demo twin answers the shaped
+     record the library renders — count whichever came back */
+  var n = Array.isArray(made && made.steps) ? made.steps.length
+    : (made && made.meta ? tplStepCount(made) : 0);
+  curTplId = (made && (made.id || (made.meta && made.meta.id))) || null;
+  toast(base ? 'Template duplicated' : 'Template created',
+    '“' + name + '”' + (base ? ' — ' + n + ' step' + (n === 1 ? '' : 's') + ' copied, its own rows' : ' — blank, add its steps below'));
   return render('templates');
 }
-async function tplDeleteAct(id, type) {
-  var versions = TPL_CACHE.versions[type] || [];
-  var v = versions.filter(function (x) { return x.id === Number(id); })[0];
-  var isLive = versions.length && versions[0].id === Number(id);
-  if (!askConfirm('Delete the template version' + (v ? ' “' + v.name + '”' : '') + '?\n\n' +
-      (isLive
-        ? 'This is the LIVE SOP — the next-oldest version becomes the one new shows seed from' +
-          (versions.length > 1 ? '.' : ', and with no version left the type seeds an empty pipeline.')
-        : 'It is a banked copy — the live SOP is untouched.') +
+function tplRenameAct(id) { tplRenameDialog(Number(id)); }
+async function tplRenameCommitAct(id) {
+  var name = _v('trName');
+  if (!name) { toast('A template needs a name', 'Type one, or cancel'); return; }
+  try { await api.updateTemplate(Number(id), { name: name, description: _v('trDesc') }); }
+  catch (e) { toast('Not renamed', String(e && e.message || e), 'err'); return; }
+  closeM();
+  toast('Renamed', '“' + name + '” — every picker shows the new name');
+  return render('templates');
+}
+async function tplDeleteAct(id) {
+  var rec = tplById(id);
+  var sibs = rec ? tplsOfType(rec.event_type).length : 0;
+  var isStd = !!(rec && rec.meta && rec.meta.standard);
+  if (!askConfirm('Delete the template' + (rec ? ' “' + rec.meta.name + '”' : '') + '?\n\n' +
+      (isStd
+        ? (sibs > 1
+          ? 'This is the type’s STANDARD — the next-oldest template becomes the standard that agent-confirmed folders seed from.'
+          : 'It is the last template of its type — new events of this type will seed an empty pipeline until there is another one.')
+        : 'The type’s standard is untouched.') +
       '\n\nShows already seeded keep their steps either way; instantiation copies rows.')) return;
   try { await api.deleteTemplate(id); }
   catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
-  toast('Version deleted', isLive ? 'The next version is live now' : 'The banked copy is gone');
+  if (Number(curTplId) === Number(id)) curTplId = null;
+  toast('Template deleted',
+    isStd && sibs > 1 ? 'The next-oldest template of this type is the standard now'
+      : (sibs > 1 ? 'The rest of the library is untouched' : 'This type has no template left'));
   return render('templates');
 }
 function tplAddStepAct(laneKey) {
@@ -7886,14 +7979,9 @@ var ACTIONS = {
   dbxDepositCommit: function () { return dbxDepositCommit(); },
   dbxUnlink:     function (t, id) { return dbxUnlinkAct(id); },
   setDiv:        async function (t, id, k) { DIV_FILTER = (DIV_FILTER === k && k !== 'all') ? 'all' : k; await render('projects'); },
-  selectTpl:     async function (t, id, k) {
-    /* the versions list is per-type — fetch the newly-opened type's before the
-       editor renders, so "live vs banked" is never a stale answer */
-    TPL_CACHE.versions[k] = await api.listTemplateVersions(k).catch(function () { return []; });
-    selectTpl(k, await api.listProjects());
-  },
+  selectTpl:     async function (t, id) { selectTpl(id, await api.listProjects()); },
   addEventType:  function () { addEventType(); },
-  openNew:       function () { openNew(); },
+  openNew:       function () { return openNew(); },
   /* F1 — the last mock button in the app is real: picking a type now opens the
      form that creates the folder, the show and the job. */
   newEventType:  function (t, id, k) { newEventForm(EVENT_TYPES[k] ? k : 'led'); },
@@ -7998,6 +8086,7 @@ var ACTIONS = {
   addShow:       function (t, id) { return openAddShow(id); },
   nsCommit:      function () { return nsCommit(); },
   seedPipeline:  function (t, id) { return seedPipelineAct(id); },
+  seedTplPick:   function (t, id, k) { return seedPipelineWith(id, Number(k)); },
   /* C5 the second deal */
   addJob:        function (t, id) { return openAddJob(id); },
   njCommit:      function () { return njCommit(); },
@@ -8044,9 +8133,14 @@ var ACTIONS = {
   ragOverride:   function (t, id) { return openRagOverride(id); },
   ragSet:        function (t, id, k) { return ragSetAct(id, k); },
   /* A5 the template editor's real writes */
-  tplSave:       function (t, id, k) { return tplSaveAct(k); },
-  tplBank:       function (t, id, k) { return tplBankAct(k); },
-  tplDelete:     function (t, id, k) { return tplDeleteAct(id, k); },
+  tplSave:       function (t, id) { return tplSaveAct(id); },
+  tplNew:        function (t, id, k) { return tplNewAct(k); },
+  tplNewType:    function () { return tplNewTypeAct(); },
+  tplNewCommit:  function () { return tplNewCommitAct(); },
+  tplDuplicate:  function (t, id) { return tplDuplicateAct(id); },
+  tplRename:     function (t, id) { return tplRenameAct(id); },
+  tplRenameCommit: function (t, id) { return tplRenameCommitAct(id); },
+  tplDelete:     function (t, id) { return tplDeleteAct(id); },
   tplAddStep:    function (t, id, k) { return tplAddStepAct(k); },
   tplRowDel:     function (t) { return tplRowDelAct(t); },
   /* polish: the finance feed digs deeper; photo tags edit in place */
@@ -8203,6 +8297,20 @@ document.addEventListener('click', function (ev) {
   var fn = ACTIONS[t.getAttribute('data-act')];
   if (!fn) return;
   ev.stopPropagation();
+  var idAttr = t.getAttribute('data-id');
+  var id = idAttr === null || idAttr === '' ? null : Number(idAttr);
+  var r = fn(t, id, t.getAttribute('data-k'));
+  if (r && r.catch) r.catch(function (e) { console.error(e); toast('Something went wrong', String(e && e.message || e), 'err'); });
+});
+
+/* the CHANGE half of the same delegation — see actChange(). A select that
+   redraws its own dependents cannot ride click; the ACTIONS table is shared. */
+document.addEventListener('change', function (ev) {
+  var t = ev.target && ev.target.closest ? ev.target.closest('[data-act-change]') : null;
+  if (!t) return;
+  if (bootGate()) return;
+  var fn = ACTIONS[t.getAttribute('data-act-change')];
+  if (!fn) return;
   var idAttr = t.getAttribute('data-id');
   var id = idAttr === null || idAttr === '' ? null : Number(idAttr);
   var r = fn(t, id, t.getAttribute('data-k'));

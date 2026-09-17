@@ -1316,9 +1316,12 @@ async function main() {
   ok('…so the door exists on BOTH states — two seedPipeline sites in tabPipeline',
      (pipeSrc.match(/seedPipeline/g) || []).length === 2,
      (pipeSrc.match(/seedPipeline/g) || []).length);
-  // the toast may not claim work it did not do
-  const seedActSrc = APP_JS.slice(APP_JS.indexOf('async function seedPipelineAct'),
-    APP_JS.indexOf('async function seedPipelineAct') + 2400);
+  // The toast may not claim work it did not do. It lives in seedPipelineWith()
+  // since the library wave — seedPipelineAct() now only RESOLVES which template
+  // (direct when the type owns one, the picker when it owns several) and hands
+  // off; the reporting half is the same code either way, which is the point.
+  const seedActSrc = APP_JS.slice(APP_JS.indexOf('async function seedPipelineWith'),
+    APP_JS.indexOf('async function seedPipelineWith') + 2400);
   ok('the seed toast reads skipped_steps — it can say what was ALREADY there',
      /skipped_steps/.test(seedActSrc));
   ok('…and an all-skipped seed does not report a fake success',
@@ -1586,36 +1589,182 @@ async function main() {
      wragClear.status === 200 && wragClear.body.rag_override === null, wragClear.body.rag);
 
   // ══════════════════════════════════════════════════════════════════════════
-  section('31 · the template editor’s Save button saves  (A5)');
+  section('31 · the template LIBRARY — many named templates per type, a picker at every human seed door');
   // ══════════════════════════════════════════════════════════════════════════
-  reach('Template editor writes', {
-    seam: ['updateTemplate', 'createTemplateVersion', 'deleteTemplate', 'listTemplateVersions'],
-    action: ['tplSave', 'tplBank', 'tplDelete', 'tplAddStep', 'tplRowDel'] });
+  // Tom, 2026-09-17: "When I create a template and save it — I don't name it,
+  // and have no means to create a new different one. We should be able to have
+  // many templates for many job types. And when we seed them — we can decide
+  // which template we want."
+  //
+  // Every seed point hardcoded "the oldest row of this type wins", so a second
+  // template could be created and never again reached, named or seeded. That
+  // rule survives ONLY as the MACHINE answer (the STANDARD — agent proposal
+  // confirms, and any caller that names no template). Every HUMAN door picks by
+  // id, and these gates say the chosen id is what lands.
+  reach('Template library — new / rename / duplicate / save / delete', {
+    seam: ['listTemplates', 'listEventTypes', 'createTemplate', 'updateTemplate', 'deleteTemplate'],
+    action: ['tplNew', 'tplNewCommit', 'tplRename', 'tplRenameCommit', 'tplDuplicate',
+             'tplSave', 'tplDelete', 'tplAddStep', 'tplRowDel'] });
+  reach('Seed pipeline picks WHICH template when the type owns several',
+    { seam: 'instantiateTemplate', action: ['seedPipeline', 'seedTplPick'] });
   ok('the Save button is not a toast any more',
      !/toastAttrs\('Template saved'/.test(SRC['views-global.js']));
-  ok('a pm cannot rewrite the SOP — POST',
+  ok('…and the old "versions of one live SOP" framing went with the rewrite',
+     !/Bank a copy/.test(SRC['views-global.js']) &&
+     !/live — seeds new shows/.test(SRC['views-global.js']) &&
+     !/listTemplateVersions/.test(API_JS));
+  ok('a pm cannot write a template — POST',
      (await POST('/api/templates', { name: 'sneak', event_type: 'led' }, { token: T.brenden })).status === 403);
   const wtplLive = await GET('/api/templates/led', { token: T.morgan });
-  ok('a pm cannot rewrite the SOP — PUT / DELETE',
+  ok('a pm cannot write a template — PUT / DELETE',
      (await PUT(`/api/templates/${wtplLive.body.id}`, { name: 'sneak' }, { token: T.brenden })).status === 403 &&
      (await DEL(`/api/templates/${wtplLive.body.id}`, { token: T.brenden })).status === 403);
-  const wbank = await POST('/api/templates', {
-    name: 'LED SOP — banked by walk', event_type: 'led',
-    steps: [{ lane: 'venue', title: 'Walk-added rigging check', due_offset_days: -9 }]
+
+  // ── (a) a SECOND named template, and seeding WITH ITS id ──────────────────
+  const wtpl2 = await POST('/api/templates', {
+    name: 'LED — walk one-day turn', event_type: 'led',
+    description: 'the second template of a type — the one the old screen could not reach',
+    steps: [{ lane: 'gear', title: 'WALK2 one-day prep', due_offset_days: -2 },
+            { lane: 'crew', title: 'WALK2 one-day crew call', due_offset_days: -1 }]
   }, { token: T.morgan });
-  ok('a manager banks a copy', wbank.status === 200 && wbank.body.id > 0, wbank.body);
-  ok('…and the LIVE SOP stays the oldest — banking never hijacks what seeds',
+  ok('morgan creates a SECOND named LED template', wtpl2.status === 200 && wtpl2.body.id > 0, wtpl2.body);
+  ok('…and asking by TYPE still answers the standard — the machine contract holds',
      (await GET('/api/templates/led', { token: T.morgan })).body.id === wtplLive.body.id);
-  const wput = await PUT(`/api/templates/${wbank.body.id}`, {
-    steps: [{ lane: 'venue', title: 'Walk-edited rigging check', due_offset_days: -12 },
-            { lane: 'gear', title: 'Walk-added spare count', due_offset_days: -5 }]
+  const wlib = (await GET('/api/templates?event_type=led', { token: T.morgan })).body || [];
+  ok('…while the library lists both, exactly the older one chipped `standard`',
+     wlib.filter((t) => t.id === wtpl2.body.id || t.id === wtplLive.body.id).length === 2 &&
+     wlib.filter((t) => t.standard).length === 1 &&
+     wlib.find((t) => t.standard).id === wtplLive.body.id, wlib.map((t) => [t.id, t.standard]));
+  const wpickShow = await POST('/api/shows',
+    { project_id: PROJ, name: 'AVCA Template Pick', event_date: plus(45) }, { token: T.brenden });
+  const WSP = wpickShow.body.id;
+  const wtplSeed = await POST(`/api/shows/${WSP}/instantiate-template`,
+    { template_id: wtpl2.body.id }, { token: T.brenden });
+  ok('Seed pipeline with an EXPLICIT template_id lands that template',
+     wtplSeed.status === 200 && wtplSeed.body.instantiated_steps === 2, wtplSeed.body);
+  const wpickTitles = (await pool.query(
+    'SELECT title FROM steps WHERE show_id=$1 ORDER BY sort_order', [WSP])).rows.map((r) => r.title);
+  ok('…ITS OWN titles — not one row of the type’s standard came along',
+     wpickTitles.length === 2 && wpickTitles.every((t) => /^WALK2 /.test(t)), wpickTitles);
+
+  // ── (b) DUPLICATE copies the step ROWS; the copy is independent ───────────
+  const wdup = await POST('/api/templates',
+    { name: 'LED — walk duplicate', copy_from: wtpl2.body.id }, { token: T.morgan });
+  ok('Duplicate creates a new template of the source’s type',
+     wdup.status === 200 && wdup.body.id !== wtpl2.body.id && wdup.body.event_type === 'led', wdup.body);
+  const wdupRows = (await pool.query(
+    'SELECT id, template_id FROM template_steps WHERE template_id IN ($1,$2)',
+    [wtpl2.body.id, wdup.body.id])).rows;
+  ok('…carrying its OWN copies — four rows across the two, no row id shared',
+     (wdup.body.steps || []).length === 2 && wdupRows.length === 4 &&
+     new Set(wdupRows.map((r) => r.id)).size === 4, wdupRows.length);
+  await PUT(`/api/templates/${wdup.body.id}`, {
+    steps: [{ lane: 'gear', title: 'WALK-DUP edited only here', due_offset_days: -3 }]
   }, { token: T.morgan });
-  ok('…edits the grid in one transaction', wput.status === 200 && (wput.body.steps || []).length === 2,
-     wput.body.steps?.length);
-  ok('…and deletes the banked copy, rows and all',
-     (await DEL(`/api/templates/${wbank.body.id}`, { token: T.morgan })).status === 200 &&
-     (await pool.query('SELECT COUNT(*)::int AS n FROM template_steps WHERE template_id=$1',
-       [wbank.body.id])).rows[0].n === 0);
+  const wsrcAfter = (await pool.query(
+    'SELECT title FROM template_steps WHERE template_id=$1 ORDER BY sort_order',
+    [wtpl2.body.id])).rows.map((r) => r.title);
+  ok('…and editing the COPY never reaches back into the original',
+     wsrcAfter.length === 2 && wsrcAfter.every((t) => /^WALK2 /.test(t)), wsrcAfter);
+
+  // ── (c) the New Event composite honours the picker ────────────────────────
+  const wevPick = await POST('/api/events',
+    { name: 'WALK picked-template event', type: 'led', event_date: plus(50),
+      template_id: wtpl2.body.id }, { token: T.morgan });
+  const wevTitles = (await pool.query('SELECT title FROM steps WHERE show_id=$1',
+    [wevPick.body.show.id])).rows.map((r) => r.title);
+  ok('New Event with a chosen template_id seeds THAT template, by title',
+     wevPick.body.instantiated_steps === 2 && wevTitles.every((t) => /^WALK2 /.test(t)), wevTitles);
+  const wevNone = await POST('/api/events',
+    { name: 'WALK no-template event', type: 'led', event_date: plus(51), seed_template: false },
+    { token: T.morgan });
+  ok('…"None — start empty" opens the event with ZERO steps',
+     wevNone.body.instantiated_steps === 0, wevNone.body.instantiated_steps);
+  const wevStd = await POST('/api/events',
+    { name: 'WALK standard event', type: 'led', event_date: plus(52) }, { token: T.morgan });
+  ok('…and naming no template at all still seeds the standard — agents untouched',
+     wevStd.body.instantiated_steps > 2, wevStd.body.instantiated_steps);
+  const PROPS_JS = fs.readFileSync(path.join(APP, 'routes', 'proposals.js'), 'utf8');
+  ok('the agent path resolves the STANDARD on purpose, and says why at the site',
+     /standardTemplateId\(proj\.type, c\)/.test(PROPS_JS) && /no human to ask/.test(PROPS_JS));
+
+  // ── the doors, over the source ────────────────────────────────────────────
+  const neSrc = APP_JS.slice(APP_JS.indexOf('function newEventForm'),
+    APP_JS.indexOf('async function refreshFinanceUI'));
+  ok('the New Event dialog carries a Template select',
+     /id="neTpl"/.test(neSrc) && /tplPickerOptions\(NEW_EVENT\.tpls, type\)/.test(neSrc));
+  ok('…whose answer rides the composite as template_id + seed_template',
+     /template_id: tplId \? Number\(tplId\) : null, seed_template: !!tplId/.test(neSrc));
+  ok('…and the picker offers "None" and preselects the type’s standard',
+     /None — start empty/.test(APP_JS) && /t\.meta && t\.meta\.standard/.test(APP_JS));
+  const nsSrc = APP_JS.slice(APP_JS.indexOf('async function openAddShow'),
+    APP_JS.indexOf('async function seedPipelineAct'));
+  ok('Add show on a season dashboard carries the same select — the yes/no checkbox is gone',
+     /id="nsTpl"/.test(nsSrc) && !/nsSeed/.test(nsSrc));
+  const seedSrc = APP_JS.slice(APP_JS.indexOf('async function seedPipelineAct'),
+    APP_JS.indexOf('async function openAddJob'));
+  ok('Seed pipeline seeds DIRECTLY when the type owns exactly one template',
+     /seedPipelineWith\(showId, Number\(tpls\[0\]\.meta\.id\), show\)/.test(seedSrc));
+  ok('…and opens a picker when it owns more than one',
+     /tpls\.length > 1\) return openSeedPicker/.test(seedSrc));
+  ok('…with the idempotent toast semantics kept verbatim',
+     /skipped_steps/.test(seedSrc) && /Nothing new to seed/.test(seedSrc) &&
+     /already on this show, skipped/.test(seedSrc));
+
+  // ── THE LIBRARY, RENDERED from the file:// demo ───────────────────────────
+  // A door asserted only over source is a door nobody has drawn. The demo twin
+  // holds a REAL multi-template library now, so the whole screen renders
+  // headless — the same eight-global shim as the seed-parity block above, with
+  // one more file loaded into it.
+  new vm.Script(SRC['views-global.js'], { filename: 'public/views-global.js' }).runInContext(demoTab);
+  const dTpls = await demoTab.api.listTemplates();
+  const dTypes = await demoTab.api.listEventTypes();
+  const dLed = dTpls.filter((t) => t.event_type === 'led');
+  ok('DEMO: the twin holds MORE THAN ONE led template — the pickers have something to pick',
+     dLed.length > 1, dLed.length);
+  ok('…exactly one chipped standard, and it is the lowest id',
+     dLed.filter((t) => t.meta.standard).length === 1 &&
+     Number(dLed.filter((t) => t.meta.standard)[0].meta.id) ===
+       Math.min(...dLed.map((t) => Number(t.meta.id))));
+  const dLedStd = dLed.filter((t) => t.meta.standard)[0];
+  const dLedAlt = dLed.filter((t) => !t.meta.standard)[0];
+  const libHtml = demoTab.viewTemplates(await demoTab.api.listProjects(), dTpls, dTypes);
+  ok('DEMO RENDER · the library draws a New-template door',
+     /data-act="tplNew"/.test(libHtml));
+  ok('…a card per template, each wearing its own NAME',
+     dTpls.every((t) => libHtml.indexOf(demoTab.esc(t.meta.name)) >= 0));
+  ok('…each selectable by id, so the second template of a type is reachable',
+     dTpls.every((t) => libHtml.indexOf('data-act="selectTpl" data-id="' + t.meta.id + '"') >= 0));
+  ok('…the standard chip, and no "live SOP vs banked" split left on the page',
+     /standard<\/span>/.test(libHtml) && !/banked/.test(libHtml) && !/Bank a copy/.test(libHtml));
+  ok('DEMO RENDER · the editor offers rename, duplicate, delete and save',
+     /data-act="tplRename"/.test(libHtml) && /data-act="tplDuplicate"/.test(libHtml) &&
+     /data-act="tplDelete"/.test(libHtml) && /data-act="tplSave"/.test(libHtml));
+  ok('…and the deliberately-honest disabled add-a-lane button survives the redesign',
+     /addlane/.test(libHtml) && /Lanes are the event type/.test(libHtml));
+
+  // the demo twin's own write half — duplicate by VALUE, and an explicit seed
+  const dDup = await demoTab.api.createTemplate(
+    { name: 'WALK demo duplicate', copy_from: dLedStd.meta.id });
+  ok('DEMO: createTemplate duplicates, copying the source’s step count',
+     demoTab.tplStepCount(dDup) === demoTab.tplStepCount(dLedStd),
+     [demoTab.tplStepCount(dDup), demoTab.tplStepCount(dLedStd)]);
+  await demoTab.api.updateTemplate(dDup.meta.id,
+    { steps: [{ lane: 'gear', title: 'demo copy-only row', due_offset_days: -4 }] });
+  ok('…and editing the demo copy never touches the demo original',
+     demoTab.tplStepCount(await demoTab.api.getTemplate(dLedStd.meta.id))
+       === demoTab.tplStepCount(dLedStd));
+  const dPickShow = await demoTab.api.createShow(dShow.project_id,
+    { name: 'WALK demo picked template', seed_template: false, event_date: plus(60) });
+  const dPick = await demoTab.api.instantiateTemplate(dPickShow.id, dLedAlt.meta.id);
+  ok('DEMO: seeding with an explicit template_id lands ITS steps, not the standard’s',
+     dPick.instantiated_steps === demoTab.tplStepCount(dLedAlt) &&
+     dPick.instantiated_steps !== demoTab.tplStepCount(dLedStd), dPick);
+  const dRename = await demoTab.api.updateTemplate(dDup.meta.id, { name: 'WALK demo renamed' });
+  ok('…and the demo closes the lifecycle from file:// — rename, then delete',
+     dRename.meta.name === 'WALK demo renamed' &&
+     (await demoTab.api.deleteTemplate(dDup.meta.id)).ok === true &&
+     (await demoTab.api.listTemplates()).every((t) => Number(t.meta.id) !== Number(dDup.meta.id)));
 
   // ══════════════════════════════════════════════════════════════════════════
   section('32 · the small honest things — search, landing, feed, NAS, tags, archive');

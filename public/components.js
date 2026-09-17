@@ -27,6 +27,15 @@ function act(name, id, k) {
     (id == null ? '' : ' data-id="' + Number(id) + '"') +
     (k == null ? '' : ' data-k="' + esc(k) + '"');
 }
+/* the same delegation, on CHANGE. A click on a <select> is the person opening
+   it, not choosing, so a select whose choice redraws what is around it (the
+   New-template dialog's type picker rewrites the "start from" list) rides the
+   change event. Same ACTIONS table, same (target, id, k) call. */
+function actChange(name, id, k) {
+  return 'data-act-change="' + esc(name) + '"' +
+    (id == null ? '' : ' data-id="' + Number(id) + '"') +
+    (k == null ? '' : ' data-k="' + esc(k) + '"');
+}
 /* a click target that only fires a toast — kills ~15 stringy inline onclicks */
 function toastAttrs(title, sub) {
   return 'data-act="toast" data-toast="' + esc(title) + '" data-toast-sub="' + esc(sub || '') + '"';

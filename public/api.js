@@ -26,7 +26,8 @@
    ── Deviations from the 1:1 table (SCHEMA.md) ──────────────────────────────
      · confirmDoc(fileId) / rejectDoc(fileId) hold a FILE id; the server
        resolves a PROPOSAL. GET /api/files/:id/proposal is the hop.
-     · getTemplate(type) keys by event type; the route takes a type OR an id.
+     · getTemplate(key) takes a TYPE (answering that type's standard) or an id;
+       listTemplates() is the whole library, every named template of every type.
      · resolveJob(), and the three recap photo-strip helpers, stay client-side
        — they compose other calls, they are not endpoints.
      · notify: the mutating routes take an optional `notify:[…]`. api.stage-
@@ -834,8 +835,95 @@ var api = (function () {
     return {
       event_type: type, def: def, steps: steps,
       meta: { desc: (row && row.description) || (TEMPLATE_META[type] || {}).desc || 'Custom event type.',
-              id: row ? row.id : null, name: row ? row.name : null }
+              id: row ? row.id : null, name: row ? row.name : null,
+              /* the type's STANDARD, as the server marked it — the library chip
+                 and what a machine seeds must never be two different rows */
+              standard: !!(row && row.standard),
+              created_at: (row && row.created_at) || null }
     };
+  }
+
+  /* ── THE DEMO TEMPLATE LIBRARY ─────────────────────────────────────────────
+     A type owns MANY named templates (Tom, 2026-09-17), and the demo held
+     exactly ONE shape per type — so the library screen would have listed one
+     card and every picker would have had nothing to pick BETWEEN. These rows
+     are SERVER-SHAPED ({id,name,event_type,description,created_at,steps:[flat
+     rows]}), so shapeTpl() and _seedLocalPipeline() read demo and API
+     templates through one code path.
+     The standard is the LOWEST id of its type — the demo twin of the server's
+     standardTemplateId (oldest by id). LED carries a second, deliberately
+     shorter template because a demo that can only offer one choice proves none
+     of the picker behaviour. */
+  var DEMO_TPLS = null;
+  var DEMO_TPL_SEQ = 0;
+  function _demoTplRows(laneMap, type) {
+    var rows = [];
+    typeDef(type).lanes.forEach(function (lane) {
+      (laneMap[lane.key] || []).forEach(function (s) {
+        rows.push({ lane: lane.key, title: s.name, owner_role: s.role || null,
+          /* the store's `off` is a T-minus MAGNITUDE; the wire is signed */
+          due_offset_days: -Math.abs(Number(s.off) || 0),
+          evidence_type: s.flag === 'auto' ? 'file' : 'none',
+          auto_source: s.flag === 'auto' ? 'auto' : 'none',
+          depends_on_title: s.flag === 'dep' ? '·' : '',
+          sort_order: rows.length });
+      });
+    });
+    return rows;
+  }
+  function _demoTplAdd(type, name, description, laneMap) {
+    var row = { id: ++DEMO_TPL_SEQ, name: name, event_type: type,
+      description: description, source_key: null,
+      created_at: new Date(Date.UTC(2026, 0, DEMO_TPL_SEQ)).toISOString(),
+      steps: _demoTplRows(laneMap || TEMPLATE_STEPS[type] || {}, type) };
+    DEMO_TPLS.push(row);
+    return row;
+  }
+  /* BUILT LAZILY, on the first demo-mode read. api.js is loaded in API mode
+     too — and headless, on a deliberately tiny shim — so reaching for data.js's
+     EVENT_TYPES at module load would make the seam depend on the store just to
+     be parsed. Nothing below runs unless the demo is actually answering. */
+  function demoTpls() {
+    if (DEMO_TPLS) return DEMO_TPLS;
+    DEMO_TPLS = [];
+    Object.keys(EVENT_TYPES).forEach(function (type) {
+      _demoTplAdd(type, typeLabel(type) + ' — standard SOP',
+        (TEMPLATE_META[type] || {}).desc || 'Custom event type.');
+    });
+    _demoTplAdd('led', 'LED — one-day turn',
+      'Same-week single-match build: the client, gear and deliverables lanes only, everything pulled in tight.',
+      { client: (TEMPLATE_STEPS.led.client || []).slice(0, 2),
+        gear: TEMPLATE_STEPS.led.gear || [],
+        deliverables: (TEMPLATE_STEPS.led.deliverables || []).slice(0, 2) });
+    return DEMO_TPLS;
+  }
+
+  function _demoTplById(id) {
+    if (id == null || id === '') return null;
+    var n = Number(id);
+    var all = demoTpls();
+    for (var i = 0; i < all.length; i++) if (all[i].id === n) return all[i];
+    return null;
+  }
+  /* the type's STANDARD — lowest id, the demo twin of standardTemplateId */
+  function _demoStandardTpl(type) {
+    var hit = null;
+    demoTpls().forEach(function (t) {
+      if (t.event_type === type && (!hit || t.id < hit.id)) hit = t;
+    });
+    return hit;
+  }
+  /* shapeTpl reads `standard` off the row; the demo computes it per read so a
+     delete that promotes the next-oldest re-chips without a reload */
+  function _demoTplShape(row) {
+    var std = _demoStandardTpl(row.event_type);
+    var copy = {}; Object.keys(row).forEach(function (k) { copy[k] = row[k]; });
+    copy.standard = !!std && std.id === row.id;
+    return shapeTpl(row.event_type, copy, null);
+  }
+  function _demoTplOrder(a, b) {
+    return String(a.event_type).localeCompare(String(b.event_type)) ||
+           String(a.name).localeCompare(String(b.name)) || a.id - b.id;
   }
 
   /* the composite reads. getShow() is ONE seam call and nine parallel GETs:
@@ -1898,38 +1986,53 @@ var api = (function () {
        and the server serves template ROWS (flat `steps` array, `title` /
        `owner_role` / `due_offset_days` / `depends_on_title` / `auto_source`)
        plus a separate lane+type catalogue at GET /api/event-types. shapeTpl()
-       below is the whole adapter; the template EDITOR is unchanged. */
+       above is the whole adapter, and the demo's own library is built in that
+       same server shape so both modes reach the screen through it. */
+    /* EVERY template of every type — the library read. This used to collapse
+       the server's rows to the OLDEST per type, which is precisely what made
+       a second named template unreachable: the screen could not list it and no
+       picker could offer it. The collapse rule survives as a MARK (`standard`)
+       instead of a filter. A type with no templates contributes no card; the
+       library asks listEventTypes() for the group headings. */
     listTemplates: function () {
       if (!API()) {
-        return ok(Object.keys(EVENT_TYPES).map(function (type) {
-          return { event_type: type, def: typeDef(type),
-                   steps: TEMPLATE_STEPS[type] || {}, meta: TEMPLATE_META[type] || { desc: 'Custom event type.' } };
-        }));
+        return ok(demoTpls().slice().sort(_demoTplOrder).map(_demoTplShape));
       }
       return Promise.all([SR.get('/api/templates'), eventTypes()]).then(function (r) {
-        var byType = {};
-        /* the OLDEST row per type — the SAME pick rule the server's seeding
-           uses (ORDER BY id LIMIT 1), so the card, the editor and what a new
-           show actually seeds from can never be three different templates */
-        (r[0] || []).forEach(function (t) {
-          var cur = byType[t.event_type];
-          if (!cur || (Number(t.id) || 0) < (Number(cur.id) || 0)) byType[t.event_type] = t;
-        });
-        var keys = Object.keys(byType);
-        (r[1].types || []).forEach(function (t) { if (keys.indexOf(t.key) < 0) keys.push(t.key); });
-        return keys.map(function (type) { return shapeTpl(type, byType[type], r[1]); });
+        return (r[0] || []).map(function (t) { return shapeTpl(t.event_type, t, r[1]); });
       });
     },
-    getTemplate: function (type) {
+    /* the type catalogue on its own — the New-template dialog has to offer a
+       type that owns NO template yet, which a list of templates cannot name */
+    listEventTypes: function () {
       if (!API()) {
-        return ok({ event_type: type, def: typeDef(type),
-                    steps: TEMPLATE_STEPS[type] || {}, meta: TEMPLATE_META[type] || { desc: 'Custom event type.' } });
+        return ok(Object.keys(EVENT_TYPES).map(function (k) {
+          var t = typeDef(k);
+          return { key: k, label: t.label, tag: t.tag, icon: t.icon, anchor: t.anchor, lanes: t.lanes };
+        }));
+      }
+      return eventTypes().then(function (c) {
+        return ((c && c.types) || []).map(function (t) {
+          return { key: t.key, label: t.label, tag: t.tag, icon: t.icon, anchor: t.anchor,
+                   lanes: t.lane_defs || [] };
+        });
+      });
+    },
+    /* by TYPE it answers that type's STANDARD; by id, that exact template.
+       Machines and non-interactive callers ask by type. */
+    getTemplate: function (key) {
+      if (!API()) {
+        var row = _demoTplById(key) || _demoStandardTpl(key);
+        return ok(row ? _demoTplShape(row)
+          : shapeTpl(EVENT_TYPES[key] ? key : 'led', null, null));
       }
       /* the route takes a type OR a numeric id (deviation 2) */
       return Promise.all([
-        SR.get('/api/templates/' + encodeURIComponent(type)).then(null, function () { return null; }),
+        SR.get('/api/templates/' + encodeURIComponent(key)).then(null, function () { return null; }),
         eventTypes()
-      ]).then(function (r) { return shapeTpl(type, r[0], r[1]); });
+      ]).then(function (r) {
+        return shapeTpl((r[0] && r[0].event_type) || key, r[0], r[1]);
+      });
     },
 
     /* ---- push to scheduler --------------------------------------------- */
@@ -4432,7 +4535,7 @@ var api = (function () {
            seed identically, so call it. A brand-new show has no steps, which
            makes the idempotency rule a no-op here and the counts unchanged. */
         var instantiated = b.seed_template === false
-          ? 0 : _seedLocalPipeline(show, type).inserted;
+          ? 0 : _seedLocalPipeline(show, type, b.template_id).inserted;
         if (b.scope && b.scope.kind) _applyScopeLocal(show, b.scope);
         show.activity.unshift(mkAct(ME, 'opened the event',
           name + ' · ' + type + (show.venue ? ' · ' + show.venue : '') +
@@ -5442,7 +5545,8 @@ var api = (function () {
         var show = _mkLocalShow(p, body, sid);
         p.shows.push(show);
         ALL_SHOWS.push(show); SHOWS_BY_ID[sid] = show;
-        var seeded = body.seed_template === false ? 0 : _seedLocalPipeline(show, p.type).inserted;
+        var seeded = body.seed_template === false
+          ? 0 : _seedLocalPipeline(show, p.type, body.template_id).inserted;
         show.activity.unshift(mkAct(ME, 'show.create',
           name + (seeded ? ' (+' + seeded + ' steps)' : ''), 0, _nowHM(), true));
         show.instantiated_steps = seeded;
@@ -5456,14 +5560,15 @@ var api = (function () {
     /* ---- seed the pipeline on a show that already exists ------------------ */
     /* POST /shows/:id/instantiate-template predates the audit; nothing called
        it, and the empty Pipeline tab's advice pointed at a season button that
-       was itself a toast. The demo twin seeds from the local template config —
-       it has no template rows, only shapes — which is the same honest stand-in
-       createEvent's twin takes. */
+       was itself a toast. `templateId` is the LIBRARY's answer — the Seed
+       pipeline door resolves it (directly when the type owns one template, via
+       the picker when it owns several) and passes it through; a null falls back
+       to the type's standard, demo-side and server-side alike. */
     instantiateTemplate: function (showId, templateId) {
       if (!API()) {
         var s = SHOWS_BY_ID[Number(showId)];
         if (!s) return fail('show ' + showId + ' not found');
-        var r = _seedLocalPipeline(s, s.type || 'led');
+        var r = _seedLocalPipeline(s, s.type || 'led', templateId);
         if (r.inserted) {
           s.activity.unshift(mkAct(ME, 'template.instantiate',
             r.inserted + ' steps seeded' + (r.skipped ? ' (' + r.skipped + ' skipped)' : ''),
@@ -5646,7 +5751,7 @@ var api = (function () {
     /*   E8   review page    listProposals                  — above, reshaped  */
     /*   27   file rename    PUT /files/:id     -> updateFile                  */
     /*   A5   templates      PUT/DELETE (new)   -> update/deleteTemplate,      */
-    /*                       POST (existed)     -> createTemplateVersion       */
+    /*                       POST (existed)     -> createTemplate             */
     /*   36   NAS card       GET /api/health    -> health                      */
     /* ==================================================================== */
 
@@ -5670,35 +5775,58 @@ var api = (function () {
       return SR.put('/api/files/' + Number(id), patch).then(A.file);
     },
 
-    /* ---- A5. the SOP is writable — the template editor's three writes ---- */
-    /* The editor loads GET /templates/:type — the type's OLDEST template,
-       which is the one createEvent and Seed-pipeline seed from. So Save is a
-       PUT on that row: "every show seeded from this template inherits the
-       change", exactly as the editor's hint always claimed. POST banks a
-       snapshot copy (visible in the versions list, deletable, never the one
-       that seeds unless the live one is deleted); DELETE removes a version.
-       The demo twin rewrites TEMPLATE_STEPS so the grid re-renders what was
-       saved; versions are a server fact and the demo says so. */
-    listTemplateVersions: function (type) {
-      if (!API()) return ok([]);
-      return SR.get('/api/templates' + SR.qs({ event_type: type })).then(function (rows) {
-        return (rows || []).map(function (t) {
-          return { id: t.id, name: t.name, description: t.description || '',
-                   event_type: t.event_type, created_at: t.created_at,
-                   steps: (t.steps || []).length };
-        }).sort(function (a, b) { return a.id - b.id; });
-      });
-    },
+    /* ---- the template LIBRARY's writes — create / rename / save / delete -- */
+    /* The editor addresses ONE template by id now, not "the type's live SOP",
+       so Save is a PUT on that row and nothing else moves. createTemplate is
+       the New-template door: blank, or `copy_from` to DUPLICATE an existing
+       one — the server copies the step rows so the copy is independent, which
+       is the whole reason to have two. The demo twin keeps a real library in
+       DEMO_TPLS and does the same copy by value; nothing here is a stand-in
+       any more. */
     updateTemplate: function (id, body) {
-      if (!API()) return _saveLocalTemplate(body);
-      return SR.put('/api/templates/' + Number(id), body || {});
+      body = body || {};
+      if (!API()) {
+        var row = _demoTplById(id);
+        if (!row) return fail('template ' + id + ' not found');
+        if (body.name !== undefined && String(body.name).trim()) row.name = String(body.name).trim();
+        if (body.description !== undefined) row.description = String(body.description || '');
+        if (body.steps !== undefined) row.steps = _demoStepsIn(body.steps, row.event_type);
+        return ok(_demoTplShape(row));
+      }
+      return SR.put('/api/templates/' + Number(id), body);
     },
-    createTemplateVersion: function (body) {
-      if (!API()) return _saveLocalTemplate(body);
-      return SR.post('/api/templates', body || {});
+    createTemplate: function (body) {
+      body = body || {};
+      var name = String(body.name || '').trim();
+      if (!name) return fail('a template needs a name');
+      if (!API()) {
+        var src = _demoTplById(body.copy_from);
+        var type = src ? src.event_type : body.event_type;
+        if (!EVENT_TYPES[type]) return fail('unknown event type "' + type + '"');
+        var row = { id: ++DEMO_TPL_SEQ, name: name, event_type: type,
+          description: String(body.description !== undefined ? body.description
+            : (src ? src.description : '') || ''),
+          source_key: null, created_at: new Date().toISOString(), steps: [] };
+        /* BY VALUE. A duplicate that shared its source's rows would rewrite the
+           original on the first edit — the same rule the server's copy keeps. */
+        if (body.steps !== undefined) row.steps = _demoStepsIn(body.steps, type);
+        else if (src) row.steps = _demoStepsIn(src.steps, type);
+        demoTpls().push(row);
+        return ok(_demoTplShape(row));
+      }
+      return SR.post('/api/templates', body);
     },
     deleteTemplate: function (id) {
-      if (!API()) return fail('template versions live on the server — the demo has only its built-in config');
+      if (!API()) {
+        var n = Number(id);
+        var hit = _demoTplById(n);
+        if (!hit) return fail('template ' + id + ' not found');
+        var all = demoTpls();
+        for (var i = all.length - 1; i >= 0; i--) {
+          if (all[i].id === n) all.splice(i, 1);
+        }
+        return ok({ ok: true, id: n, event_type: hit.event_type });
+      }
       return SR.del('/api/templates/' + Number(id));
     },
 
@@ -5804,25 +5932,29 @@ var api = (function () {
      duplicated; hand-added tasks are never touched, only counted as occupied
      titles. Returns { inserted, skipped } so the toast reads identically in
      both modes. */
-  function _seedLocalPipeline(show, type) {
-    var tpl = TEMPLATE_STEPS[type] || {};
+  /* `templateId` names ONE template from the library; without it the type's
+     STANDARD seeds — the same two-tier rule the server keeps, so a picker's
+     choice lands here and an agent's silence lands the standard. A type whose
+     library is empty seeds nothing, which every caller already survives. */
+  function _seedLocalPipeline(show, type, templateId) {
+    var tpl = _demoTplById(templateId) || _demoStandardTpl(type);
+    var allowed = typeDef(type).lanes.map(function (l) { return l.key; });
     var evt = show.event_date ? new Date(show.event_date + 'T00:00:00') : null;
     var key = function (s) { return String(s == null ? '' : s).trim().toLowerCase(); };
     /* prototype-free: a step titled "constructor" must not read as a duplicate */
     var seen = Object.create(null);
     (show.steps || []).forEach(function (s) { seen[key(s.title)] = true; });
     var inserted = 0, skipped = 0;
-    typeDef(type).lanes.forEach(function (lane) {
-      (tpl[lane.key] || []).forEach(function (t) {
-        if (seen[key(t.name)]) { skipped++; return; }
-        seen[key(t.name)] = true;
-        var st = mkStep(lane.key, t.name, 'todo', null, -Math.abs(t.off));
-        st.show_id = show.id; st.sort_order = show.steps.length;
-        st.due_date = evt ? isoDate(addDays(evt, st.due_offset_days)) : '';
-        delete st._dep_title;
-        show.steps.push(st); STEPS_BY_ID[st.id] = st;
-        inserted++;
-      });
+    ((tpl && tpl.steps) || []).forEach(function (t) {
+      if (allowed.indexOf(t.lane) < 0) return;
+      if (seen[key(t.title)]) { skipped++; return; }
+      seen[key(t.title)] = true;
+      var st = mkStep(t.lane, t.title, 'todo', null, -Math.abs(Number(t.due_offset_days) || 0));
+      st.show_id = show.id; st.sort_order = show.steps.length;
+      st.due_date = evt ? isoDate(addDays(evt, st.due_offset_days)) : '';
+      delete st._dep_title;
+      show.steps.push(st); STEPS_BY_ID[st.id] = st;
+      inserted++;
     });
     return { inserted: inserted, skipped: skipped };
   }
@@ -5858,26 +5990,25 @@ var api = (function () {
      same oneOf rule: an unknown kind keeps the current one, never errors */
   var _FILE_KINDS = ['spec', 'proof', 'contract', 'confirmation', 'recording', 'other',
                      'receipt', 'invoice', 'po', 'transcript', 'photo', 'report'];
-  /* the template editor's demo twin: rebuild TEMPLATE_STEPS[type] from the
-     grid the person just saved, so the re-render shows exactly what was kept.
-     Sign flip on purpose: the store's `off` is positive-means-T-minus and the
-     wire's due_offset_days is negative-means-before. */
-  function _saveLocalTemplate(body) {
-    body = body || {};
-    var type = body.event_type;
-    if (!EVENT_TYPES[type]) return fail('unknown event type "' + type + '"');
-    var byLane = {};
-    (body.steps || []).forEach(function (s) {
-      if (!s || !s.title || !s.lane) return;
-      (byLane[s.lane] = byLane[s.lane] || []).push({
-        name: String(s.title), role: s.owner_role || '',
-        off: -(Number(s.due_offset_days) || 0),
-        flag: s.depends_on_title ? 'dep'
-            : (s.auto_source && s.auto_source !== 'none' ? 'auto' : '')
-      });
+  /* the template library's demo twin of the server's row writer: normalize a
+     posted grid (or a source template's rows) into fresh, INDEPENDENT step
+     records. A lane the type does not declare is SKIPPED, not an error — the
+     same stance POST/PUT /templates take, and the same stance the seeder takes
+     when reading. Every row is rebuilt field by field: handing back the caller's
+     own objects would alias a duplicate to its source. */
+  function _demoStepsIn(rows, type) {
+    var allowed = typeDef(type).lanes.map(function (l) { return l.key; });
+    var out = [];
+    (rows || []).forEach(function (s) {
+      if (!s || !s.title || allowed.indexOf(s.lane) < 0) return;
+      out.push({ lane: s.lane, title: String(s.title), owner_role: s.owner_role || null,
+        due_offset_days: Number(s.due_offset_days) || 0,
+        evidence_type: s.evidence_type || 'none',
+        auto_source: s.auto_source || 'none',
+        depends_on_title: s.depends_on_title || '',
+        sort_order: s.sort_order != null ? Number(s.sort_order) : out.length });
     });
-    TEMPLATE_STEPS[type] = byLane;
-    return ok({ event_type: type, name: body.name || null, demo: true });
+    return out;
   }
 
   /* find a milestone by id across the local store — small data, honest scan */

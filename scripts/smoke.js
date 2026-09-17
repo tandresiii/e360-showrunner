@@ -6048,6 +6048,127 @@ const DEL = (p, o) => call('DELETE', p, o);
      (await GET('/api/templates/led', { token: A })).body.id === seededLed);
 
   // ══════════════════════════════════════════════════════════════════════════
+  section('18a. a type owns a LIBRARY of named templates, and the chosen one seeds');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom, 2026-09-17: "we should be able to have many templates for many job
+  // types. And when we seed them — we can decide which template we want."
+  //
+  // Every seed point used to hardcode "oldest row of this type wins", so a
+  // second template could be created and never again reached. That rule now
+  // survives ONLY as the MACHINE answer (the STANDARD, for agents and any
+  // caller that names no template); every caller that DOES name one must get
+  // exactly that one. These are the two gates that say so.
+  const libA = await POST('/api/templates', {
+    name: TAG + ' led — one-day turn', event_type: 'led',
+    description: 'the second template of a type — what the old screen could not reach',
+    steps: [{ lane: 'gear', title: TAG + ' LIB one-day prep', due_offset_days: -2 },
+            { lane: 'crew', title: TAG + ' LIB one-day crew call', due_offset_days: -1 }]
+  }, { token: MGRT });
+  ok('18a a manager creates a SECOND named led template',
+     libA.status === 200 && libA.body.id > 0 && libA.body.id !== seededLed, libA.body);
+  ok('18a POST answers its rows back, so a duplicate can be counted without a second read',
+     (libA.body.steps || []).length === 2, libA.body.steps);
+  const libList = (await GET('/api/templates?event_type=led', { token: A })).body || [];
+  ok('18a GET /templates lists BOTH — the library is not collapsed to one per type',
+     libList.filter((t) => t.id === seededLed || t.id === libA.body.id).length === 2,
+     libList.map((t) => t.id));
+  ok('18a ...and marks exactly the OLDEST of the type as `standard`',
+     libList.filter((t) => t.standard).length === 1 &&
+     libList.find((t) => t.standard).id === seededLed,
+     libList.filter((t) => t.standard).map((t) => t.id));
+  ok('18a GET /templates/:type still answers the STANDARD — the machine contract holds',
+     (await GET('/api/templates/led', { token: A })).body.id === seededLed);
+  ok('18a ...and GET /templates/:id answers THAT template',
+     (await GET(`/api/templates/${libA.body.id}`, { token: A })).body.id === libA.body.id);
+
+  // (a) seeding WITH an explicit template_id lands ITS steps, not the oldest's
+  const libShow = await POST('/api/shows', {
+    project_id: P, name: TAG + ' Library pick', venue: 'x', event_date: '2026-11-20',
+    seed_template: false
+  }, { token: A });
+  const LIBS = libShow.body.id;
+  const libSeed = await POST(`/api/shows/${LIBS}/instantiate-template`,
+    { template_id: libA.body.id }, { token: A });
+  ok('18a seeding with an explicit template_id lands that template',
+     libSeed.status === 200 && libSeed.body.instantiated_steps === 2, libSeed.body);
+  const libTitles = (await pool.query(
+    'SELECT title FROM steps WHERE show_id=$1 ORDER BY sort_order', [LIBS])).rows.map((r) => r.title);
+  ok('18a ...ITS OWN titles — not one row of the type\'s standard came along',
+     libTitles.length === 2 && libTitles.every((t) => /LIB one-day/.test(t)), libTitles);
+
+  // (b) DUPLICATE copies the step ROWS — the copy is independent, forever
+  const libDup = await POST('/api/templates',
+    { name: TAG + ' led — duplicate', copy_from: libA.body.id }, { token: MGRT });
+  ok('18a copy_from duplicates a template, inheriting its source\'s event type',
+     libDup.status === 200 && libDup.body.event_type === 'led'
+     && libDup.body.id !== libA.body.id, libDup.body);
+  ok('18a ...with a COPY of every step row',
+     (libDup.body.steps || []).map((s) => s.title).sort().join('|') ===
+     [TAG + ' LIB one-day crew call', TAG + ' LIB one-day prep'].sort().join('|'),
+     libDup.body.steps);
+  const libRows = (await pool.query(
+    'SELECT id, template_id FROM template_steps WHERE template_id IN ($1,$2)',
+    [libA.body.id, libDup.body.id])).rows;
+  ok('18a ...its OWN rows — four rows across the two templates, no row id shared',
+     libRows.length === 4 && new Set(libRows.map((r) => r.id)).size === 4
+     && libRows.filter((r) => r.template_id === libDup.body.id).length === 2, libRows.length);
+  await PUT(`/api/templates/${libDup.body.id}`, {
+    steps: [{ lane: 'gear', title: TAG + ' DUP edited only here', due_offset_days: -3 }]
+  }, { token: MGRT });
+  const libSrcAfter = (await pool.query(
+    'SELECT title FROM template_steps WHERE template_id=$1 ORDER BY sort_order',
+    [libA.body.id])).rows.map((r) => r.title);
+  ok('18a ...and editing the COPY never reaches back into the original',
+     libSrcAfter.length === 2 && libSrcAfter.every((t) => /LIB one-day/.test(t)), libSrcAfter);
+  ok('18a a duplicate cannot be retyped — the lane set belongs to the TYPE',
+     (await POST('/api/templates',
+       { name: TAG + ' bad dup', copy_from: libA.body.id, event_type: 'print' },
+       { token: MGRT })).status === 400);
+  ok('18a copy_from naming nothing is a 404, not a silent blank template',
+     (await POST('/api/templates', { name: TAG + ' ghost dup', copy_from: 99999999 },
+       { token: MGRT })).status === 404);
+
+  // (c) the composite: New Event honours a passed template_id, and "None" seeds 0
+  const libEv = await POST('/api/events', {
+    name: TAG + ' Library event', type: 'led', event_date: '2026-11-25',
+    template_id: libA.body.id
+  }, { token: A });
+  ok('18a POST /api/events with a chosen template_id seeds THAT template',
+     libEv.status === 200 && libEv.body.instantiated_steps === 2, libEv.body.instantiated_steps);
+  const libEvTitles = (await pool.query('SELECT title FROM steps WHERE show_id=$1',
+    [libEv.body.show.id])).rows.map((r) => r.title);
+  ok('18a ...by title, so a fallback to the oldest cannot hide behind a count',
+     libEvTitles.length === 2 && libEvTitles.every((t) => /LIB one-day/.test(t)), libEvTitles);
+  const libEvNone = await POST('/api/events', {
+    name: TAG + ' Empty event', type: 'led', event_date: '2026-11-26', seed_template: false
+  }, { token: A });
+  ok('18a "None — start empty" opens the event with ZERO steps',
+     libEvNone.body.instantiated_steps === 0 &&
+     (await pool.query('SELECT COUNT(*)::int AS n FROM steps WHERE show_id=$1',
+       [libEvNone.body.show.id])).rows[0].n === 0, libEvNone.body.instantiated_steps);
+  const libEvStd = await POST('/api/events', {
+    name: TAG + ' Standard event', type: 'led', event_date: '2026-11-27'
+  }, { token: A });
+  ok('18a naming NO template still seeds the type\'s standard — agents are untouched',
+     libEvStd.body.instantiated_steps > 2, libEvStd.body.instantiated_steps);
+
+  // deleting the standard promotes the next-oldest; deleting the last is allowed
+  ok('18a deleting a non-standard template leaves the standard alone',
+     (await DEL(`/api/templates/${libDup.body.id}`, { token: MGRT })).status === 200 &&
+     (await GET('/api/templates/led', { token: A })).body.id === seededLed);
+  await DEL(`/api/templates/${libA.body.id}`, { token: MGRT });
+  ok('18a ...and its rows leave with it',
+     (await pool.query('SELECT COUNT(*)::int AS n FROM template_steps WHERE template_id=$1',
+       [libA.body.id])).rows[0].n === 0);
+  ok('18a shows seeded from a deleted template KEEP their steps — instantiation copies',
+     (await pool.query('SELECT COUNT(*)::int AS n FROM steps WHERE show_id=$1',
+       [LIBS])).rows[0].n === 2);
+  // this section's three folders go with the run, not with the cleanup gate
+  for (const ev of [libEv, libEvNone, libEvStd]) {
+    await DEL(`/api/projects/${ev.body.project.id}`, { token: A });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   section('18b. seeding is IDEMPOTENT BY STEP TITLE — the seed door stays open');
   // ══════════════════════════════════════════════════════════════════════════
   // The defect: the Pipeline tab only offered "Seed pipeline" on a pipeline

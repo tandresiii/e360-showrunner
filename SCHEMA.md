@@ -820,7 +820,12 @@ Shows       GET /api/shows · GET /api/shows/:id · POST /api/shows · PUT/DELET
 Steps       GET /api/steps · GET /api/steps/:id · GET /api/my-steps · POST /api/steps
             PUT /api/steps/:id · /assign · /status · DELETE /api/steps/:id
 Templates   GET /api/templates · GET /api/templates/:idOrType · GET /api/event-types
-            POST /api/templates · POST /api/shows/:id/instantiate-template
+            POST /api/templates (`copy_from` DUPLICATES a template's step rows)
+            PUT/DELETE /api/templates/:id · POST /api/shows/:id/instantiate-template
+            (a type owns a LIBRARY of named templates. GET by :type answers the
+             type's STANDARD — oldest by id — which is what every NON-interactive
+             caller seeds: agent proposal confirms, and POST /api/events with no
+             template_id. Humans pick by id at every seed door.)
 Files       GET /api/files · GET /api/files/:id · POST /api/files
             PUT /api/files/:id · DELETE /api/files/:id
             (all three WRITE routes read the SAME sentence — pm+ on the folder,
@@ -1082,7 +1087,12 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | `flexUnlink(sid)` | `DELETE /api/shows/:id/flex/element` |
 | `flexGearLists(sid)` | `GET /api/shows/:id/flex/gear-lists` — one tree call; `type` comes back **null** because the tree cannot tell a pull sheet from a manifest |
 | `flexPullSheet(sid, listId)` | `GET /api/shows/:id/flex/pull-sheet?listId=` — header + row-data, normalized; `listId` is verified against the folder's tree first |
-| `listTemplates` / `getTemplate(type)` | `GET /api/templates` / `GET /api/templates/:type` |
+| `listTemplates()` | `GET /api/templates` — the whole library, every named template of every type, each marked `standard` for its type |
+| `listEventTypes()` | `GET /api/event-types` — the type catalogue, so a type owning NO template still gets a group and a New door |
+| `getTemplate(typeOrId)` | `GET /api/templates/:key` — a type answers its **standard**; an id answers that template |
+| `createTemplate({name, event_type, description, copy_from?})` | `POST /api/templates` — `copy_from` duplicates the source's step rows |
+| `updateTemplate(id, {name?, description?, steps?})` | `PUT /api/templates/:id` |
+| `deleteTemplate(id)` | `DELETE /api/templates/:id` |
 | `pushToScheduler(sid, {live, force, mode})` | `POST /api/shows/:id/push-to-scheduler` |
 | `listSchedulerEvents()` | `GET /api/scheduler/events` |
 | `linkSchedulerEvent(sid, eventId)` | `POST /api/shows/:id/scheduler-link` |

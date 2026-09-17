@@ -48,6 +48,9 @@
 >   and mutation-tested (floor lowered to pm → four smoke reds). Fidelity
 >   note: the reshape now carries `evidence_type`/`auto_source`/`depends_on`
 >   through the editor so a Save cannot strip the flex automation off a type.
+>   **Superseded 2026-09-17** by the template LIBRARY (below): a type owns many
+>   NAMED templates, the editor addresses one by id, and the live-SOP/banked
+>   framing this bullet describes is gone from the page.
 > * **A12 · global search** — the decorative topbar input is a real
 >   client-side filter over loaded folders/shows/jobs/files (name, venue,
 >   city, client, QB number), grouped dropdown, Enter opens the first hit.
