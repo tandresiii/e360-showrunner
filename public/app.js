@@ -281,10 +281,16 @@ async function renderView(view, arg) {
        ledger is an admin route, so everyone else's Settings never even asks */
     var backups = CURRENT_USER.role === 'admin'
       ? await api.listBackups().catch(function () { return null; }) : null;
+    /* the unattended-access card — admin-only and asked for, never assumed.
+       Tony Tran's condition for the 2026-09-18 transcript grant was an audit
+       log; this is where an admin reads it without a database client. */
+    var graphAudit = CURRENT_USER.role === 'admin'
+      ? await api.graphAudit({ limit: 12 }).catch(function () { return null; }) : null;
     s.innerHTML = viewSettings({ fin: fov.stats, pur: pov.stats, jobs: fov.jobs,
                                  notifyPrefs: np && np.prefs, mail: ms,
                                  archivedCount: arch.length, keys: myKeys,
-                                 health: health, backups: backups });
+                                 health: health, backups: backups,
+                                 graphAudit: graphAudit });
     crumb([{ t: 'Settings' }]);
     applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark');
   }
@@ -3982,6 +3988,35 @@ async function backupNowAct() {
     toast('Backup landed and verified', fmtBytes(r.bytes) + ' → ' + String(r.path || '').split('\\').pop());
   } else {
     toast('Backup FAILED', String((r && r.error) || 'no ledger row came back'), 'err');
+  }
+  return render('settings');
+}
+
+/* Sweep now — THE MANUAL DOOR beside the GRAPH_SWEEP_MINUTES timer. Every
+   timer capability in this app has a wired human twin, and an unattended reader
+   needs one most of all: it is how the sweep gets demonstrated to the IT admin
+   who granted the access, tested on wiring day, and rescued mid-show. The
+   server runs the whole pipeline (token → list per user → content → match →
+   file or propose) and answers with the SWEEP LEDGER ROW whatever the verdict,
+   so the toast tells the truth the row tells. Unconfigured is a 501 with the
+   variable names in it, never a hollow green. */
+async function transcriptSweepNowAct() {
+  toast('Sweeping transcripts…', 'app-only Graph → match → file or propose · every call is audited');
+  var r;
+  try { r = await api.runTranscriptSweep(); }
+  catch (e) { toast('Sweep refused', String(e && e.message || e), 'err'); return; }
+  if (r && r.status === 'ok') {
+    var bits = [];
+    if (r.filed) bits.push(r.filed + ' filed');
+    if (r.proposed) bits.push(r.proposed + ' proposed');
+    if (r.skipped) bits.push(r.skipped + ' already had');
+    if (r.user_errors) bits.push(r.user_errors + ' user error(s)');
+    toast(r.transcripts ? 'Swept ' + r.transcripts + ' transcript' + (r.transcripts === 1 ? '' : 's')
+                        : 'Swept — nothing new',
+          bits.length ? bits.join(' · ') : 'no transcripts in the window');
+  } else {
+    toast('Sweep ' + String((r && r.status) || 'failed'),
+          String((r && r.error) || 'no ledger row came back'), 'err');
   }
   return render('settings');
 }
@@ -8022,6 +8057,7 @@ var ACTIONS = {
   openOutbox:    function () { return render('outbox'); },
   runSweep:      function () { return runSweepAct(); },
   backupNow:     function () { return backupNowAct(); },
+  transcriptSweepNow: function () { return transcriptSweepNowAct(); },
   /* the morning digest — the Today panel and its admin trigger */
   goToday:       function () { return render('today'); },
   goSettings:    function () { return render('settings'); },

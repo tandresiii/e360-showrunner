@@ -191,6 +191,15 @@ async function main() {
   delete process.env.DROPBOX_REFRESH_TOKEN;
   delete process.env.DROPBOX_API_BASE;
   delete process.env.DROPBOX_CONTENT_BASE;
+  // §51 walks the UNATTENDED transcript reader in its shipped posture — DARK —
+  // and the stakes make the same hygiene mandatory: these three are a
+  // tenant-wide, app-only grant, and a developer machine that carries them must
+  // never have this walk reach into the real tenant.
+  delete process.env.GRAPH_TENANT_ID;
+  delete process.env.GRAPH_CLIENT_ID;
+  delete process.env.GRAPH_CLIENT_SECRET;
+  delete process.env.GRAPH_LOGIN_BASE;
+  delete process.env.GRAPH_API_BASE;
   process.env.ADMIN_PASSWORD = 'walk-admin-pw';
 
   const srv = require(path.join(APP, 'server.js'));
@@ -4024,6 +4033,66 @@ async function main() {
      /write: function \(h, replace\)[\s\S]{0,400}location\.hash = h;/.test(APP_JS));
   ok('SCHEMA.md carries the frontend route table',
      /### Frontend routes \(the hash\)/.test(fs.readFileSync(path.join(APP, 'SCHEMA.md'), 'utf8')));
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('51 · unattended transcripts — the human door, and the dark card  (Tony Tran, 9/18)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // E360's IT admin granted tenant API access for Teams transcripts and
+  // approved UNATTENDED app-only pulls on one condition: "keep an audit log if
+  // we could." Two things belong in a persona walk rather than in the smoke
+  // suite, and this is them.
+  //
+  // FIRST, THE MANUAL-DOOR LAW (Tom, 9/16, standing): "there shouldnt be
+  // anything that cant also be done manually." A reader that only a clock can
+  // start is one nobody can demonstrate to the admin who granted it, test on
+  // wiring day, or rescue at 4pm on a show day. So the GRAPH_SWEEP_MINUTES
+  // timer's human twin is walked here the way §48 walks the digest drain: the
+  // REAL public/api.js seam the button fires, executed against the real server.
+  //
+  // SECOND, THE DARK CARD. The feature ships with no credentials, and a card
+  // that renders an empty table in that state teaches the wrong thing —
+  // "nothing has happened" and "nothing is configured" are different answers.
+  {
+    reach('Sweep now — the timer\'s human twin (the manual-door law)',
+      { seam: ['runTranscriptSweep', 'graphAudit'], action: 'transcriptSweepNow' });
+
+    tab.SR.setToken(T.tom);                                  // admin, like the card
+    const wgAudit = await tab.api.graphAudit({ limit: 5 })
+      .then((r) => r, (e) => ({ error: String(e) }));
+    ok('the REAL api.graphAudit() executes as admin — the audit log READS while dark, which is ' +
+       'the whole point of an audit you can check after the fact',
+       wgAudit && !wgAudit.error && Array.isArray(wgAudit.rows) && wgAudit.total === 0 &&
+       wgAudit.config && wgAudit.config.configured === false, wgAudit);
+    ok('…and it names WHICH variables are missing, so the card can say "not configured" instead ' +
+       'of rendering an empty table that looks like "nothing happened"',
+       (wgAudit.config.missing || []).length === 3, wgAudit.config);
+    const wgSweep = await tab.api.runTranscriptSweep()
+      .then((r) => ({ ok: true, r }), (e) => ({ ok: false, msg: String(e && e.message || e) }));
+    ok('the REAL api.runTranscriptSweep() — the button\'s exact call — is REFUSED while dark, ' +
+       'naming the three variables. Never a hollow green over a sweep that never happened',
+       wgSweep.ok === false && /GRAPH_TENANT_ID/.test(wgSweep.msg) &&
+       /GRAPH_CLIENT_SECRET/.test(wgSweep.msg), wgSweep);
+    const wgHealth = await GET('/api/health');
+    ok('…and /api/health\'s `graph` block agrees, in the house\'s config-presence wording',
+       wgHealth.body.graph && wgHealth.body.graph.configured === false &&
+       /NOT a login test/.test(wgHealth.body.graph.configuredMeans) &&
+       wgHealth.body.graph.stale === false, wgHealth.body.graph);
+
+    const vg51 = SRC['views-global.js'];
+    ok('the Settings card is admin-gated like the two endpoints it drives',
+       /role === 'admin' \? card\('lock', 'Unattended access — audit log'/.test(vg51));
+    ok('…it carries TRAN\'S CONDITION on its face, not buried in a commit message',
+       /keep an audit log if we could/.test(vg51) && /2026-09-18/.test(vg51));
+    ok('…it says transcripts are INTERNAL, so nobody has to guess whether a meeting can reach a client',
+       /client-recap firewall can never read one/.test(vg51));
+    ok('…the Sweep-now button is DISABLED while dark and its tooltip names what to set — the ' +
+       'house rule: grey out a button instead of offering a 501',
+       /g\.configured \? '' : ' disabled'/.test(vg51) &&
+       /The manual door is wired, but there is nothing to read/.test(vg51));
+    ok('…and the demo twin answers a MODELED ledger that says so, rather than a fictional tenant',
+       /modeled — demo ledger, no tenant was read/.test(vg51) &&
+       /demo: true[\s\S]{0,900}sw-modeled/.test(API_JS));
+  }
 
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);

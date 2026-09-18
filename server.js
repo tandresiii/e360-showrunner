@@ -249,7 +249,15 @@ app.get('/api/health', async (req, res) => {
                // or a credential. `stale` is the silently-rotting detector —
                // enabled with no verified landing in 26h. An ADDITIVE key, so
                // other health blocks can land beside it without a merge fight.
-               backup: await require('./lib/backup').healthBlock() });
+               backup: await require('./lib/backup').healthBlock(),
+               // The standing M365 agent layer's first piece: the unattended
+               // transcript reader. ADDITIVE, and in the same doctrine as the
+               // scheduler and dropbox blocks above — PRESENCE booleans read
+               // from env, never a value, plus the last MEASURED sweep and the
+               // audit-row count that proves Tony Tran's condition is being
+               // kept. `configured` is config; the first live sweep is the
+               // measurement, and `stale` is the silently-stopped detector.
+               graph: await require('./lib/transcripts').healthBlock() });
   } catch (e) {
     res.status(503).json({ ok: false, error: e.message });
   }
@@ -433,6 +441,16 @@ async function boot() {
   const digestLib = require('./lib/digest');
   const digestNextAt = digestLib.armDigestTimer();
 
+  // The unattended transcript reader. Same self-rearming chain, same honesty:
+  // the timer ALWAYS arms, and whether a firing actually sweeps is gated at fire
+  // time (GRAPH_SWEEP_ENABLED, and the three GRAPH_* credentials being present),
+  // so turning the app registration on in Railway starts the reader at the next
+  // tick without a redeploy. Every Graph touch it makes writes its graph_audit
+  // row — Tony Tran's condition for the 2026-09-18 grant — and /api/health's
+  // `graph` block says which way each firing went.
+  const transcriptsLib = require('./lib/transcripts');
+  const sweepNextAt = transcriptsLib.armTranscriptSweepTimer();
+
   return new Promise((resolve) => {
     const server = app.listen(PORT, () => {
       console.log(`E360 Showrunner ${APP_VERSION} running on port ${PORT}`);
@@ -458,6 +476,12 @@ async function boot() {
       console.log(`  digest timer   : armed for ${digestNextAt.toISOString()} ` +
                   `(DIGEST_HOUR_UTC=${process.env.DIGEST_HOUR_UTC || '12'}; gated at fire time — ` +
                   `one digest per person per UTC day, silent when a plate is empty)`);
+      const graphCfg = require('./lib/graph');
+      console.log(`  transcripts    : armed for ${sweepNextAt.toISOString()} ` +
+                  `(GRAPH_SWEEP_MINUTES=${process.env.GRAPH_SWEEP_MINUTES || '60'}; ` +
+                  (graphCfg.graphConfigured()
+                    ? 'app-only Graph configured — every call writes a graph_audit row'
+                    : `DARK — ${graphCfg.graphMissing().join(', ')} unset, nothing is swept`) + ')');
       resolve(server);
     });
   });

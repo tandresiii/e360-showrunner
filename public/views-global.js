@@ -1137,6 +1137,134 @@ function viewSettings(ctx) {
           : '') +
         recent;
     })()) : '') +
+    /* ══ UNATTENDED ACCESS — the audit log (admin) ══════════════════════════
+       E360's IT admin granted tenant API access for Teams transcripts on
+       2026-09-18 and approved UNATTENDED (application-permission) pulls on one
+       condition, in his words: "keep an audit log if we could."
+
+       This card IS that condition, kept where a person can see it. Every Graph
+       request the standing reader makes writes a graph_audit row in the same
+       flow as the request — the token call, every listing, every download — and
+       this is the read side, beside the posture and the manual door. It stays
+       on the card whether the feature is dark or live, because "nothing has
+       happened" and "nothing is configured" are different answers and an admin
+       is owed the right one. The demo models a ledger and says so. */
+    (CURRENT_USER.role === 'admin' ? card('lock', 'Unattended access — audit log', (function () {
+      var ga = ctx.graphAudit || null;
+      var g = (ctx.health && ctx.health.graph) || null;
+      var intro = '<p>Showrunner reads recent <b>Teams meeting transcripts</b> for the team on a ' +
+        'timer, over app-only Microsoft Graph — nobody signed in, nobody clicked — and files each ' +
+        'one against the matching show, or lands a <b>proposal</b> when it is not sure. ' +
+        'Transcripts are <b>internal</b>: the client-recap firewall can never read one.</p>';
+      var condition = '<div class="perm-note" style="margin-top:10px">' + inlineIcon('lock') +
+        ' Tenant access was granted <b>2026-09-18</b> on one condition — <i>“keep an audit log if ' +
+        'we could.”</i> <b>Every</b> unattended Graph call writes a row here, in the same flow as ' +
+        'the call: the token request, every listing, every download. A call without its row is not ' +
+        'something this code can forget — it is something someone would have to delete the ledger ' +
+        'write to achieve.</div>';
+
+      if (demo) {
+        var drows = ((ga && ga.rows) || []).map(function (r) {
+          return row(esc(r.action), '<span class="mini">' + esc(r.outcome) + '</span>');
+        }).join('');
+        return intro +
+          row('Mode', '<span style="color:var(--warn)">modeled — demo ledger, no tenant was read</span>') +
+          drows + condition +
+          '<div class="perm-note" style="margin-top:10px">' + inlineIcon('alert') +
+          ' A real sweep needs the live server and a consented app registration. Sign in against ' +
+          'the live app to see the true audit log.</div>';
+      }
+
+      if (!g) {
+        return intro + row('Status',
+          '<span style="color:var(--crit)">health probe did not answer — posture unknown</span>');
+      }
+
+      /* DARK IS THE NORMAL STATE TODAY, and the card says which variables are
+         missing rather than implying a reader that is quietly running. */
+      var posture = g.configured
+        ? '<span style="color:var(--go)">configured</span>' +
+          (g.enabled ? '' : ' <small style="color:var(--muted)">— disabled by GRAPH_SWEEP_ENABLED</small>')
+        : '<span style="color:var(--warn)">not configured — ' +
+          esc((g.missing || []).join(', ') || 'credentials unset') +
+          '</span> <small style="color:var(--muted)">nothing is swept, so there is nothing to log</small>';
+
+      var ls = g.lastSweep;
+      var lastLine;
+      if (!g.configured) lastLine = '<span style="color:var(--muted)">—</span>';
+      else if (!ls) lastLine = '<span style="color:var(--warn)">never swept on this database</span>';
+      else if (ls.status === 'ok') {
+        lastLine = '<span style="color:var(--go)">ok · ' + esc(String(ls.transcripts || 0)) +
+          ' seen · ' + esc(String(ls.filed || 0)) + ' filed · ' + esc(String(ls.proposed || 0)) +
+          ' proposed · ' + esc(fmtAgo(ls.at)) + ' ago</span>';
+      } else if (ls.status === 'skipped') {
+        lastLine = '<span style="color:var(--warn)">skipped — ' + esc(String(ls.error || 'not configured')) + '</span>';
+      } else {
+        lastLine = '<span style="color:var(--crit)">' + esc(ls.status) + ' — ' +
+          esc(String(ls.error || 'no reason recorded').slice(0, 90)) + '</span>';
+      }
+
+      /* the per-sweep strip: one line per sweep, counts and errors */
+      var sweeps = ((ga && ga.sweeps) || []).slice(0, 4).map(function (s) {
+        var pill = s.errors
+          ? '<span class="pill crit"><span class="dot"></span>' + esc(String(s.errors)) + ' err</span>'
+          : '<span class="pill go"><span class="dot"></span>ok</span>';
+        return row(esc(String(s.sweep_id || '').slice(0, 16)),
+          pill + ' <span class="mini">' + esc(String(s.calls)) + ' call' +
+          (s.calls === 1 ? '' : 's') + ' · ' + esc(String(s.transcripts)) + ' transcript' +
+          (s.transcripts === 1 ? '' : 's') + ' · ' + esc(String(s.filed)) + ' filed · ' +
+          esc(String(s.proposed)) + ' proposed · ' + esc(fmtSize(s.bytes)) + '</span>');
+      }).join('');
+
+      /* the rows themselves — newest first, capped. Endpoint is a PATH; no
+         query string, no token, no transcript body ever reaches this table. */
+      var rows3 = ((ga && ga.rows) || []).slice(0, 10).map(function (r) {
+        var okRow = String(r.outcome || '').indexOf('ok') === 0;
+        var where = r.file_id ? ' → file ' + esc(String(r.file_id))
+          : r.proposal_id ? ' → proposal ' + esc(String(r.proposal_id)) : '';
+        return '<div class="set-row"><span class="k">' +
+          '<span class="pill ' + (okRow ? 'go' : 'crit') + '"><span class="dot"></span>' +
+          esc(r.action) + '</span> <span class="mini">' +
+          esc(String(r.at || '').slice(11, 16)) + '</span></span>' +
+          '<span class="v"><span class="mini" style="word-break:break-all">' +
+          esc(r.target_user || '') + ' · ' + esc(String(r.endpoint || '')) +
+          ' · ' + esc(String(r.http_status == null ? 'no answer' : r.http_status)) +
+          (r.bytes ? ' · ' + esc(fmtSize(r.bytes)) : '') + where +
+          (okRow ? '' : '<br><span style="color:var(--crit)">' +
+            esc(String(r.outcome || '').slice(0, 160)) + '</span>') +
+          '</span></span></div>';
+      }).join('');
+
+      return intro +
+        row('Unattended access', posture) +
+        row('Sweep cadence', g.configured
+          ? 'every ' + esc(String(g.sweepMinutes)) + ' min · ' +
+            esc(String(g.overlapMinutes)) + ' min overlap'
+          : '<span class="mini">timer armed at ' + esc(String(g.sweepMinutes)) +
+            ' min, gated at fire time — it will start sweeping the tick after the ' +
+            'credentials land, with no redeploy</span>') +
+        row('Last sweep', lastLine) +
+        row('Audit rows', g.auditRows == null ? '—' :
+          (g.auditRows ? esc(String(g.auditRows)) + ' logged'
+                       : '<span class="mini">none yet — no unattended call has been made</span>')) +
+        '<div class="set-row"><span class="k">Run it now</span><span class="v">' +
+        '<button class="btn sm ghost"' + (g.configured ? '' : ' disabled') + ' ' +
+        act('transcriptSweepNow') + ' title="' + esc(g.configured
+          ? 'Run the transcript sweep now — the same pipeline the timer runs, and every call it makes lands in this log'
+          : 'The manual door is wired, but there is nothing to read: set ' +
+            ((g.missing || []).join(', ') || 'the GRAPH_* credentials') + ' first') + '">' +
+        icon('refresh') + 'Sweep now</button>' +
+        '<button class="btn sm ghost" ' + act('goProposals') + ' style="margin-left:8px" ' +
+        'title="Anything the sweep was not confident about is waiting here, not filed">' +
+        icon('checkC') + 'Review queue</button>' +
+        '</span></div>' +
+        (g.stale
+          ? '<div class="perm-note" style="margin-top:10px;color:var(--crit)">' + inlineIcon('alert') +
+            ' <b>STALE — no successful sweep in two intervals.</b> The timer stopped, or every ' +
+            'sweep since has failed. The rows below say which.</div>'
+          : '') +
+        sweeps + rows3 + condition;
+    })()) : '') +
     card('users', 'Roles &amp; access', '<p>Five canonical roles gate edit + assignment rights across the workspace.</p>' + row('Roles', 'admin · manager · pm · tech · viewer') + row('Default', 'viewer')) +
     '</div>';
 }

@@ -48,6 +48,16 @@ delete process.env.DROPBOX_APP_SECRET;
 delete process.env.DROPBOX_REFRESH_TOKEN;
 delete process.env.DROPBOX_API_BASE;
 delete process.env.DROPBOX_CONTENT_BASE;
+// §G begins UNCONFIGURED for exactly the same reason, and the stakes are higher:
+// these three are a tenant-wide, app-only grant. A developer machine that
+// carries them must never have this suite reach into the real tenant — every
+// Graph assertion below runs against scripts/fake-graph.js, whose env is set
+// mid-run and cleared again.
+delete process.env.GRAPH_TENANT_ID;
+delete process.env.GRAPH_CLIENT_ID;
+delete process.env.GRAPH_CLIENT_SECRET;
+delete process.env.GRAPH_LOGIN_BASE;
+delete process.env.GRAPH_API_BASE;
 
 const assert = require('assert');
 const { pool } = require('../lib/db');
@@ -6928,6 +6938,413 @@ const DEL = (p, o) => call('DELETE', p, o);
     // behind would make TOMORROW'S run of this suite read "already sent".
     await DEL(`/api/projects/${dgP}`, { token: A });
     await pool.query(`DELETE FROM digest_runs`);
+  }
+
+  // ── G. THE UNATTENDED TRANSCRIPT READER — and Tran's audit log ───────────
+  section('G. unattended transcripts — app-only Graph, and the audit log that pays for it');
+  // E360's IT admin granted tenant API access for Teams transcripts on
+  // 2026-09-18 and approved UNATTENDED (application-permission) pulls on one
+  // condition, verbatim: "keep an audit log if we could." This section treats
+  // that as a law, not a feature, and four of its assertions are MUTATION GATES:
+  //
+  //   1. delete the recordGraphCall() write inside lib/graph.js's graphFetch and
+  //      "EVERY Graph call has its audit row" goes red naming the shortfall;
+  //   2. break the ledger dedupe (alreadyHandled) and "a re-sweep files nothing
+  //      new" goes red with the duplicate count;
+  //   3. drop 'transcript' from RECAP_FORBIDDEN_FILE_KINDS and "the firewall
+  //      REFUSES a transcript read" goes red;
+  //   4. force the low-confidence path to file instead of propose and "below the
+  //      band it PROPOSES" goes red.
+  //
+  // Everything runs against scripts/fake-graph.js. What a local fake CANNOT
+  // prove is stated in the header of lib/transcripts.js and is deliberately not
+  // asserted here: the exact spelling of the getAllTranscripts parameters, the
+  // tenant's transcript toggle, and whatever Microsoft meters on this API. The
+  // first LIVE call answers all three, and the audit log is where the answer
+  // will be sitting — which is why the two refusal shapes below are tested for
+  // landing HONESTLY rather than for being handled away.
+  {
+    const gLib = require('../lib/graph');
+    const tLib = require('../lib/transcripts');
+    const fwG = require('../lib/firewall');
+
+    // ── the DARK posture, first and on the real server ─────────────────────
+    ok('DARK: the app ships unconfigured — graphConfigured() is false',
+       gLib.graphConfigured() === false, gLib.graphMissing());
+    const darkErr = gLib.notConfigured();
+    ok('DARK: the refusal is a 501 that NAMES the three variables',
+       darkErr.status === 501 && /GRAPH_TENANT_ID/.test(darkErr.message) &&
+       /GRAPH_CLIENT_ID/.test(darkErr.message) && /GRAPH_CLIENT_SECRET/.test(darkErr.message),
+       darkErr.message);
+    ok('DARK: POST /api/admin/transcript-sweep answers 501, not a hollow 200',
+       (await POST('/api/admin/transcript-sweep', {}, { token: A })).status === 501);
+    const hDark = (await GET('/api/health')).body.graph;
+    ok('/api/health gains an ADDITIVE `graph` block', !!hDark && hDark.configured === false, hDark);
+    ok('...whose wording is the house style — config presence, NOT a login test',
+       /NOT a login test/.test(hDark.configuredMeans || ''), hDark.configuredMeans);
+    ok('...it names which variables are missing, so a dropped env var is diagnosable from outside',
+       Array.isArray(hDark.missing) && hDark.missing.length === 3, hDark.missing);
+    ok('...it is never `stale` while unconfigured — nothing is expected to happen',
+       hDark.stale === false, hDark);
+    ok('...and it carries no credential and no URL',
+       !/secret|password|http/i.test(JSON.stringify(hDark).replace(/clientSecretSet|GRAPH_CLIENT_SECRET/g, '')),
+       hDark);
+    // The dark sweep in process: honest 'skipped', and NOT ONE audit row —
+    // because not one socket was opened.
+    const preRows = parseInt((await pool.query('SELECT COUNT(*)::int n FROM graph_audit')).rows[0].n, 10);
+    const darkSweep = await tLib.runTranscriptSweep({ trigger: 'manual' });
+    ok('DARK: an unconfigured sweep records itself as `skipped`, never as a successful nothing',
+       darkSweep.status === 'skipped' && darkSweep.transcripts === 0 &&
+       /GRAPH_TENANT_ID/.test(darkSweep.error || ''), darkSweep);
+    ok('...and wrote ZERO audit rows, because it made zero calls',
+       parseInt((await pool.query('SELECT COUNT(*)::int n FROM graph_audit')).rows[0].n, 10) === preRows);
+
+    // ── the floors, both routes ────────────────────────────────────────────
+    ok('POST /api/admin/transcript-sweep unauthenticated is 401',
+       (await POST('/api/admin/transcript-sweep', {})).status === 401);
+    ok('...and is admin-only — a pm is refused',
+       (await POST('/api/admin/transcript-sweep', {}, { token: PMT })).status === 403);
+    ok('...and so is a manager',
+       (await POST('/api/admin/transcript-sweep', {}, { token: MGRT })).status === 403);
+    ok('GET /api/admin/graph-audit unauthenticated is 401',
+       (await GET('/api/admin/graph-audit')).status === 401);
+    ok('...the audit log is admin-only — it names mailboxes and meeting ids',
+       (await GET('/api/admin/graph-audit', { token: PMT })).status === 403);
+    ok('...and it refuses an agent key by route topology (§9)',
+       (await GET('/api/admin/graph-audit', { key: 'sk_bogus' })).status === 403);
+
+    // ── the pure seams ─────────────────────────────────────────────────────
+    const sampleVtt = 'WEBVTT\n\n1\n00:00:00.000 --> 00:00:04.000\n' +
+                      '<v Tony Tran>the cabinets ship Thursday</v>\n\n' +
+                      '2\n00:00:04.000 --> 00:00:09.000\n<v Candice Wren>I will code it to the job</v>\n';
+    ok('vttToText strips cue numbers, timings and speaker tags and keeps the SENTENCES',
+       tLib.vttToText(sampleVtt) === 'the cabinets ship Thursday I will code it to the job',
+       tLib.vttToText(sampleVtt));
+    ok('vttSpeakers reads the room', tLib.vttSpeakers(sampleVtt).join('|') === 'Tony Tran|Candice Wren',
+       tLib.vttSpeakers(sampleVtt));
+    ok('the document name is human, dated and never the GUID',
+       /^2026-05-01 Load-in walkthrough \(transcript\)$/.test(
+         tLib.transcriptDocName({ id: 'tr-guid-9', createdDateTime: '2026-05-01T14:00:00Z' },
+                                'Load-in walkthrough')),
+       tLib.transcriptDocName({ id: 'tr-guid-9', createdDateTime: '2026-05-01T14:00:00Z' },
+                              'Load-in walkthrough'));
+    ok('the listing path carries the createdDateTime watermark and no credential',
+       /getAllTranscripts\?\$filter=/.test(tLib.listPath('a@b.com', '2026-09-18T00:00:00.000Z')) &&
+       tLib.listPath('a@b.com', '2026-09-18T00:00:00.000Z').indexOf('secret') < 0,
+       tLib.listPath('a@b.com', '2026-09-18T00:00:00.000Z'));
+    ok('the content path asks for vtt — bytes we cannot read are bytes we cannot match',
+       /\$format=text%2Fvtt|\$format=text\/vtt/.test(
+         tLib.contentPath('a@b.com', { id: 't1', meetingId: 'm1' })),
+       tLib.contentPath('a@b.com', { id: 't1', meetingId: 'm1' }));
+    ok('the secret scrubber blanks a bearer token and a client_secret form field',
+       !/eyJab/.test(gLib.scrubSecrets('Bearer eyJabc.def')) &&
+       /client_secret=<redacted>/.test(gLib.scrubSecrets('client_secret=hunter2&x=1')),
+       gLib.scrubSecrets('Bearer eyJabc.def · client_secret=hunter2&x=1'));
+
+    // ── FIREWALL: transcripts are INTERNAL (mutation gate 3) ───────────────
+    let fwT = null;
+    try { await fwG.guardRecapQuery(pool).query(`SELECT id FROM files WHERE kind='transcript'`); }
+    catch (e) { fwT = e.message; }
+    ok('THE FIREWALL REFUSES A TRANSCRIPT — a meeting body may never reach a client recap ' +
+       '(drop `transcript` from RECAP_FORBIDDEN_FILE_KINDS and this line goes red)',
+       !!fwT && /may not read files of kind `transcript`/.test(fwT), fwT);
+    let fwR = null;
+    try { await fwG.guardRecapQuery(pool).query(`SELECT id FROM files WHERE kind='report'`); }
+    catch (e) { fwR = e.message; }
+    ok('...and a filed tech report on the shelf, for the same reason the table guard refuses the original',
+       !!fwR && /may not read files of kind `report`/.test(fwR), fwR);
+    let fwU = null;
+    try { await fwG.guardRecapQuery(pool).query('SELECT id FROM files WHERE show_id=$1', [1]); }
+    catch (e) { fwU = e.message; }
+    ok('...and an UNPINNED files read is refused too — that is the edit that would actually happen',
+       !!fwU && /must pin `kind=`/.test(fwU), fwU);
+    ok('...while the photo read the generator IS allowed still passes (recapFacts is untouched)',
+       fwG.RECAP_FORBIDDEN_FILE_KINDS.includes('transcript') &&
+       !fwG.RECAP_FORBIDDEN_FILE_KINDS.includes('photo'), fwG.RECAP_FORBIDDEN_FILE_KINDS);
+    ok('...and the two unattended ledgers are off-limits to a recap as well',
+       ['graph_audit', 'graph_sweeps'].every((t) => fwG.RECAP_FORBIDDEN_TABLES.includes(t)));
+
+    // ── wire the fake tenant ───────────────────────────────────────────────
+    const { startFakeGraph } = require('./fake-graph');
+    const gFake = await startFakeGraph({ tenant: TAG + '-tenant', clientId: TAG + '-client',
+                                         clientSecret: TAG + '-secret-do-not-log' });
+    // The sweep walks every ACTIVE user with an email, so the section pins that
+    // roster to two identities of its own and puts every other address back
+    // afterwards — otherwise the call counts below would depend on what §17 left
+    // lying around, and a count nobody can predict is a count nobody checks.
+    const gMailSave = (await pool.query(
+      `SELECT username, email FROM users WHERE COALESCE(email,'') <> ''`)).rows;
+    await pool.query(`UPDATE users SET email='' WHERE COALESCE(email,'') <> ''`);
+    const gOwner = TAG + 'sweeper', gMate = TAG + 'mate';
+    for (const u of [gOwner, gMate]) {
+      await POST('/api/users', { username: u, password: 'smokepass123', role: 'pm', name: u },
+        { token: A });
+      await pool.query(`UPDATE users SET email=$1 WHERE username=$2`, [u + '@e360sport.com', u]);
+    }
+    const gEnv = gFake.env();
+    Object.assign(process.env, gEnv);
+    gLib.graphResetToken();
+
+    // a folder the matcher can actually hit: job number + client + venue + dates
+    const gProj = await POST('/api/projects',
+      { name: TAG + ' Transcript Cup', client: 'LOVB Pro', type: 'led', owner: gOwner }, { token: A });
+    const gP = gProj.body.id, gJ = gProj.body.jobs[0].id;
+    const gJobNo = (await pool.query('SELECT qb_job_number FROM jobs WHERE id=$1', [gJ])).rows[0].qb_job_number;
+    const gShow = await POST('/api/shows',
+      { project_id: gP, name: TAG + ' Omaha', venue: 'Baxter Arena', city: 'Omaha',
+        event_date: '2026-10-02', load_in_date: '2026-10-01', strike_date: '2026-10-03',
+        owner: gOwner }, { token: A });
+    const gS = gShow.body.id;
+
+    // two meetings: one the matcher must be certain about, one it cannot place
+    gFake.seed.transcript(gOwner + '@e360sport.com', {
+      id: TAG + '-tr-high', subject: TAG + ' Omaha production sync',
+      createdDateTime: new Date().toISOString(),
+      lines: [['Tom Andres', `job ${gJobNo} for LOVB Pro at Baxter Arena, load-in 2026-10-01`],
+              ['Tony Vigon', 'freight leaves Tuesday, we are clear on power']]
+    });
+    gFake.seed.transcript(gOwner + '@e360sport.com', {
+      id: TAG + '-tr-low', subject: 'Coffee and a catch-up',
+      createdDateTime: new Date().toISOString(),
+      lines: [['Tom Andres', 'nothing here points anywhere in particular']]
+    });
+
+    const gRun1 = await POST('/api/admin/transcript-sweep', {}, { token: A });
+    ok('THE MANUAL DOOR: POST /api/admin/transcript-sweep runs the sweep and answers the LEDGER ROW ' +
+       '(every timer capability in this app has a wired human twin)',
+       gRun1.status === 200 && gRun1.body.status === 'ok' && gRun1.body.trigger === 'manual', gRun1.body);
+    ok('...it saw both transcripts, filed one and PROPOSED the other',
+       gRun1.body.transcripts === 2 && gRun1.body.filed === 1 && gRun1.body.proposed === 1, gRun1.body);
+    ok('...across both mailboxes, with no user erroring',
+       gRun1.body.users_seen === 2 && gRun1.body.user_errors === 0, gRun1.body);
+
+    // ── the high-confidence file: real bytes, real provenance ──────────────
+    const gFiled = (await pool.query(
+      `SELECT * FROM files WHERE source_ref=$1`, ['graph:transcript/' + TAG + '-tr-high'])).rows[0];
+    ok('HIGH CONFIDENCE FILES: a `transcript` document lands on the matched show, status filed',
+       !!gFiled && gFiled.kind === 'transcript' && gFiled.status === 'filed' && gFiled.show_id === gS,
+       gFiled && { kind: gFiled.kind, status: gFiled.status, show_id: gFiled.show_id });
+    ok('...with REAL BYTES through the REAL storage driver — not a metadata row pretending',
+       gFiled && gFiled.size > 60 &&
+       /WEBVTT/.test(String(await storageGet(gFiled.nas_path))), gFiled && gFiled.size);
+    ok('...in the show folder under \\transcript\\, never the quarantine',
+       gFiled && /\\transcript\\/.test(gFiled.nas_path) && !/_agent-inbox/.test(gFiled.nas_path),
+       gFiled && gFiled.nas_path);
+    const gProv = gFiled && gFiled.provenance;
+    ok('...carrying FULL PROVENANCE: sourceKind meeting, sourceRef the transcript id, the ' +
+       'matcher\'s own confidence, and an actor that says plainly a machine did this',
+       gProv && gProv.source_kind === 'meeting' &&
+       gProv.source_ref === 'graph:transcript/' + TAG + '-tr-high' &&
+       gProv.confidence >= 85 && gProv.agent_user === 'transcript-sweep' &&
+       gProv.actor === 'agent:transcript-sweep' && (gProv.matched_by || []).length > 0, gProv);
+    ok('...and the activity trail shows it, accented, with that provenance attached',
+       (await pool.query(
+         `SELECT COUNT(*)::int n FROM activity WHERE show_id=$1 AND actor='agent:transcript-sweep'`,
+         [gS])).rows[0].n === 1);
+
+    // ── the low-confidence proposal (mutation gate 4) ──────────────────────
+    const gProp = (await pool.query(
+      `SELECT * FROM proposals WHERE provenance->>'source_ref'=$1`,
+      ['graph:transcript/' + TAG + '-tr-low'])).rows[0];
+    ok('BELOW THE BAND IT PROPOSES, it does not file — file-don\'t-fire holds on the unattended ' +
+       'surface too (force the sweep to file at any confidence and this line goes red)',
+       !!gProp && gProp.kind === 'document' && gProp.status === 'pending' &&
+       gProp.proposed_by === 'agent:transcript-sweep', gProp);
+    ok('...assigned to the person whose meeting it was — they were in the room',
+       gProp && gProp.assigned_to === gOwner, gProp && gProp.assigned_to);
+    const gPropFile = (await pool.query(
+      `SELECT * FROM files WHERE source_ref=$1`, ['graph:transcript/' + TAG + '-tr-low'])).rows[0];
+    ok('...and its bytes sit in the _agent-inbox QUARANTINE, never in a real show folder',
+       gPropFile && gPropFile.status === 'proposed' && /_agent-inbox/.test(gPropFile.nas_path) &&
+       gPropFile.size > 20, gPropFile && gPropFile.nas_path);
+    ok('...where the bytes really are readable, so a reviewer can open what they are judging',
+       /WEBVTT/.test(String(await storageGet(gPropFile.nas_path))));
+
+    // ── TRAN'S CONDITION (mutation gate 1) ─────────────────────────────────
+    // The gate is an EQUALITY against what the fake tenant actually received —
+    // not a count this suite guessed. Delete the ledger write in graphFetch and
+    // the two numbers part company immediately.
+    const gCalls = gFake.state.requests.length;
+    const gAudit = await GET('/api/admin/graph-audit?limit=200', { token: A });
+    ok('EVERY UNATTENDED GRAPH CALL HAS ITS AUDIT ROW — Tony Tran\'s condition, held as an ' +
+       'equality against what the tenant actually received (delete the recordGraphCall in ' +
+       'lib/graph.js graphFetch and this line goes red)',
+       gAudit.status === 200 && gAudit.body.total === gCalls,
+       { rowsInLedger: gAudit.body.total, requestsTheTenantSaw: gCalls });
+    const gActions = gAudit.body.rows.map((r) => r.action);
+    ok('...one `token` row, a `list` row per mailbox, a `content` row per transcript',
+       gActions.filter((a) => a === 'token').length === 1 &&
+       gActions.filter((a) => a === 'list').length === 2 &&
+       gActions.filter((a) => a === 'content').length === 2, gActions);
+    ok('...the token call is audited too — "the app authenticated as itself" is a line the log owes',
+       gAudit.body.rows.some((r) => r.action === 'token' && r.http_status === 200 &&
+         r.target_user === '(application)' && /oauth2\/v2\.0\/token$/.test(r.endpoint)),
+       gAudit.body.rows.find((r) => r.action === 'token'));
+    ok('...every row names WHO it was about and WHAT path it hit',
+       gAudit.body.rows.every((r) => r.target_user && r.endpoint && r.sweep_id), gAudit.body.rows[0]);
+    ok('...ENDPOINT IS A PATH ONLY — no $filter, no query string, nothing archived that was not ours',
+       gAudit.body.rows.every((r) => r.endpoint.indexOf('?') < 0 && r.endpoint.indexOf('$') < 0),
+       gAudit.body.rows.map((r) => r.endpoint));
+    ok('...content rows carry the bytes, the transcript id, and WHERE THEY WENT — the ledger reads ' +
+       'end to end: we asked, this came back, this is where it landed',
+       gAudit.body.rows.filter((r) => r.action === 'content')
+         .every((r) => r.bytes > 0 && r.transcript_id && (r.file_id || r.proposal_id)),
+       gAudit.body.rows.filter((r) => r.action === 'content'));
+    ok('...THE SECRET IS NOWHERE IN IT — not in a row, not in an endpoint, not in an outcome',
+       JSON.stringify(gAudit.body).indexOf(TAG + '-secret-do-not-log') < 0);
+    ok('...and the per-sweep counts add up for the card that renders them',
+       (gAudit.body.sweeps || []).some((s) => s.calls === gCalls && s.transcripts === 2 &&
+         s.filed === 1 && s.proposed === 1), gAudit.body.sweeps);
+    const gPage = await GET('/api/admin/graph-audit?limit=2&offset=1', { token: A });
+    ok('...the audit read is PAGED, newest first, with an honest total',
+       gPage.body.rows.length === 2 && gPage.body.total === gCalls &&
+       gPage.body.rows[0].id < gAudit.body.rows[0].id, { page: gPage.body.rows.map((r) => r.id) });
+
+    // ── THE TOKEN CACHE ────────────────────────────────────────────────────
+    const gTokenAfterFirst = gFake.state.tokenHits;
+    ok('the token was fetched exactly ONCE for a whole sweep', gTokenAfterFirst === 1, gFake.state.tokenHits);
+
+    // ── DEDUPE (mutation gate 2) ───────────────────────────────────────────
+    const gBefore = parseInt((await pool.query(
+      `SELECT COUNT(*)::int n FROM files WHERE kind='transcript'`)).rows[0].n, 10);
+    const gRun2 = await POST('/api/admin/transcript-sweep', {}, { token: A });
+    const gAfter = parseInt((await pool.query(
+      `SELECT COUNT(*)::int n FROM files WHERE kind='transcript'`)).rows[0].n, 10);
+    ok('DEDUPE: a second sweep over the same window files NOTHING NEW — the ledger is the memory ' +
+       '(break alreadyHandled and this line goes red with the duplicates)',
+       gAfter === gBefore && gRun2.body.filed === 0 && gRun2.body.proposed === 0 &&
+       gRun2.body.skipped === 2, { gBefore, gAfter, row: gRun2.body });
+    ok('...and it never even fetched the bodies again — dedupe happens BEFORE the bytes',
+       gFake.state.contentHits === 2, gFake.state.contentHits);
+    ok('THE TOKEN IS CACHED: the second sweep hit the token endpoint ZERO times',
+       gFake.state.tokenHits === gTokenAfterFirst, gFake.state.tokenHits);
+
+    // ── the two refusals Microsoft actually returns ────────────────────────
+    // Neither may crash a sweep, and both must land in the log in Graph's own
+    // words — because when this meets the live tenant, one of these two error
+    // bodies is the most likely thing to come back, and the log is where we
+    // will read it.
+    gFake.state.failWhen = (req) => req.path.indexOf('getAllTranscripts') >= 0
+      ? { status: 403, body: gFake.seed.transcriptsDisabledBody() } : null;
+    const gRun3 = await POST('/api/admin/transcript-sweep', {}, { token: A });
+    gFake.state.failWhen = null;
+    ok('A 403 "transcription is disabled for this organization" does not crash the sweep — it ends ' +
+       'as an honest error row naming the fault',
+       gRun3.status === 200 && gRun3.body.status === 'error' && gRun3.body.user_errors === 2 &&
+       /Transcription is disabled/.test(gRun3.body.error || ''), gRun3.body);
+    const gA3 = await GET('/api/admin/graph-audit?limit=5', { token: A });
+    ok('...and it is in the audit log VERBATIM, with its HTTP status — never swallowed, because the ' +
+       'first live call is what this text exists to answer',
+       gA3.body.rows.some((r) => r.http_status === 403 &&
+         /transcript/i.test(r.outcome) && /disabled/i.test(r.outcome)), gA3.body.rows[0]);
+    ok('...and a sweep in which EVERY mailbox failed does NOT become the watermark',
+       (await pool.query(`SELECT status FROM graph_sweeps ORDER BY id DESC LIMIT 1`)).rows[0].status === 'error');
+
+    gFake.state.failWhen = (req) => req.path.indexOf('/content') >= 0
+      ? { status: 402, body: gFake.seed.meteredLicenseBody() } : null;
+    // clear the dedupe memory for these two so the content call is attempted again
+    await pool.query(`DELETE FROM graph_audit WHERE transcript_id LIKE $1`, [TAG + '%']);
+    const gRun4 = await POST('/api/admin/transcript-sweep', {}, { token: A });
+    gFake.state.failWhen = null;
+    ok('A 402 payment/licensing refusal — Microsoft meters some app-only transcript APIs — does not ' +
+       'crash the sweep either: the listing still succeeded, the bodies simply did not come',
+       gRun4.status === 200 && gRun4.body.status === 'ok' && gRun4.body.filed === 0 &&
+       gRun4.body.proposed === 0, gRun4.body);
+    const gA4 = await GET('/api/admin/graph-audit?limit=10', { token: A });
+    ok('...and the licensing refusal is in the log in Microsoft\'s own words, so the day it happens ' +
+       'for real nobody has to guess whether it was permission or billing',
+       gA4.body.rows.some((r) => r.http_status === 402 && /billing model/i.test(r.outcome)),
+       gA4.body.rows.map((r) => r.outcome).slice(0, 3));
+
+    // ── one mailbox erroring, the next still swept ─────────────────────────
+    await pool.query(`DELETE FROM graph_audit WHERE transcript_id LIKE $1`, [TAG + '%']);
+    await pool.query(`DELETE FROM files WHERE source_ref LIKE $1`, ['graph:transcript/' + TAG + '%']);
+    await pool.query(`DELETE FROM proposals WHERE provenance->>'source_ref' LIKE $1`,
+      ['graph:transcript/' + TAG + '%']);
+    gFake.seed.transcript(gMate + '@e360sport.com', {
+      id: TAG + '-tr-mate', subject: TAG + ' Omaha wrap',
+      createdDateTime: new Date().toISOString(),
+      lines: [['Jim Eaton', `job ${gJobNo} at Baxter Arena for LOVB Pro, load-in 2026-10-01`]]
+    });
+    gFake.state.failWhen = (req) => req.path.indexOf(encodeURIComponent(gOwner)) >= 0 ||
+                                    req.path.indexOf(gOwner) >= 0
+      ? { status: 403, body: gFake.seed.transcriptsDisabledBody() } : null;
+    const gRun5 = await POST('/api/admin/transcript-sweep', {}, { token: A });
+    gFake.state.failWhen = null;
+    ok('ONE MAILBOX ERRORING DOES NOT COST THE OTHERS — the sweep records the failure and CARRIES ON ' +
+       'to the next user, who still gets their transcript filed',
+       gRun5.status === 200 && gRun5.body.users_seen === 2 && gRun5.body.user_errors === 1 &&
+       (gRun5.body.filed + gRun5.body.proposed) === 1, gRun5.body);
+    ok('...and the run is still `ok`, because "one of two failed" is not "the sweep failed"',
+       gRun5.body.status === 'ok', gRun5.body.status);
+
+    // ── the UNATTACHED case — a meeting about nothing we are building ──────
+    // AGENT_API §2's low band says a match with NO candidate at all is
+    // submitted UNATTACHED: proposed, no target. Getting there deterministically
+    // takes a little care, because `date_window` is what makes almost any
+    // transcript match SOMETHING — so this one is dated outside every show
+    // window and its words touch no client, venue or job number.
+    gFake.seed.transcript(gMate + '@e360sport.com', {
+      id: TAG + '-tr-none', subject: 'Benefits enrollment',
+      createdDateTime: '2031-01-05T15:00:00.000Z',
+      lines: [['Candice Wren', 'the enrollment window closes on the fifteenth']]
+    });
+    await POST('/api/admin/transcript-sweep', {}, { token: A });
+    const gNone = (await pool.query(
+      `SELECT * FROM proposals WHERE provenance->>'source_ref'=$1`,
+      ['graph:transcript/' + TAG + '-tr-none'])).rows[0];
+    ok('A MEETING THAT MATCHES NOTHING lands UNATTACHED — proposed, no target, confidence 0 — ' +
+       'rather than being guessed onto the nearest folder',
+       !!gNone && gNone.status === 'pending' && gNone.project_id === null &&
+       gNone.show_id === null && Number(gNone.confidence) === 0,
+       gNone && { project_id: gNone.project_id, show_id: gNone.show_id, conf: gNone.confidence });
+    const gNoneFile = (await pool.query(
+      `SELECT * FROM files WHERE source_ref=$1`, ['graph:transcript/' + TAG + '-tr-none'])).rows[0];
+    ok('...and its bytes are quarantined under a row the PROPOSAL owns — reviewable by id, ' +
+       'resolved when the proposal is, and never in anybody\'s show folder',
+       gNoneFile && gNoneFile.project_id === null && gNoneFile.show_id === null &&
+       /_agent-inbox/.test(gNoneFile.nas_path) &&
+       (gNone.created_rows.files || []).includes(gNoneFile.id), gNoneFile && gNoneFile.nas_path);
+    ok('...assigned to the person whose meeting it was — with no folder there is no owner to defer to',
+       gNone.assigned_to === gMate, gNone.assigned_to);
+
+    // ── health, live ───────────────────────────────────────────────────────
+    const hLive = (await GET('/api/health')).body.graph;
+    ok('the health `graph` block now reports the last MEASURED sweep, not a config guess',
+       hLive.configured === true && hLive.lastSweep && hLive.lastSweep.status === 'ok' &&
+       hLive.auditRows > 0, hLive);
+    ok('...and still carries no secret and no credential',
+       JSON.stringify(hLive).indexOf(TAG + '-secret-do-not-log') < 0);
+    await pool.query(
+      `UPDATE graph_sweeps SET finished_at = NOW() - INTERVAL '1 day' WHERE status='ok'`);
+    const hStale = (await GET('/api/health')).body.graph;
+    ok('THE ROT DETECTOR — a configured reader with no successful sweep in 2× the interval flips ' +
+       'stale:true, the same promise the nightly backup makes',
+       hStale.stale === true, hStale);
+
+    // ── unwire, and prove the door closes again ────────────────────────────
+    gFake.state.failWhen = null;
+    await gFake.close();
+    for (const k of Object.keys(gEnv)) delete process.env[k];
+    gLib.graphResetToken();
+    ok('unwired: the app is DARK again and the manual door answers 501, not a stale token',
+       (await POST('/api/admin/transcript-sweep', {}, { token: A })).status === 501);
+    ok('...and the audit log still reads — an audit you cannot read after the fact is not an audit',
+       (await GET('/api/admin/graph-audit?limit=5', { token: A })).status === 200);
+
+    // tidy: this section's rows hang off nothing (that is deliberate — an audit
+    // row must outlive the document it refers to), so it removes its own.
+    await pool.query(`DELETE FROM files WHERE source_ref LIKE $1`, ['graph:transcript/' + TAG + '%']);
+    await pool.query(`DELETE FROM proposals WHERE provenance->>'source_ref' LIKE $1`,
+      ['graph:transcript/' + TAG + '%']);
+    await pool.query(`DELETE FROM graph_audit`);
+    await pool.query(`DELETE FROM graph_sweeps`);
+    await DEL(`/api/projects/${gP}`, { token: A });
+    // put everyone's address back exactly as §17 left it
+    await pool.query(`UPDATE users SET email='' WHERE COALESCE(email,'') <> ''`);
+    for (const u of gMailSave) {
+      await pool.query(`UPDATE users SET email=$1 WHERE username=$2`, [u.email, u.username]);
+    }
   }
 
   // ── cleanup ───────────────────────────────────────────────────────────────

@@ -5868,6 +5868,55 @@ var api = (function () {
       return SR.post('/api/admin/backup', {});
     },
 
+    /* ---- the unattended transcript reader — Tran's audit log + Sweep now --- */
+    /* Tony Tran granted tenant access for Teams transcripts on 2026-09-18 and
+       approved unattended app-only pulls on one condition: "keep an audit log
+       if we could." This pair is the read side of that promise and the manual
+       half of the timer. The demo answers a MODELED ledger, clearly labelled —
+       a fictional tenant does not get a real audit trail, and the card says so
+       rather than showing an empty table that looks like "nothing happened". */
+    graphAudit: function (opts) {
+      var o = opts || {};
+      if (!API()) {
+        var min = 60 * 1000;
+        var t0 = Date.now() - 6 * min;
+        var mk = function (i, a, st, out, extra) {
+          var r = { id: 900 - i, at: new Date(t0 + i * 1500).toISOString(), action: a,
+                    target_user: a === 'token' ? '(application)' : 'tom@e360sport.com',
+                    endpoint: a === 'token' ? '/(modeled-tenant)/oauth2/v2.0/token'
+                      : a === 'list' ? '/users/tom@e360sport.com/onlineMeetings/getAllTranscripts'
+                      : '/users/tom@e360sport.com/onlineMeetings/mt-1/transcripts/tr-1/content',
+                    http_status: st, outcome: out, bytes: a === 'content' ? 18420 : 0,
+                    transcript_id: a === 'content' ? 'tr-1' : null,
+                    sweep_id: 'sw-modeled', file_id: null, proposal_id: null };
+          return Object.assign(r, extra || {});
+        };
+        return ok({
+          demo: true,
+          rows: [mk(0, 'token', 200, 'ok'),
+                 mk(1, 'list', 200, 'ok'),
+                 mk(2, 'content', 200, 'ok · filed to show 3', { file_id: 412 })],
+          total: 3, limit: o.limit || 50, offset: 0,
+          sweeps: [{ sweep_id: 'sw-modeled', started_at: new Date(t0).toISOString(),
+                     ended_at: new Date(t0 + 4500).toISOString(), calls: 3, errors: 0,
+                     transcripts: 1, filed: 1, proposed: 0, bytes: 18420 }],
+          runs: [{ id: 1, sweep_id: 'sw-modeled', started_at: new Date(t0).toISOString(),
+                   finished_at: new Date(t0 + 4500).toISOString(), status: 'ok',
+                   trigger: 'schedule', users_seen: 1, user_errors: 0, transcripts: 1,
+                   filed: 1, proposed: 0, skipped: 0, bytes: 18420, error: null }],
+          config: { configured: false, tenantIdSet: false, clientIdSet: false,
+                    clientSecretSet: false,
+                    missing: ['GRAPH_TENANT_ID', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET'] }
+        });
+      }
+      return SR.get('/api/admin/graph-audit' +
+        SR.qs({ limit: o.limit || null, offset: o.offset || null, sweepId: o.sweepId || null }));
+    },
+    runTranscriptSweep: function () {
+      if (!API()) return fail('Sweeping needs the live Showrunner server and a consented app registration — the demo has no tenant to read');
+      return SR.post('/api/admin/transcript-sweep', {});
+    },
+
     /* ---- A8. the served feature flags, consumed at last ------------------ */
     /* GET /api/config reports features.schedulerPush and the README says the UI
        greys the button; the UI never read it. Demo has no server, so it answers

@@ -188,6 +188,54 @@ router.get('/admin/backups', requireRole('admin'), asyncH(async (req, res) => {
   res.json({ runs, nas });
 }));
 
+// ════════════════════════════════════════════════════════════════════════════
+// ADMIN: THE UNATTENDED TRANSCRIPT READER — the sweep, and Tran's audit log
+// ────────────────────────────────────────────────────────────────────────────
+// POST /api/admin/transcript-sweep — THE MANUAL DOOR. Every timer capability in
+// this app has a wired human twin (the nightly backup, the morning digest, the
+// lifecycle sweep), and this one earns it twice over: an unattended reader that
+// could only ever be triggered by a clock is one nobody can demonstrate to the
+// IT admin who granted it, test on wiring day, or rescue at 4pm on a show day.
+// Same shape as POST /admin/backup above — admin floor, and the response is the
+// LEDGER ROW whatever the verdict, because the row IS the instrument and a
+// non-2xx would hide it. The only non-200 is 409 on overlap.
+//
+// Unconfigured answers 501 rather than a hollow 200: nothing was swept, nothing
+// could have been, and a green toast over an empty sweep is exactly the kind of
+// comfortable lie the storage block's `configuredMeans` exists to stamp out.
+//
+// GET /api/admin/graph-audit — TONY TRAN'S CONDITION, served. Paged rows newest
+// first plus per-sweep counts, so "what has this thing been doing in my tenant"
+// is answerable by an admin in one read, without a database client and without
+// asking us. It is admin-only because the rows name mailboxes and meeting ids;
+// it carries no token, no secret and no transcript body.
+router.post('/admin/transcript-sweep', requireRole('admin'), asyncH(async (req, res) => {
+  const transcripts = require('../lib/transcripts');
+  const { graphConfigured, notConfigured } = require('../lib/graph');
+  if (!graphConfigured()) throw notConfigured();
+  if (transcripts.isRunning()) {
+    throw conflict('A transcript sweep is already running — one at a time, by design.');
+  }
+  res.json(await transcripts.runTranscriptSweep({ trigger: 'manual' }));
+}));
+router.get('/admin/graph-audit', requireRole('admin'), asyncH(async (req, res) => {
+  const { listGraphAudit, graphAuditBySweep, configBlock } = require('../lib/graph');
+  const transcripts = require('../lib/transcripts');
+  const page = await listGraphAudit({
+    limit: limitOf(req, 50, 500),
+    offset: parseInt(req.query.offset, 10) || 0,
+    sweepId: req.query.sweepId || null
+  });
+  res.json({
+    ...page,
+    sweeps: await graphAuditBySweep(10),
+    runs: await transcripts.listSweeps(10),
+    // The posture, inline, so the card does not need a second round trip to
+    // know whether an empty ledger means "dark" or "nothing happened yet".
+    config: configBlock()
+  });
+}));
+
 // ── GET/POST /api/admin/byte-cache ──────────────────────────────────────────
 // Read the warm copy's state, or throw it away.
 //

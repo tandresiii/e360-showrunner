@@ -1594,6 +1594,77 @@ surfaces the one real operator edit (field width 225 vs 222).
 | `DROPBOX_REFRESH_TOKEN` | *(unset)* | the offline refresh token; exchanged at `/oauth2/token` for ~4 h access tokens, cached in-process (their TTL − 5 min) with one retry on 401. **Scopes are the team admin's grant and are handled DYNAMICALLY** — a capability the token lacks answers a named 501 built from Dropbox's own `missing_scope` error, and starts working on re-authorize with no deploy |
 | `DROPBOX_TIMEOUT_MS` / `DROPBOX_CONTENT_TIMEOUT_MS` | `20000` / `120000` | per-request budgets, RPC vs byte-moving |
 | `DROPBOX_API_BASE` / `DROPBOX_CONTENT_BASE` | *(the real hosts)* | **tests only** — point `lib/dropbox.js` at `scripts/fake-dropbox.js`. Production never sets them |
+| `GRAPH_TENANT_ID` / `GRAPH_CLIENT_ID` / `GRAPH_CLIENT_SECRET` | *(unset — ships DARK)* | the **application-permission** (client-credentials) registration behind the unattended transcript reader. Tenant access was granted 2026-09-18; all three unset ⇒ every unattended affordance is an honest 501 naming them, the Settings card says so plainly, and **no socket is opened**, so there is correctly nothing in the audit log. The secret is never logged, never echoed and is scrubbed out of any upstream error text before it reaches a ledger row |
+| `GRAPH_SWEEP_MINUTES` | `60` | the sweep cadence. A self-rearming `setTimeout` chain like the nightly backup — the timer **always arms**, and whether a firing sweeps is gated at fire time, so turning the credentials on in Railway starts the reader at the next tick with no redeploy |
+| `GRAPH_SWEEP_ENABLED` | *(unset = on)* | `0` disables the **scheduled** sweep; the manual `POST /api/admin/transcript-sweep` (admin) still works |
+| `GRAPH_SWEEP_OVERLAP_MINUTES` | `30` | how far back past the previous sweep's start the watermark reaches. A Teams transcript publishes minutes after the meeting ends, so a hard watermark drops exactly the ones that arrived late. Re-reading is free — the ledger dedupes |
+| `GRAPH_SWEEP_COLD_START_HOURS` | `24` | how far back the FIRST sweep on a fresh database looks. A cold start must not try to ingest the tenant's whole history in one pass |
+| `GRAPH_SWEEP_MAX_PER_USER` | `25` | per-mailbox cap on one sweep's transcripts |
+| `GRAPH_TIMEOUT_MS` / `GRAPH_CONTENT_TIMEOUT_MS` | `20000` / `60000` | per-request budgets, listing vs byte-moving |
+| `GRAPH_LOGIN_BASE` / `GRAPH_API_BASE` | *(the real hosts)* | **tests only** — point `lib/graph.js` at `scripts/fake-graph.js`. Production never sets them |
+
+### Unattended transcripts — and the audit log that pays for it (`lib/graph.js`, `lib/transcripts.js`)
+
+E360's IT admin granted tenant API access for Teams transcripts on **2026-09-18**
+and approved **unattended (application-permission) pulls** on one condition,
+verbatim: *"keep an audit log if we could."*
+
+On a timer (`GRAPH_SWEEP_MINUTES`, default 60) and through the manual door
+beside it, Showrunner enumerates recent Teams transcripts for each active user
+with an email, matches each one against the shows with **the same server-side
+machinery `/api/agent` uses** (`lib/agent.js` — `matchCandidates`, the
+confidence bands, `createProposal`), and either files it as a document of kind
+`transcript` on that show or lands a proposal. File-don't-fire is unchanged:
+this surface gets no dispensation for being unattended.
+
+**`graph_audit` — one row per Graph REQUEST.** The row is written by
+`lib/graph.js`'s single request helper *in the same flow as the request* —
+success, HTTP error, and socket-never-answered alike. There is no second door:
+the token call, the listing and the content download are that one helper with
+different arguments, so a Graph touch without its row is not something a future
+edit can forget to add. `scripts/smoke.js` §G holds it as an **equality against
+what the fake tenant actually received**, so deleting the ledger write goes red
+immediately.
+
+| column | what it holds |
+| --- | --- |
+| `at` | when the call was made |
+| `action` | `token` · `list` · `content` |
+| `target_user` | the mailbox the call was about (`(application)` for the token call) |
+| `endpoint` | **path only** — no query string ever: `$filter` values and continuation tokens are not ours to archive |
+| `http_status` | the upstream status; `NULL` when nothing answered at all |
+| `outcome` | `ok`, or `error: <Microsoft's own words>` — scrubbed of anything secret-shaped, capped at 400 chars, **never swallowed**. The first live call is what proves the endpoint shape, the tenant's transcript toggle and whatever Microsoft meters here, and this column is where that answer will be sitting |
+| `bytes` | how many came back |
+| `transcript_id` | the transcript this call concerned — and the **dedupe key**: a re-sweep files nothing new |
+| `sweep_id` | groups a sweep's calls, which is what the per-sweep counts on the Settings card are built from |
+| `file_id` / `proposal_id` | where it ended up, attached after the fact. A proposal carries **both** (its quarantined file row and the proposal governing it) |
+
+**`graph_sweeps` — one row per sweep.** `graph_audit` answers *what did the app
+touch*; this answers *what did the run do*: status, trigger, users seen, user
+errors, transcripts/filed/proposed/skipped, bytes, and the `since_at` watermark
+the next sweep reads. Same shape and reasoning as `backup_runs`.
+
+**Neither table is in the cascades, and that is deliberate.** An audit row must
+**outlive** the document it refers to: deleting a folder deletes its files, and
+the line saying *the app reached into a mailbox at 03:00 and filed this* stays.
+There are no SQL FKs in this schema, so a `file_id` pointing at a deleted row
+dangles by design.
+
+**Transcripts are INTERNAL.** `lib/firewall.js` gives `transcript` the same
+exclusion the tech report has had since F2, one level down: the table guard
+cannot cover it (a transcript is a `files` row, and `files` is a table the recap
+generator is *supposed* to read for its photos), so `RECAP_FORBIDDEN_FILE_KINDS`
+refuses any recap read that names a forbidden kind **and** any read of `files`
+that pins no `kind=` at all — the second lock being the one that catches the
+realistic future edit.
+
+**Doors.** `GET /api/admin/graph-audit` (admin, paged, + per-sweep counts + the
+sweep ledger + the config posture) is the read side; `POST
+/api/admin/transcript-sweep` (admin) is the manual twin of the timer, answering
+the sweep's ledger row whatever the verdict and a named 501 while unconfigured.
+`/api/health` gains an additive `graph` block: config presence (*"this is NOT a
+login test"*), the last measured sweep, the audit-row count, and `stale` when a
+configured reader has had no successful sweep in 2× the interval.
 
 ### Backups — the nightly pg_dump (`lib/backup.js`, `RESTORE.md`)
 
