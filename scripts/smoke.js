@@ -7022,12 +7022,23 @@ const DEL = (p, o) => call('DELETE', p, o);
        tLib.vttToText(sampleVtt));
     ok('vttSpeakers reads the room', tLib.vttSpeakers(sampleVtt).join('|') === 'Tony Tran|Candice Wren',
        tLib.vttSpeakers(sampleVtt));
-    ok('the document name is human, dated and never the GUID',
-       /^2026-05-01 Load-in walkthrough \(transcript\)$/.test(
-         tLib.transcriptDocName({ id: 'tr-guid-9', createdDateTime: '2026-05-01T14:00:00Z' },
-                                'Load-in walkthrough')),
-       tLib.transcriptDocName({ id: 'tr-guid-9', createdDateTime: '2026-05-01T14:00:00Z' },
+    // The name leads with the DATE and the SUBJECT — what a person scanning a
+    // folder listing is actually looking for — and tails with eight characters
+    // of the transcript id, never the whole GUID.
+    ok('the document name is human, dated, and tails the id rather than leading with it',
+       tLib.transcriptDocName({ id: 'MSMzZjkxMDQ4-c0de9a71', createdDateTime: '2026-05-01T14:00:00Z' },
+                              'Load-in walkthrough') ===
+       '2026-05-01 Load-in walkthrough (transcript c0de9a71)',
+       tLib.transcriptDocName({ id: 'MSMzZjkxMDQ4-c0de9a71', createdDateTime: '2026-05-01T14:00:00Z' },
                               'Load-in walkthrough'));
+    // TWO MEETINGS, ONE DAY, ONE SUBJECT — the normal case for a daily standup,
+    // and silent byte-overwrite is the quietest way to lose a document. The
+    // suffix is what makes the two nas_paths different.
+    ok('...and two DIFFERENT meetings sharing a day and a subject get DIFFERENT names — so one ' +
+       'unattended write can never eat the other\'s bytes',
+       tLib.transcriptDocName({ id: 'AAAA1111', createdDateTime: '2026-05-01T09:00:00Z' }, 'Daily standup') !==
+       tLib.transcriptDocName({ id: 'BBBB2222', createdDateTime: '2026-05-01T16:00:00Z' }, 'Daily standup'),
+       tLib.transcriptDocName({ id: 'AAAA1111', createdDateTime: '2026-05-01T09:00:00Z' }, 'Daily standup'));
     ok('the listing path carries the createdDateTime watermark and no credential',
        /getAllTranscripts\?\$filter=/.test(tLib.listPath('a@b.com', '2026-09-18T00:00:00.000Z')) &&
        tLib.listPath('a@b.com', '2026-09-18T00:00:00.000Z').indexOf('secret') < 0,
