@@ -290,12 +290,14 @@ var SR = (function () {
      REPORTS_BY_ID, NOTIF_BY_ID, NEEDS_BY_ID,
      CONTACTS_BY_ID, SHOW_CONTACTS_BY_ID,
      CONTENT_BY_ID, CONTENT_VERSIONS_BY_ID,
+     MEETINGS_BY_ID,
      NOTE_READS].forEach(clearMap);
     [PROJECTS, ALL_SHOWS, ALL_JOBS, ALL_EXPENSES, ALL_POS, PO_LINES, ALL_NOTES,
      ALL_DELIVERABLES, USERS, BUDGET_LINES,
      TECH_REPORTS, NOTIF_OUTBOX, ALL_NEEDS,
      ALL_CONTACTS, ALL_SHOW_CONTACTS,
-     ALL_CONTENT, ALL_CONTENT_VERSIONS].forEach(function (a) { a.length = 0; });
+     ALL_CONTENT, ALL_CONTENT_VERSIONS,
+     ALL_MEETINGS].forEach(function (a) { a.length = 0; });
     NOTIF_PREFS = {};
     /* mentionLookup() memoizes name->username off USERS on first use. USERS is
        emptied above, but the cache is not derived state the maps own — so
@@ -433,6 +435,15 @@ var SR = (function () {
     sched: function (i) { return keep(SCHEDULE_BY_ID, i); },
     crew: function (c) { return keep(CREW_BY_ID, c); },
     rooming: function (r) { return keep(ROOMING_BY_ID, r); },
+    /* meetings ride the flat store because viewSeason reads them SYNCHRONOUSLY
+       (meetingsForProject), the demo way — the folder render warms the list
+       first, exactly like it warms the project's notes. */
+    meeting: function (m) {
+      if (!m) return m;
+      var rec = keep(MEETINGS_BY_ID, m);
+      push1(ALL_MEETINGS, rec);
+      return rec;
+    },
     deliverable: function (d) {
       if (!d) return d;
       (d.photos || []).forEach(A.file);
@@ -1632,6 +1643,9 @@ var api = (function () {
           if (po.quote_file_id === id) po.quote_file_id = null;
           if (po.invoice_file_id === id) po.invoice_file_id = null;
         });
+        /* NULLS, never cascades — the same rule routes/files.js holds for a
+           meeting's transcript. The digest outlives the recording. */
+        ALL_MEETINGS.forEach(function (m) { if (m.transcript_file_id === id) m.transcript_file_id = null; });
         delete FILES_BY_ID[id];
         return ok({ ok: true });
       }
@@ -5150,6 +5164,116 @@ var api = (function () {
         });
     },
 
+    /* Every document IN A FOLDER — the folder-level ones and every show's.
+       The server stores exactly one of the two ids per row (routes/files.js:
+       `show ? null : project.id`), so "the folder's documents" is genuinely two
+       questions, and this is the one place that asks both. Feeds the meeting
+       dialog's link-to-a-transcript picker. */
+    listFolderFiles: function (projectId) {
+      var pid = Number(projectId);
+      if (!API()) {
+        var out = [];
+        Object.keys(FILES_BY_ID).forEach(function (k) {
+          var f = FILES_BY_ID[k];
+          var owner = f.project_id ||
+            (f.show_id && SHOWS_BY_ID[f.show_id] ? SHOWS_BY_ID[f.show_id].project_id : null);
+          if (owner === pid) out.push(f);
+        });
+        return ok(out);
+      }
+      return SR.get('/api/projects/' + pid).then(function (p) {
+        A.project(p);
+        var calls = [SR.get('/api/files' + SR.qs({ project_id: pid, limit: 500 }))];
+        (p.shows || []).forEach(function (s) {
+          calls.push(SR.get('/api/files' + SR.qs({ show_id: s.id, limit: 500 })));
+        });
+        return Promise.all(calls).then(function (lists) {
+          var rows = [];
+          lists.forEach(function (list) { (list || []).forEach(function (f) { rows.push(A.file(f)); }); });
+          return rows;
+        });
+      });
+    },
+
+    /* ---- meetings — the season's meeting summaries (Tom, 2026-09-21) ------
+       Full parity with routes/meetings.js, refusals included: a missing title,
+       a show from another folder and a document from another folder all fail
+       with the SERVER'S OWN wording, so the demo teaches the walls rather than
+       only the happy path. The demo store is the flat ALL_MEETINGS that
+       viewSeason reads synchronously. */
+    listMeetings: function (projectId) {
+      if (!API()) {
+        var p = PROJECTS_BY_ID[Number(projectId)];
+        return p ? ok(meetingsForProject(p.id)) : fail('project ' + projectId + ' not found');
+      }
+      return SR.get('/api/projects/' + Number(projectId) + '/meetings')
+        .then(function (rows) { return (rows || []).map(A.meeting); });
+    },
+    addMeeting: function (projectId, body) {
+      body = body || {};
+      if (!API()) {
+        var p = PROJECTS_BY_ID[Number(projectId)];
+        if (!p) return fail('project ' + projectId + ' not found');
+        var bad = _meetingRefusal(p, body);
+        if (bad) return fail(bad);
+        var m = mkMeeting(p, { title: String(body.title || '').trim(),
+          held_at: body.held_at || null, held_time: body.held_time || '',
+          attendees: String(body.attendees || '').trim(),
+          summary_md: body.summary_md || '',
+          show_id: body.show_id ? Number(body.show_id) : null,
+          transcript_file_id: body.transcript_file_id ? Number(body.transcript_file_id) : null,
+          by: ME, off: 0 });
+        /* the activity twin lands on the show when the meeting names one — a
+           folder-wide call has no show feed to land in, same as the server's
+           showId:null row */
+        var s0 = m.show_id ? SHOWS_BY_ID[m.show_id] : null;
+        if (s0) s0.activity.unshift(mkAct(ME, 'meeting.add', m.title, 0, _nowHM(), true));
+        return ok(m);
+      }
+      var b = {}; Object.keys(body).forEach(function (k) { b[k] = body[k]; });
+      return SR.post('/api/projects/' + Number(projectId) + '/meetings', b).then(A.meeting);
+    },
+    updateMeeting: function (id, patch) {
+      patch = patch || {};
+      if (!API()) {
+        var m = MEETINGS_BY_ID[Number(id)];
+        if (!m) return fail('meeting ' + id + ' not found');
+        if (patch.title !== undefined && !String(patch.title || '').trim()) {
+          return fail('a meeting needs a title — delete the meeting instead of blanking it');
+        }
+        var p = PROJECTS_BY_ID[m.project_id];
+        var bad = _meetingRefusal(p, patch, m);
+        if (bad) return fail(bad);
+        Object.keys(patch).forEach(function (k) { m[k] = patch[k]; });
+        if (m.show_id) m.show_id = Number(m.show_id);
+        if (m.transcript_file_id) m.transcript_file_id = Number(m.transcript_file_id);
+        m.updated_at = TODAY_ISO;
+        var s1 = m.show_id ? SHOWS_BY_ID[m.show_id] : null;
+        if (s1) s1.activity.unshift(mkAct(ME, 'meeting.update', m.title, 0, _nowHM()));
+        return ok(m);
+      }
+      return SR.put('/api/meetings/' + Number(id), patch).then(A.meeting);
+    },
+    deleteMeeting: function (id) {
+      if (!API()) {
+        var m = MEETINGS_BY_ID[Number(id)];
+        if (!m) return fail('meeting ' + id + ' not found');
+        var s2 = m.show_id ? SHOWS_BY_ID[m.show_id] : null;
+        var pid = m.project_id;
+        ALL_MEETINGS.splice(ALL_MEETINGS.indexOf(m), 1);
+        delete MEETINGS_BY_ID[m.id];
+        if (s2) s2.activity.unshift(mkAct(ME, 'meeting.remove', m.title, 0, _nowHM(), true));
+        return ok({ ok: true, project_id: pid });
+      }
+      return SR.del('/api/meetings/' + Number(id)).then(function (r) {
+        /* the read-through cache half: the row is gone server-side, so no map
+           may keep serving it to the season dashboard */
+        var cur = MEETINGS_BY_ID[Number(id)];
+        if (cur) { ALL_MEETINGS.splice(ALL_MEETINGS.indexOf(cur), 1); delete MEETINGS_BY_ID[Number(id)]; }
+        return r;
+      });
+    },
+
     /* ---- B2. the call-sheet header — rendered everywhere, editable nowhere */
     updateCallSheet: function (showId, patch) {
       if (!API()) {
@@ -5632,6 +5756,13 @@ var api = (function () {
           delete JOBS_BY_ID[j.id];
           for (var i = ALL_JOBS.length - 1; i >= 0; i--) if (ALL_JOBS[i].id === j.id) ALL_JOBS.splice(i, 1);
         });
+        /* a meeting dies with its folder — deleteProjectCascade's line, mirrored */
+        for (var mi = ALL_MEETINGS.length - 1; mi >= 0; mi--) {
+          if (ALL_MEETINGS[mi].project_id === p.id) {
+            delete MEETINGS_BY_ID[ALL_MEETINGS[mi].id];
+            ALL_MEETINGS.splice(mi, 1);
+          }
+        }
         delete PROJECTS_BY_ID[p.id];
         for (var k = PROJECTS.length - 1; k >= 0; k--) if (PROJECTS[k].id === p.id) PROJECTS.splice(k, 1);
         return ok({ ok: true });
@@ -6033,6 +6164,17 @@ var api = (function () {
         if (ALL_EXPENSES[i].id === e.id) ALL_EXPENSES.splice(i, 1);
       }
     });
+    /* deleteShowCascade's meetings pair, mirrored: a meeting belongs to the
+       FOLDER, so both of its references into this show are unpicked and the
+       meeting itself stands. The file loop above already dropped the rows the
+       transcript ids pointed at, which is why this runs over the id list rather
+       than over FILES_BY_ID. */
+    var goneFiles = {};
+    (s.files || []).forEach(function (f) { goneFiles[f.id] = 1; });
+    ALL_MEETINGS.forEach(function (m) {
+      if (m.transcript_file_id && goneFiles[m.transcript_file_id]) m.transcript_file_id = null;
+      if (m.show_id === s.id) m.show_id = null;
+    });
     var p = PROJECTS_BY_ID[s.project_id];
     if (p && p.shows) p.shows = p.shows.filter(function (x) { return x.id !== s.id; });
     delete SHOWS_BY_ID[s.id];
@@ -6106,6 +6248,45 @@ var api = (function () {
   function _nowHM() {
     var d = new Date(), h = String(d.getHours()), m = String(d.getMinutes());
     return (h.length < 2 ? '0' + h : h) + ':' + (m.length < 2 ? '0' + m : m);
+  }
+
+  /* The demo twin of routes/meetings.js's validation, word for word — a demo
+     that only knows the happy path teaches a screen that is wrong about the
+     server. `existing` is present on a PATCH, absent on a create (which is how
+     "title is required" applies to one and not the other).
+     Returns the refusal STRING, or null when the body is fine. */
+  function _meetingRefusal(project, body, existing) {
+    if (!project) return 'project not found';
+    if (!existing && !String(body.title || '').trim()) {
+      return 'a meeting needs a title — what the call was about';
+    }
+    var d = body.held_at;
+    if (d !== undefined && d !== null && d !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(String(d))) {
+      return 'held_at must be an ISO date (YYYY-MM-DD) or null — got "' + d + '"';
+    }
+    var t = body.held_time;
+    if (t !== undefined && t !== null && t !== '' && !/^\d{2}:\d{2}$/.test(String(t))) {
+      return 'held_time must be HH:MM or empty — got "' + t + '"';
+    }
+    if (body.show_id) {
+      var s = SHOWS_BY_ID[Number(body.show_id)];
+      if (!s) return 'show ' + body.show_id + ' not found';
+      if (s.project_id !== project.id) {
+        return 'show ' + body.show_id +
+          ' belongs to another folder — a meeting links only to a show in its own folder';
+      }
+    }
+    if (body.transcript_file_id) {
+      var f = FILES_BY_ID[Number(body.transcript_file_id)];
+      if (!f) return 'file ' + body.transcript_file_id + ' not found';
+      var ownerId = f.project_id || (f.show_id && SHOWS_BY_ID[f.show_id]
+        ? SHOWS_BY_ID[f.show_id].project_id : null);
+      if (ownerId !== project.id) {
+        return 'file ' + body.transcript_file_id +
+          " belongs to another folder — a meeting links only to its own folder's documents";
+      }
+    }
+    return null;
   }
   /* F3 — the demo twin of routes/notes.js createNote()'s outbox hop. An
      @mention is a real delivery; the bell has it already, and this queues the

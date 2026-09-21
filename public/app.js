@@ -138,6 +138,7 @@ async function renderView(view, arg) {
        openFolder auto-collapses it straight into the show view.) */
     var project = await api.getProject(arg);
     await api.listNotes('project', project.id);   /* notesPanel reads the index */
+    await api.listMeetings(project.id);           /* meetingsPanel reads it too */
     CUR.projectId = project.id;
     s.innerHTML = viewSeason(project);
     crumb([{ t: 'Projects', act: act('goProjects') }, { t: project.name }]);
@@ -4598,7 +4599,8 @@ var PENDING_CREW = null, PENDING_SHOWEDIT = null, PENDING_FOLDEDIT = null,
     PENDING_SHEET = null, PENDING_TASK = null, PENDING_BUDGET = null,
     PENDING_BOOK = null, PENDING_POETA = null, PENDING_PROOF = null,
     PENDING_CONTRACT = null, PENDING_PUSH = null,
-    PENDING_CONTACT = null, PENDING_SC = null, PENDING_ROOM = null;
+    PENDING_CONTACT = null, PENDING_SC = null, PENDING_ROOM = null,
+    PENDING_MEETING = null;
 
 /* the three shared readers every commit below uses, and nothing else */
 function _v(id) { var el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; }
@@ -5589,6 +5591,147 @@ async function roomDeleteAct(id) {
   closeM();
   toast('Off the rooming list', ((row && row.person) || 'The row') + ' — logged to activity');
   return refreshShowTab(showId, 'bookings');
+}
+
+/* ── MEETINGS · the season's meeting summaries ───────────────────────────────
+   Tom, 2026-09-21: "we should definitely add a meeting summary feature to
+   projects... we can add these summaries."
+
+   THE MANUAL DOOR SHIPS FIRST (the 9/16 law). The whole feature is this dialog:
+   a person who has just come off a client planning call pastes the digest in,
+   names the call, the day and who was on it, and it is on the season for good.
+   The extraction pipeline that will one day write these rows off a transcript
+   does not exist — so nothing here pretends it does, and `source` stays
+   'manual'.
+
+   The summary field is a plain textarea on purpose: the workflow is PASTE, and
+   a rich editor would fight the markdown that arrives in the clipboard. It is
+   rendered — safely — by components.js mdHTML() on the way back out. */
+function meetingById(id) { return MEETINGS_BY_ID[Number(id)] || null; }
+
+/* the reader. Opening a row is a READ, available to anybody signed in — the
+   edit affordances appear inside it only for somebody who could also have
+   pressed the pencil on the row. */
+async function openMeetingAct(id) {
+  var m = meetingById(id);
+  if (!m && CUR.projectId) {
+    try { await api.listMeetings(CUR.projectId); } catch (_) { /* the modal says so below */ }
+    m = meetingById(id);
+  }
+  if (!m) { toast('Not found', 'That meeting is no longer on this folder — refresh the season', 'err'); return; }
+  var project = PROJECTS_BY_ID[m.project_id] || null;
+  var canEdit = canEditFolder(project);
+  var foot = '<div style="display:flex;justify-content:' + (canEdit ? 'space-between' : 'flex-end') +
+    ';gap:9px;margin-top:12px;align-items:center">' +
+    (canEdit ? '<button class="btn ghost" ' + act('deleteMeeting', m.id) + '>' + icon('trash') + 'Delete</button>' : '') +
+    '<span style="display:flex;gap:9px">' +
+    '<button class="btn ghost" ' + act('closeModal') + '>Close</button>' +
+    (canEdit ? '<button class="btn primary" ' + act('editMeeting', m.id) + '>' + icon('pencil') + 'Edit</button>' : '') +
+    '</span></div>';
+  openModal(m.title, meetingDetailHTML(m) + foot);
+}
+
+/* the writer — add (meetingId null) and edit are the same dialog, like every
+   other pair in this file */
+async function openMeeting(projectId, meetingId) {
+  var m = meetingId ? meetingById(meetingId) : null;
+  var pid = Number(m ? m.project_id : projectId);
+  var project = await api.getProject(pid);
+  if (meetingId && !m) { toast('Not found', 'That meeting is no longer on this folder', 'err'); return; }
+  PENDING_MEETING = { projectId: pid, id: m ? m.id : null };
+
+  /* which show, if any. Most planning calls are season-wide — that is the
+     preselected answer, and it is a real answer rather than an empty one. */
+  var showOpts = '<option value="">— the whole season —</option>' +
+    (project.shows || []).slice().sort(function (a, b) { return a.event_date.localeCompare(b.event_date); })
+      .map(function (s) {
+        return '<option value="' + Number(s.id) + '"' + (m && m.show_id === s.id ? ' selected' : '') + '>' +
+          esc(s.name) + '</option>';
+      }).join('');
+
+  /* the transcript picker. Transcripts sort to the top because that is what a
+     digest is written from; every other document in the folder is still
+     offered, because a summary is sometimes written off a recording somebody
+     filed as 'recording' or 'other'. */
+  var docs = [];
+  try { docs = await api.listFolderFiles(pid); } catch (_) { docs = []; }
+  docs.sort(function (a, b) {
+    var ak = a.kind === 'transcript' ? 0 : 1, bk = b.kind === 'transcript' ? 0 : 1;
+    return ak - bk || String(b.created_at || '').localeCompare(String(a.created_at || ''));
+  });
+  var fileOpts = '<option value="">— not linked to a document —</option>' +
+    docs.slice(0, 200).map(function (f) {
+      return '<option value="' + Number(f.id) + '"' + (m && m.transcript_file_id === f.id ? ' selected' : '') + '>' +
+        esc((f.kind === 'transcript' ? 'Transcript · ' : '') + f.name) + '</option>';
+    }).join('');
+
+  openModal((m ? 'Edit meeting' : 'Add meeting') + ' · ' + project.name,
+    '<div class="hint" style="margin:0 0 12px">' + icon('users') + '<span>One record per planning ' +
+    'call. Paste the digest into the summary — <b>markdown</b> is rendered: <code>#</code> headings, ' +
+    '<code>**bold**</code>, <code>-</code> bullets, numbered lists, <code>&gt;</code> quoted receipts ' +
+    'and <code>---</code> rules. Meeting summaries are <b>internal</b> and can never reach a client ' +
+    'recap.</span></div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Title', '<input id="mtTitle" class="cell-in" placeholder="what the call was about" value="' +
+      esc(m ? m.title || '' : '') + '">') + '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr .7fr 1.6fr">' +
+    finLabelWrap('Date', '<input id="mtDate" class="cell-in" type="date" value="' +
+      esc(m ? m.held_at || '' : TODAY_ISO) + '">') +
+    finLabelWrap('Time', '<input id="mtTime" class="cell-in" type="time" value="' +
+      esc(m ? m.held_time || '' : '') + '">', 'optional') +
+    finLabelWrap('Attendees', '<input id="mtWho" class="cell-in" placeholder="Tom Andres, Tony Vigon, Jim Eaton" value="' +
+      esc(m ? m.attendees || '' : '') + '">', 'free text — clients and venue staff are not users') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr 1fr">' +
+    finLabelWrap('About which show', '<select id="mtShow" class="cell-in">' + showOpts + '</select>',
+      'Most planning calls are season-wide. Pick a show only when the call really was about one.') +
+    finLabelWrap('Transcript / source document', '<select id="mtFile" class="cell-in">' + fileOpts + '</select>',
+      'Links the summary to the recording it was written from. Deleting that document later unpicks the link and leaves this summary standing.') +
+    '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('Summary', '<textarea id="mtSummary" class="cell-in" rows="14" ' +
+      'style="font-family:var(--font-mono);font-size:12px;line-height:1.55;resize:vertical" ' +
+      'placeholder="# Title&#10;**date | who was on it**&#10;&#10;## Action items&#10;**Tony — send the operator document.**&#10;&gt; `[00:22:41] Tony: &quot;I will send it to them...&quot;`">' +
+      esc(m ? m.summary_md || '' : '') + '</textarea>') + '</div>' +
+    _foot(act('mtgCommit'), m ? 'Save meeting' : 'Add meeting', m ? 'check' : 'plus',
+      m ? '<button class="btn ghost" ' + act('deleteMeeting', m.id) + '>' + icon('trash') + 'Delete</button>' : ''));
+}
+async function mtgCommit() {
+  if (!PENDING_MEETING) return;
+  var p = PENDING_MEETING;
+  var title = _v('mtTitle');
+  if (!title) { toast('What was the call?', 'A meeting needs a title — the server would refuse this too'); return; }
+  var body = { title: title, held_at: _v('mtDate') || null, held_time: _v('mtTime') || '',
+               attendees: _v('mtWho'), summary_md: _v('mtSummary') };
+  var shEl = document.getElementById('mtShow');
+  if (shEl) body.show_id = shEl.value ? Number(shEl.value) : null;
+  var fEl = document.getElementById('mtFile');
+  if (fEl) body.transcript_file_id = fEl.value ? Number(fEl.value) : null;
+
+  var saved;
+  try {
+    saved = p.id ? await api.updateMeeting(p.id, body) : await api.addMeeting(p.projectId, body);
+  } catch (e) { toast(p.id ? 'Not saved' : 'Not added', String(e && e.message || e), 'err'); return; }
+  var projectId = p.projectId, wasEdit = !!p.id;
+  PENDING_MEETING = null;
+  closeM();
+  toast(wasEdit ? 'Meeting saved' : 'Meeting filed',
+    saved.title + (saved.held_at ? ' · ' + fmtDate(saved.held_at) : '') +
+    (saved.summary_md ? '' : ' — no summary yet'));
+  return render('folder', projectId);
+}
+async function meetingDeleteAct(id) {
+  var m = meetingById(id);
+  var projectId = m ? m.project_id : (PENDING_MEETING ? PENDING_MEETING.projectId : CUR.projectId);
+  if (!askConfirm('Delete "' + ((m && m.title) || 'this meeting') + '"?\n\n' +
+      'The summary goes and the removal is logged. Any linked transcript document is ' +
+      'left exactly where it is.')) return;
+  try { await api.deleteMeeting(id); }
+  catch (e) { toast('Not deleted', String(e && e.message || e), 'err'); return; }
+  PENDING_MEETING = null;
+  closeM();
+  toast('Meeting deleted', ((m && m.title) || 'The record') + ' — logged to activity');
+  return render('folder', projectId);
 }
 
 /* ── B8 · THE PO's EXPECTED DATE — the delivery alarm's only input ─────────── */
@@ -7961,6 +8104,12 @@ var ACTIONS = {
   roomCommit:    function () { return roomCommit(); },
   roomDelete:    function (t, id) { return roomDeleteAct(id); },
   roomSeedCrew:  function (t, id) { return roomSeedCrewAct(id); },
+  /* meetings — the season's meeting summaries (Tom, 2026-09-21) */
+  openMeeting:   function (t, id) { return openMeetingAct(id); },
+  addMeeting:    function (t, id) { return openMeeting(id, null); },
+  editMeeting:   function (t, id) { return openMeeting(null, id); },
+  mtgCommit:     function () { return mtgCommit(); },
+  deleteMeeting: function (t, id) { return meetingDeleteAct(id); },
   /* B8 the delivery-risk alarm's inputs */
   editPOEta:     function (t, id) { return openPOEta(id); },
   poEtaCommit:   function () { return poEtaCommit(); },

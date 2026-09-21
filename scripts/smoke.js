@@ -6461,6 +6461,221 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('R SHOW DELETE takes the rooming list with it — zero orphans',
      rs2After.rows[0].n === 0, rs2After.rows[0]);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('M. meetings — the season\'s meeting summaries (Tom, 2026-09-21)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "we should definitely add a meeting summary feature to projects... we can
+  // add these summaries." The 9/18 reader files the TRANSCRIPT; this is the
+  // human record over it — title, day, who was on it, and the digest.
+  //
+  // THREE MUTATION GATES ARE PINNED HERE, each named on its assertion:
+  //   1. the pm+/ownership gate on the write routes (remove pmPlus, or the
+  //      canEditProject call, and the two GATE lines go red)
+  //   2. meetings.transcript_file_id NULLS on a file delete — cascading the
+  //      meeting instead makes "the digest outlives the recording" go red
+  //   3. `meetings` in RECAP_FORBIDDEN_TABLES — a digest is a transcript
+  //      distilled, and distilled is worse
+  // The rows this section leaves on P ride into section 6's zero-orphan sweep,
+  // which is where "a meeting dies with its folder" is actually proven.
+  {
+    const mtDigest = [
+      '# ' + TAG + ' LOVB / MLV training sync',
+      '**2026-09-17 | Tom Andres, Tony Vigon, Jim Eaton**',
+      '',
+      '## Action items',
+      '',
+      '**Tony — send the operator document to San Francisco.**',
+      '> Tony: "I will send it to them and ask them for a meeting for next week."',
+      '',
+      '- Houston is off the board.',
+      '- Training is not gated on the shipment.'
+    ].join('\n');
+
+    // ── the floors ─────────────────────────────────────────────────────────
+    // Writes are the SCHEDULE family's gate, reused: pm+ RANK and ownership of
+    // the FOLDER. Reads are open to anyone signed in — a tech who missed the
+    // call is exactly who needs to read what was decided on it.
+    // Each 403 is pinned to the HALF of the gate that produced it, by its own
+    // wording. Without that, the two halves are indistinguishable from outside
+    // — canEditProject() already refuses every role the rank floor would, so a
+    // bare `status === 403` pair stays green with `pmPlus` deleted and pins
+    // only one of the two things it appears to pin.
+    const mtTech = await POST(`/api/projects/${P}/meetings`, { title: 'X' }, { token: TECHT });
+    ok('M GATE: a tech cannot file a meeting — refused by the RANK floor, in its own words ' +
+       '(delete pmPlus from the route and this reads the ownership refusal instead)',
+       mtTech.status === 403 && /Requires 'pm' role or higher/.test(mtTech.body.error || ''), mtTech.body);
+    const mtPm2 = await POST(`/api/projects/${P}/meetings`, { title: 'X' }, { token: PM2T });
+    ok('M GATE: a pm who owns nothing cannot either — refused by the OWNERSHIP half, which is ' +
+       'the only thing that could have refused him',
+       mtPm2.status === 403 &&
+       /requires pm, manager or admin on this project/.test(mtPm2.body.error || ''), mtPm2.body);
+    ok('M an unauthenticated read is 401',
+       (await GET(`/api/projects/${P}/meetings`)).status === 401);
+    const mtRead = await GET(`/api/projects/${P}/meetings`, { token: TECHT });
+    ok('M ...while a signed-in tech READS the list — that is the whole point of filing it',
+       mtRead.status === 200 && Array.isArray(mtRead.body), mtRead.body);
+
+    // ── the transcript the digest is written from ──────────────────────────
+    const mtFile = await POST('/api/files', { show_id: S, name: TAG + ' meeting transcript',
+      ext: 'vtt', kind: 'transcript', size: 4096 }, { token: PMT });
+    ok('M a transcript document exists to write the digest from',
+       mtFile.status === 200 && mtFile.body.kind === 'transcript', mtFile.body);
+
+    // ── create ─────────────────────────────────────────────────────────────
+    const mt1 = await POST(`/api/projects/${P}/meetings`, {
+      title: TAG + ' LOVB / MLV training sync', held_at: '2026-09-17', held_time: '14:00',
+      attendees: 'Tom Andres, Tony Vigon, Jim Eaton', summary_md: mtDigest,
+      transcript_file_id: mtFile.body.id }, { token: PMT });
+    ok('M the OWNING pm files a meeting', mt1.status === 200 && mt1.body.id > 0, mt1.body);
+    ok('M ...stamped manual, by the person who filed it — the pipeline that writes `graph` does not exist yet',
+       mt1.body.source === 'manual' && mt1.body.created_by === pmUser, mt1.body);
+    ok('M ...and the digest came back RAW. A server that shipped half-rendered HTML would be one ' +
+       'nobody downstream could re-escape',
+       mt1.body.summary_md === mtDigest, (mt1.body.summary_md || '').slice(0, 60));
+    const mtAct = await pool.query(
+      `SELECT * FROM activity WHERE project_id=$1 AND action='meeting.add' ORDER BY id DESC LIMIT 1`, [P]);
+    ok('M ...and one activity row says a meeting was filed, naming it',
+       mtAct.rows.length === 1 && mtAct.rows[0].accent === true &&
+       mtAct.rows[0].detail.indexOf('2026-09-17') >= 0, mtAct.rows[0]);
+
+    // ── the refusals ───────────────────────────────────────────────────────
+    const mtNoTitle = await POST(`/api/projects/${P}/meetings`, { held_at: '2026-09-17' }, { token: PMT });
+    ok('M a meeting with no title is refused, naming what it needs',
+       mtNoTitle.status === 400 && /needs a title/.test(mtNoTitle.body.error || ''), mtNoTitle.body);
+    const mtBadDate = await POST(`/api/projects/${P}/meetings`,
+      { title: 'x', held_at: '17/09/2026' }, { token: PMT });
+    ok('M a date that is not ISO is refused, naming the field and the value it got',
+       mtBadDate.status === 400 && /held_at must be an ISO date/.test(mtBadDate.body.error || ''),
+       mtBadDate.body);
+    const mtBadTime = await POST(`/api/projects/${P}/meetings`,
+      { title: 'x', held_time: '2pm' }, { token: PMT });
+    ok('M ...and so is a time that is not HH:MM',
+       mtBadTime.status === 400 && /held_time must be HH:MM/.test(mtBadTime.body.error || ''),
+       mtBadTime.body);
+
+    // cross-folder wiring, the validation this feature exists to refuse — a
+    // meeting quietly pointing at another season's show or document
+    const mtOther = await POST('/api/projects', { name: TAG + ' Meetings elsewhere',
+      client: 'Elsewhere', type: 'led', owner: pmUser }, { token: A });
+    const MOP = mtOther.body.id;
+    const mtOtherShow = await POST('/api/shows', { project_id: MOP, name: TAG + ' Elsewhere show',
+      venue: 'x', event_date: '2026-12-09', seed_template: false }, { token: A });
+    const mtOtherFile = await POST('/api/files', { show_id: mtOtherShow.body.id,
+      name: TAG + ' elsewhere transcript', ext: 'vtt', kind: 'transcript' }, { token: A });
+    const mtXShow = await POST(`/api/projects/${P}/meetings`,
+      { title: 'x', show_id: mtOtherShow.body.id }, { token: PMT });
+    ok('M a show from ANOTHER folder is refused — no quiet cross-wiring',
+       mtXShow.status === 400 && /belongs to another folder/.test(mtXShow.body.error || ''), mtXShow.body);
+    const mtXFile = await POST(`/api/projects/${P}/meetings`,
+      { title: 'x', transcript_file_id: mtOtherFile.body.id }, { token: PMT });
+    ok('M ...and so is a document from another folder',
+       mtXFile.status === 400 && /belongs to another folder/.test(mtXFile.body.error || ''), mtXFile.body);
+    await DEL(`/api/projects/${MOP}`, { token: A });
+
+    // ── the list ───────────────────────────────────────────────────────────
+    const mtOld = await POST(`/api/projects/${P}/meetings`,
+      { title: TAG + ' kickoff', held_at: '2026-08-01' }, { token: PMT });
+    const mtUndated = await POST(`/api/projects/${P}/meetings`,
+      { title: TAG + ' someone forgot the date' }, { token: PMT });
+    const mtList = await GET(`/api/projects/${P}/meetings`, { token: TECHT });
+    ok('M the list is NEWEST FIRST, undated last — a season\'s most recent call is the one ' +
+       'somebody is looking for',
+       mtList.status === 200 && mtList.body.length === 3 &&
+       mtList.body[0].id === mt1.body.id && mtList.body[1].id === mtOld.body.id &&
+       mtList.body[2].id === mtUndated.body.id,
+       mtList.body.map((m) => [m.id, m.held_at]));
+
+    // ── update ─────────────────────────────────────────────────────────────
+    const mtUpd = await PUT(`/api/meetings/${mt1.body.id}`,
+      { title: TAG + ' LOVB / MLV training sync (revised)',
+        summary_md: mtDigest + '\n\n- Minneapolis is still a question mark.' }, { token: PMT });
+    ok('M the owning pm patches a meeting', mtUpd.status === 200 &&
+       /revised/.test(mtUpd.body.title) && /Minneapolis/.test(mtUpd.body.summary_md), mtUpd.body.title);
+    const mtUpdAct = await pool.query(
+      `SELECT * FROM activity WHERE project_id=$1 AND action='meeting.update' ORDER BY id DESC LIMIT 1`, [P]);
+    const mtChanges = (mtUpdAct.rows[0] || {}).changes || [];
+    const mtSumChange = mtChanges.filter((c) => c.field === 'summary_md')[0];
+    ok('M ...and the change row carries the digest\'s SHAPE, never its body — the feed is read by ' +
+       'everybody and a digest is INTERNAL',
+       !!mtSumChange && /characters$/.test(String(mtSumChange.to)) &&
+       !/Minneapolis/.test(JSON.stringify(mtChanges)), mtChanges);
+    const mtPatchPm2 = await PUT(`/api/meetings/${mt1.body.id}`, { title: 'nope' }, { token: PM2T });
+    ok('M GATE: a pm who owns nothing cannot patch one either',
+       mtPatchPm2.status === 403 &&
+       /requires pm, manager or admin on this project/.test(mtPatchPm2.body.error || ''), mtPatchPm2.body);
+    const mtPatchTech = await PUT(`/api/meetings/${mt1.body.id}`, { title: 'nope' }, { token: TECHT });
+    ok('M ...and the rank floor stands on the patch route as well',
+       mtPatchTech.status === 403 && /Requires 'pm' role or higher/.test(mtPatchTech.body.error || ''),
+       mtPatchTech.body);
+
+    // ── CASCADE 1: the transcript NULLS, it never takes the meeting ────────
+    // Mutation target: change the UPDATE in routes/files.js DELETE /files/:id
+    // to a DELETE FROM meetings and this pair goes red.
+    ok('M the meeting is linked to its transcript',
+       (await GET(`/api/projects/${P}/meetings`, { token: PMT }))
+         .body.filter((m) => m.id === mt1.body.id)[0].transcript_file_id === mtFile.body.id);
+    const mtFileDel = await DEL(`/api/files/${mtFile.body.id}`, { token: PMT });
+    ok('M the transcript document is deleted', mtFileDel.status === 200, mtFileDel.body);
+    const mtSurvivor = await pool.query('SELECT * FROM meetings WHERE id=$1', [mt1.body.id]);
+    ok('M FILE DELETE NULLS, NEVER CASCADES — the digest outlives the recording it was written ' +
+       'from (cascade the meeting instead and this goes red)',
+       mtSurvivor.rows.length === 1 && mtSurvivor.rows[0].transcript_file_id === null &&
+       /Minneapolis/.test(mtSurvivor.rows[0].summary_md), mtSurvivor.rows[0]);
+
+    // ── CASCADE 2: a show delete NULLS show_id, it never takes the meeting ─
+    // A meeting belongs to the FOLDER. The scratch show also carries the
+    // transcript of its own meeting, which is what pins the ORDERING inside
+    // deleteShowCascade: both UPDATEs must run before the files delete.
+    const mtShow = await POST('/api/shows', { project_id: P, name: TAG + ' Meetings scratch',
+      venue: 'x', event_date: '2026-12-07', seed_template: false }, { token: A });
+    const MS2 = mtShow.body.id;
+    const mtShowFile = await POST('/api/files', { show_id: MS2, name: TAG + ' advance transcript',
+      ext: 'vtt', kind: 'transcript' }, { token: PMT });
+    const mtAbout = await POST(`/api/projects/${P}/meetings`, {
+      title: TAG + ' Madison venue advance', held_at: '2026-09-10', show_id: MS2,
+      transcript_file_id: mtShowFile.body.id, summary_md: '## Dock window\n\n- 06:00 to 09:00 only.' },
+      { token: PMT });
+    ok('M a meeting can be about ONE show of the season',
+       mtAbout.status === 200 && mtAbout.body.show_id === MS2, mtAbout.body);
+    await DEL(`/api/shows/${MS2}`, { token: A });
+    const mtAfterShow = await pool.query('SELECT * FROM meetings WHERE id=$1', [mtAbout.body.id]);
+    ok('M SHOW DELETE NULLS show_id AND the transcript link — the meeting stands, because the ' +
+       'folder still happened and so did the call',
+       mtAfterShow.rows.length === 1 && mtAfterShow.rows[0].show_id === null &&
+       mtAfterShow.rows[0].transcript_file_id === null, mtAfterShow.rows[0]);
+
+    // ── the firewall: a digest is a transcript DISTILLED ───────────────────
+    const fwM = require('../lib/firewall');
+    let fwMeet = null;
+    try { await fwM.guardRecapQuery(pool).query('SELECT id FROM meetings WHERE project_id=$1', [P]); }
+    catch (e) { fwMeet = e.message; }
+    ok('M THE FIREWALL REFUSES A MEETING DIGEST — the decisions, the money and the client politics ' +
+       'with a quoted receipt under each one (drop `meetings` from RECAP_FORBIDDEN_TABLES and this ' +
+       'goes red)',
+       !!fwMeet && /may not read `meetings`/.test(fwMeet), fwMeet);
+
+    // ── delete ─────────────────────────────────────────────────────────────
+    ok('M a meeting id that never existed is a 404, not {ok:true}',
+       (await DEL('/api/meetings/999999', { token: PMT })).status === 404);
+    const mtDelTech = await DEL(`/api/meetings/${mtUndated.body.id}`, { token: TECHT });
+    ok('M GATE: a tech cannot delete a meeting either — same rank floor, same wording',
+       mtDelTech.status === 403 && /Requires 'pm' role or higher/.test(mtDelTech.body.error || ''),
+       mtDelTech.body);
+    const mtDelPm2 = await DEL(`/api/meetings/${mtUndated.body.id}`, { token: PM2T });
+    ok('M ...and neither can a pm who owns nothing — the ownership half, on the delete too',
+       mtDelPm2.status === 403 &&
+       /requires pm, manager or admin on this project/.test(mtDelPm2.body.error || ''), mtDelPm2.body);
+    const mtDel = await DEL(`/api/meetings/${mtUndated.body.id}`, { token: PMT });
+    ok('M the owning pm deletes one', mtDel.status === 200 && mtDel.body.ok === true, mtDel.body);
+    const mtDelAct = await pool.query(
+      `SELECT * FROM activity WHERE project_id=$1 AND action='meeting.remove'`, [P]);
+    ok('M ...and the removal is logged', mtDelAct.rows.length === 1, mtDelAct.rows.length);
+    ok('M ...while the OTHER meetings are untouched',
+       (await GET(`/api/projects/${P}/meetings`, { token: TECHT })).body.length === 3);
+    // three rows are deliberately left on P — section 6's sweep is where
+    // "a meeting dies with its folder" is actually proven.
+  }
+
   section('6. cascade integrity — a folder with a child of EVERY type');
   const before = await childCounts(P);
   ok('the smoke folder has children of every wired type',
@@ -6476,7 +6691,8 @@ const DEL = (p, o) => call('DELETE', p, o);
      && before.show_contacts > 0
      && before.content_pieces > 0 && before.content_versions > 0
      && before.show_dropbox_links > 0
-     && before.gear_snapshots > 0,
+     && before.gear_snapshots > 0
+     && before.meetings > 0,
      before);
   // add the remaining child types so the cascade is exercised in full
   await POST('/api/bookings', { show_id: S, category: 'Truck / freight', vendor: 'Landstar',
@@ -7511,6 +7727,11 @@ async function childCounts(projectId) {
     // dropbox pass — the rule this list exists to enforce, once more: a table
     // not counted here leaks rows on every folder delete.
     show_dropbox_links: await q(`SELECT COUNT(*) n FROM show_dropbox_links WHERE show_id ${inShows}`),
+    // meetings pass — the rule this list exists to enforce, once more: a table
+    // not counted here leaks rows on every folder delete. Project-scoped, and
+    // ONLY project-scoped: a meeting survives its show (show_id NULLS), so
+    // counting it through `inShows` would miss exactly the rows at risk.
+    meetings:         await q('SELECT COUNT(*) n FROM meetings WHERE project_id=$1'),
     activity:         await q(`SELECT COUNT(*) n FROM activity WHERE project_id=$1 OR show_id ${inShows}`)
   };
 }

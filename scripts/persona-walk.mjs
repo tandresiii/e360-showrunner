@@ -4094,6 +4094,232 @@ async function main() {
        /demo: true[\s\S]{0,900}sw-modeled/.test(API_JS));
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('52 · MEETINGS on a season — and the markdown that arrives with them');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom, 2026-09-21: "we should definitely add a meeting summary feature to
+  // projects... we can add these summaries."
+  //
+  // A meeting summary is the first thing this app renders that is neither a
+  // field somebody typed into a labelled box nor a number it computed itself.
+  // It is a PASTE — an entire document, arriving out of a chat window, written
+  // by a person or by a model, in markdown. That is the whole reason this
+  // section is in the persona walk rather than only in the smoke suite: the
+  // smoke suite can prove the row stores and the gates hold, but only a render
+  // can prove that what comes back out is TEXT and not MARKUP.
+  //
+  // components.js mdHTML() escapes the whole source FIRST and transforms
+  // second, and this section walks a deliberately hostile digest through it:
+  // a script tag, an onerror image, a quote that tries to close an attribute,
+  // and — the one that matters in THIS app — a `data-act` that would become a
+  // live button on the single delegated listener in app.js if it ever reached
+  // the DOM as markup. Mutation target, named on the assertion: drop the esc()
+  // from the first line of mdHTML and the inert-render lines go red.
+  {
+    reach('Add meeting (season dashboard)',
+      { seam: ['listMeetings', 'addMeeting'], action: ['addMeeting', 'mtgCommit'] });
+    reach('Read / edit / delete a meeting',
+      { seam: ['updateMeeting', 'deleteMeeting'], action: ['openMeeting', 'editMeeting', 'deleteMeeting'] });
+
+    // the season dashboard and the two panels beside it, so viewSeason renders
+    // whole rather than as a fragment nobody would recognise
+    for (const f of ['views-dashboard.js', 'views-finance.js', 'views-purchasing.js']) {
+      new vm.Script(SRC[f], { filename: 'public/' + f }).runInContext(demoTab);
+    }
+
+    // ── the demo fixture ───────────────────────────────────────────────────
+    const wmProj = await demoTab.api.getProject(3);           // the LOVB season
+    const wmSeeded = await demoTab.api.listMeetings(3);
+    ok('DEMO · the LOVB season carries modeled meetings from file://',
+       wmSeeded.length >= 2 && wmSeeded.every((m) => m.title && m.summary_md), wmSeeded.length);
+    ok('…newest first, which is the order the route\'s SQL produces too',
+       wmSeeded[0].held_at >= wmSeeded[1].held_at, wmSeeded.map((m) => m.held_at));
+    ok('…and one of them is linked to the transcript the unattended reader would have filed',
+       wmSeeded.some((m) => m.transcript_file_id &&
+         demoTab.FILES_BY_ID[m.transcript_file_id] &&
+         demoTab.FILES_BY_ID[m.transcript_file_id].kind === 'transcript'),
+       wmSeeded.map((m) => m.transcript_file_id));
+
+    // ── the section, rendered inside the real season dashboard ─────────────
+    const wmHtml = demoTab.viewSeason(wmProj);
+    ok('DEMO RENDER · the season dashboard grows a Meetings section',
+       />Meetings · 2/.test(wmHtml), wmHtml.indexOf('Meetings'));
+    ok('…with the Add meeting door on it (the manual door, shipped first)',
+       /data-act="addMeeting" data-id="3"/.test(wmHtml));
+    ok('…a row per meeting, each openable, each wearing its title, its day and who was on it',
+       wmSeeded.every((m) => wmHtml.indexOf('data-act="openMeeting" data-id="' + m.id + '"') >= 0) &&
+       wmHtml.indexOf(demoTab.esc('Tom Andres, Tony Vigon, Jim Eaton')) >= 0);
+    ok('…a one-line PREVIEW of the digest with the markdown furniture stripped off it — not ' +
+       '"# LOVB / MLV" with the hash still on the front',
+       /class="mtg-prev"/.test(wmHtml) && !/mtg-prev">#/.test(wmHtml));
+    ok('…Edit and Delete on every row, for somebody who could file one',
+       wmSeeded.every((m) => wmHtml.indexOf('data-act="editMeeting" data-id="' + m.id + '"') >= 0 &&
+         wmHtml.indexOf('data-act="deleteMeeting" data-id="' + m.id + '"') >= 0));
+    ok('…and it says plainly that a digest is INTERNAL, so nobody has to guess whether a ' +
+       'meeting can reach a client',
+       /client-recap generator can never read one/.test(wmHtml));
+    ok('the panel really is wired into viewSeason, not merely defined beside it',
+       /meetingsPanel\(project\)/.test(SRC['views-dashboard.js']));
+
+    // the same render as somebody who may READ but not write. The demo has no
+    // login, so the gate's input is swapped directly — CURRENT_USER is what
+    // canEditFolder() reads.
+    const wmWas = demoTab.CURRENT_USER;
+    demoTab.CURRENT_USER = demoTab.ROSTER.dvargas;            // Devin, role 'tech'
+    const wmTechHtml = demoTab.viewSeason(wmProj);
+    ok('DEMO RENDER · a TECH still sees the meetings — reads are open, which is the point of ' +
+       'filing them where a person who missed the call can find them',
+       wmSeeded.every((m) => wmTechHtml.indexOf('data-act="openMeeting" data-id="' + m.id + '"') >= 0));
+    ok('…and is offered no Add, no Edit and no Delete, matching the pm+ floor on the routes',
+       !/data-act="addMeeting"/.test(wmTechHtml) && !/data-act="editMeeting"/.test(wmTechHtml) &&
+       !/data-act="deleteMeeting"/.test(wmTechHtml));
+    demoTab.CURRENT_USER = wmWas;
+
+    // ── the dialog the person actually fills in ────────────────────────────
+    const wmDlg = APP_JS.slice(APP_JS.indexOf('async function openMeeting('),
+      APP_JS.indexOf('async function meetingDeleteAct'));
+    ok('the Add-meeting dialog asks for a title, a date, a time, attendees and the summary',
+       ['mtTitle', 'mtDate', 'mtTime', 'mtWho', 'mtSummary'].every((k) => wmDlg.indexOf('id="' + k + '"') >= 0));
+    ok('…the summary is a big TEXTAREA, because the workflow is paste — not a one-line input',
+       /<textarea id="mtSummary"[^>]*rows="1\d"/.test(wmDlg));
+    ok('…with an optional show picker and an optional link to an existing transcript',
+       /id="mtShow"/.test(wmDlg) && /id="mtFile"/.test(wmDlg) &&
+       /the whole season/.test(wmDlg) && /not linked to a document/.test(wmDlg));
+    ok('…and the commit sends every one of those fields — a form that collects less than it ' +
+       'claims to is the 8/31 lesson',
+       ['title', 'held_at', 'held_time', 'attendees', 'summary_md', 'show_id', 'transcript_file_id']
+         .every((k) => wmDlg.indexOf(k) >= 0 ||
+           APP_JS.slice(APP_JS.indexOf('async function mtgCommit'),
+             APP_JS.indexOf('async function meetingDeleteAct')).indexOf(k) >= 0));
+
+    // ── THE MARKDOWN RENDERER, on its own ──────────────────────────────────
+    const wmDoc = [
+      '# Heading one', '## Heading two', '### Heading three', '',
+      'A paragraph with **bold** and `code` in it.', '',
+      '- first bullet', '- second bullet', '',
+      '1. first numbered', '2. second numbered', '',
+      '> a quoted receipt', '', '---', '', 'A closing line.'
+    ].join('\n');
+    const wmOut = demoTab.mdHTML(wmDoc);
+    ok('mdHTML renders the shapes a digest is actually made of',
+       /<h3 class="md-h1">Heading one<\/h3>/.test(wmOut) &&
+       /<h4 class="md-h2">Heading two<\/h4>/.test(wmOut) &&
+       /<h5 class="md-h3">Heading three<\/h5>/.test(wmOut) &&
+       /<b>bold<\/b>/.test(wmOut) && /<code>code<\/code>/.test(wmOut) &&
+       /<ul><li>first bullet<\/li><li>second bullet<\/li><\/ul>/.test(wmOut) &&
+       /<ol><li>first numbered<\/li><li>second numbered<\/li><\/ol>/.test(wmOut) &&
+       /<blockquote>a quoted receipt<\/blockquote>/.test(wmOut) && /<hr>/.test(wmOut), wmOut.slice(0, 200));
+    ok('…and the blockquote rule matches `&gt;`, not `>` — which is the PROOF that esc() ran ' +
+       'before the parse rather than after it',
+       /&gt;/.test(SRC['components.js'].slice(SRC['components.js'].indexOf('function mdHTML'),
+         SRC['components.js'].indexOf('function mdPreview'))));
+    ok('…there is NO link syntax, deliberately — a [text](url) rule is an href a caller gets to fill',
+       demoTab.mdHTML('[click me](javascript:alert(1))').indexOf('href') < 0 &&
+       demoTab.mdHTML('[click me](javascript:alert(1))').indexOf('click me') >= 0);
+    ok('…an empty summary renders nothing at all, rather than an empty document shell',
+       demoTab.mdHTML('') === '' && demoTab.mdHTML(null) === '' && demoTab.mdHTML('   ') === '');
+
+    // ── HOSTILE INPUT — the assertion this section exists for ──────────────
+    const wmNasty = [
+      '# <script>alert("pwned")</script>',
+      '',
+      '<img src=x onerror="alert(1)">',
+      '',
+      '- <b onclick="alert(2)">click me</b>',
+      '- <div data-act="deleteFolder" data-id="3">delete the season</div>',
+      '',
+      '> he said "<iframe src=//evil.example></iframe>" and meant it',
+      '',
+      'closing " > \' & < tag'
+    ].join('\n');
+    const wmEvil = await demoTab.api.addMeeting(3, {
+      title: '<script>alert("title")</script>', held_at: '2026-09-19',
+      attendees: '<img src=x onerror=alert(3)>', summary_md: wmNasty });
+    ok('a hostile digest is STORED verbatim — sanitising on the way in would silently corrupt a ' +
+       'digest that legitimately quotes markup',
+       wmEvil.summary_md === wmNasty, (wmEvil.summary_md || '').slice(0, 40));
+    // The assertion has to look at TAGS, not at substrings. "onerror" and
+    // "data-act=" both appear in correct output — as ESCAPED TEXT, which is
+    // exactly what the reader is supposed to see. What must never appear is
+    // either of them inside a real `<…>`. So: pull every tag out of the
+    // rendered HTML and check what they are.
+    const tagsIn = (html) => html.match(/<[^>]*>/g) || [];
+    // the complete set mdHTML() emits — it has no other branch
+    const MD_TAGS = new Set(['<div class="md">', '</div>', '<p>', '</p>',
+      '<h3 class="md-h1">', '</h3>', '<h4 class="md-h2">', '</h4>',
+      '<h5 class="md-h3">', '</h5>', '<ul>', '</ul>', '<ol>', '</ol>',
+      '<li>', '</li>', '<b>', '</b>', '<code>', '</code>',
+      '<blockquote>', '</blockquote>', '<hr>', '<br>']);
+    const wmEvilHtml = demoTab.mdHTML(wmEvil.summary_md);
+    const wmStray = tagsIn(wmEvilHtml).filter((t) => !MD_TAGS.has(t));
+    ok('THE HOSTILE DIGEST RENDERS INERT — EVERY tag in the output is one mdHTML emitted itself, ' +
+       'so nothing out of the paste became markup (drop the esc() from its first line and the ' +
+       'script tag, the img and the iframe all appear here and this goes red)',
+       wmStray.length === 0, wmStray.slice(0, 6));
+    ok('…every one of them is ESCAPED TEXT instead, so the reader still sees what was pasted',
+       /&lt;script&gt;/.test(wmEvilHtml) && /&lt;img src=x onerror=/.test(wmEvilHtml) &&
+       /&lt;iframe/.test(wmEvilHtml));
+    ok('…no tag carries a data-act or an inline handler — in this app that is not cosmetic: one ' +
+       'delegated listener turns any data-act in the DOM into a live button',
+       !tagsIn(wmEvilHtml).some((t) => /data-act\s*=/.test(t) || /\son\w+\s*=/i.test(t)) &&
+       /&lt;div data-act=&quot;deleteFolder&quot;/.test(wmEvilHtml),
+       tagsIn(wmEvilHtml).filter((t) => /data-act\s*=|\son\w+\s*=/i.test(t)));
+    ok('…the markdown rules still ran ON the escaped text — a heading is still a heading, a ' +
+       'bullet still a bullet, a quote still a quote',
+       /<h3 class="md-h1">&lt;script&gt;/.test(wmEvilHtml) && /<li>&lt;b onclick=/.test(wmEvilHtml) &&
+       /<blockquote>he said/.test(wmEvilHtml));
+
+    // the same question of the two surfaces that carry a digest. These render
+    // plenty of legitimate tags (icons, the row's own data-act), so the test is
+    // "no tag that could execute", not "no unknown tag".
+    const dangerous = (html) => tagsIn(html).filter((t) =>
+      /^<\/?(?:script|img|iframe|object|embed|style|link|form|input)\b/i.test(t) ||
+      /\son\w+\s*=/i.test(t));
+    const wmEvilRow = demoTab.viewSeason(await demoTab.api.getProject(3));
+    ok('…and the LIST row is inert too — the hostile title and attendees go through esc() like ' +
+       'every other interpolated value in this app',
+       dangerous(wmEvilRow).length === 0 &&
+       /&lt;script&gt;alert\(&quot;title&quot;\)/.test(wmEvilRow) &&
+       /&lt;img src=x onerror=alert\(3\)&gt;/.test(wmEvilRow), dangerous(wmEvilRow).slice(0, 6));
+    const wmDetail = demoTab.meetingDetailHTML(wmEvil);
+    ok('…as is the full digest as it opens in the reader',
+       dangerous(wmDetail).length === 0 &&
+       !tagsIn(wmDetail).some((t) => /data-act\s*=/.test(t)), dangerous(wmDetail).slice(0, 6));
+
+    // ── the demo twins refuse what the routes refuse ───────────────────────
+    const wmNoTitle = await demoTab.api.addMeeting(3, { title: '   ' })
+      .then(() => null, (e) => String(e.message));
+    ok('DEMO TWIN · a meeting with no title is refused in the SERVER\'S words',
+       !!wmNoTitle && /needs a title/.test(wmNoTitle), wmNoTitle);
+    const wmBadDate = await demoTab.api.addMeeting(3, { title: 'x', held_at: '19/09/2026' })
+      .then(() => null, (e) => String(e.message));
+    ok('…a date that is not ISO is refused, naming the field',
+       !!wmBadDate && /held_at must be an ISO date/.test(wmBadDate), wmBadDate);
+    const wmXShow = await demoTab.api.addMeeting(3, { title: 'x', show_id: 1 })
+      .then(() => null, (e) => String(e.message));
+    ok('…and a show from another folder is refused — the demo teaches the walls, not just the ' +
+       'happy path',
+       !!wmXShow && /belongs to another folder/.test(wmXShow), wmXShow);
+
+    // ── edit, the file-delete rule, and delete ─────────────────────────────
+    const wmEdited = await demoTab.api.updateMeeting(wmEvil.id, { title: 'WALK52 cleaned up' });
+    ok('DEMO TWIN · a meeting edits in place', wmEdited.title === 'WALK52 cleaned up', wmEdited.title);
+    const wmLinked = (await demoTab.api.listMeetings(3)).filter((m) => m.transcript_file_id)[0];
+    const wmFileId = wmLinked.transcript_file_id;
+    await demoTab.api.deleteFile(wmFileId);
+    ok('DEMO TWIN · deleting the transcript NULLS the link and LEAVES the digest — the same rule ' +
+       'routes/files.js holds, mirrored',
+       wmLinked.transcript_file_id === null && wmLinked.summary_md.length > 0,
+       { link: wmLinked.transcript_file_id, chars: wmLinked.summary_md.length });
+    const wmBefore = (await demoTab.api.listMeetings(3)).length;
+    await demoTab.api.deleteMeeting(wmEvil.id);
+    ok('DEMO TWIN · a meeting deletes, and only that one',
+       (await demoTab.api.listMeetings(3)).length === wmBefore - 1);
+    const wmGone = await demoTab.api.deleteMeeting(wmEvil.id).then(() => null, (e) => String(e.message));
+    ok('…and deleting it again is an honest "not found", never a hollow {ok:true}',
+       !!wmGone && /not found/.test(wmGone), wmGone);
+  }
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

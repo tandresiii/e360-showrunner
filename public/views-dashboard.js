@@ -163,6 +163,102 @@ function recapGlyph(s) {
 }
 
 /* ============================================================================
+   MEETINGS — the season's meeting summaries
+   ----------------------------------------------------------------------------
+   Tom, 2026-09-21, verbatim: "we should definitely add a meeting summary
+   feature to projects... we can add these summaries."
+
+   The team runs several client planning calls a week and every one of them
+   produces a digest — headings, bold action items, bullets, and a verbatim
+   quoted receipt under each decision. Those digests used to live in a chat
+   window or somebody's Documents folder, which is to say nowhere: the 9/18
+   reader files the TRANSCRIPT (a `files` row, real bytes, fully audited), and
+   nobody has ever browsed a vtt. This is the readable layer over it — one row
+   per meeting on the folder, newest first, and the digest rendered as a
+   document when you open it.
+
+   The summary is MARKDOWN and it is a PASTE, so it goes through
+   components.js mdHTML() — which escapes the whole source FIRST and transforms
+   second. Nothing out of a digest can become markup. See that function's header
+   for the argument; persona-walk §52 walks a hostile digest through this
+   section and asserts the output is inert.
+   ========================================================================== */
+
+/* the chips on a meeting row: which show it was about, and the transcript it
+   was written from. Both optional, both silent when absent. */
+function meetingChips(m) {
+  var out = '';
+  var show = m.show_id ? SHOWS_BY_ID[m.show_id] : null;
+  if (show) out += '<span class="mini dep">' + esc(show.name) + '</span>';
+  var f = m.transcript_file_id ? FILES_BY_ID[m.transcript_file_id] : null;
+  if (f) {
+    out += '<span class="mini" title="' + esc('Written from ' + f.name + ' — the transcript the ' +
+      'unattended reader filed. Deleting that document would unpick this link and leave the ' +
+      'summary standing.') + '">' + inlineIcon('file') + ' transcript</span>';
+  }
+  return out;
+}
+/* one row. A DIV, not a button, because it carries its own Edit/Delete buttons
+   and a button inside a button is invalid — the delegated listener's
+   closest('[data-act]') gives the inner controls priority either way. */
+function meetingRow(m, canEdit) {
+  var when = m.held_at ? fmtDateFull(m.held_at) + (m.held_time ? ' · ' + m.held_time : '') : 'no date';
+  var meta = [when, m.attendees || 'attendees not recorded'].join(' · ');
+  var prev = mdPreview(m.summary_md, 190);
+  return '<div class="mtg-row" ' + act('openMeeting', m.id) + '>' +
+    '<div class="mtg-ic">' + icon('users') + '</div>' +
+    '<div class="mtg-tx"><b>' + esc(m.title) + '</b>' +
+    '<span class="mtg-meta">' + esc(meta) + ' ' + meetingChips(m) + '</span>' +
+    (prev ? '<span class="mtg-prev">' + esc(prev) + '</span>' : '') + '</div>' +
+    (canEdit
+      ? '<div class="mtg-acts">' +
+        '<button class="iconbtn" title="Edit this meeting" ' + act('editMeeting', m.id) + '>' + icon('pencil') + '</button>' +
+        '<button class="iconbtn" title="Delete this meeting" ' + act('deleteMeeting', m.id) + '>' + icon('trash') + '</button>' +
+        '</div>'
+      : '') +
+    '</div>';
+}
+function meetingsPanel(project) {
+  var rows = meetingsForProject(project.id);
+  var canEdit = canEditFolder(project);
+  var addBtn = canEdit
+    ? '<button class="btn sm ghost" style="margin-left:auto" ' + act('addMeeting', project.id) + '>' +
+      icon('plus') + 'Add meeting</button>'
+    : '';
+  var body = rows.length
+    ? rows.map(function (m) { return meetingRow(m, canEdit); }).join('')
+    : '<div class="empty">No meetings filed on this season yet. ' +
+      (canEdit ? 'Paste a digest into <b>Add meeting</b> — title, date, who was on it, and the summary.'
+               : 'A pm on this folder files them.') + '</div>';
+  return '<div class="panel"><h3 style="display:flex;align-items:center;gap:9px">Meetings · ' +
+    rows.length + addBtn + '</h3>' +
+    '<div class="mtg-list">' + body + '</div>' +
+    '<div class="perm-note">' + inlineIcon('bolt') + ' One record per planning call: what it was ' +
+    'called, when, who was on it, and the <b>digest</b> — action items and the verbatim quotes ' +
+    'they came from. Written by hand today; the transcript reader files the recording beside it. ' +
+    'Meeting summaries are <b>internal</b> — the client-recap generator can never read one.</div></div>';
+}
+/* The digest, rendered as a document. Lives here rather than in app.js so the
+   walk can render it headless, the same way it renders the season dashboard. */
+function meetingDetailHTML(m) {
+  var when = m.held_at ? fmtDateFull(m.held_at) + (m.held_time ? ' · ' + m.held_time : '') : 'No date recorded';
+  var show = m.show_id ? SHOWS_BY_ID[m.show_id] : null;
+  var f = m.transcript_file_id ? FILES_BY_ID[m.transcript_file_id] : null;
+  var head = '<div class="mtg-meta" style="margin:0 0 10px;white-space:normal">' +
+    esc(when) + ' · <b>' + esc(m.attendees || 'attendees not recorded') + '</b>' +
+    (show ? ' · ' + esc(show.name) : '') +
+    (m.created_by ? ' · filed by ' + esc(userName(m.created_by)) : '') + '</div>';
+  var src = f
+    ? '<div class="hint" style="margin:0 0 12px">' + icon('file') + '<span>Written from <b>' +
+      esc(f.name) + '</b>. That transcript is an <b>internal</b> document; deleting it would ' +
+      'unpick this link and leave the summary standing.</span></div>'
+    : '';
+  var body = mdHTML(m.summary_md) ||
+    '<div class="empty">No summary was written for this meeting.</div>';
+  return head + src + '<div class="mtg-body">' + body + '</div>';
+}
+
+/* ============================================================================
    SEASON / PROGRAM DASHBOARD — a folder that holds MORE THAN ONE show.
    Built from .card / .tbl / .pill / .stat / .next-list so it reads native.
    Single-show folders never reach here (they auto-collapse to viewShow).
@@ -310,6 +406,9 @@ function viewSeason(project) {
     '<div style="display:flex;flex-direction:column;gap:16px">' + showTable +
     '<div class="panel"><h3 style="display:flex;align-items:center;gap:9px">Jobs on this folder · ' + (project.jobs || []).length + addJobBtn + '</h3><div class="next-list">' + jobRows + '</div>' +
     '<div class="perm-note">' + inlineIcon('scale') + ' A <b>job</b> is one commercial deal — one client, one QuickBooks job number, one budget. <b>rental</b> = league deal, E360 keeps the gear; <b>sale</b> = individual team agreement, hardware as cost-of-goods. Shows carry a default job; any cost-bearing item can override it, so one show can bill across two deals.</div></div>' +
+    /* the season's meeting record — under the commercial panel, in the wide
+       column, because a digest preview needs the room */
+    meetingsPanel(project) +
     '</div>' +
     '<div style="display:flex;flex-direction:column;gap:16px">' +
     '<div class="panel summary"><div class="sig">' + icon('bolt') + 'AI summary</div><p>' + esc(summary) + '</p><div class="src">' + esc(project.source || 'Season plan') + '</div></div>' +

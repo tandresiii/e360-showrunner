@@ -496,6 +496,42 @@ agent-authored note is **immutable to humans**.
 > **No notifications in v1**, deliberately — the needs-list precedent; feeding
 > the scheduler push's per-person hotel rows stays open with the push work.
 
+### Meetings
+
+**`meetings`** *(idx: `project_id`, `show_id`, `transcript_file_id`)*
+`id · project_id (NOT NULL) · show_id · title (NOT NULL) · held_at · held_time · attendees · summary_md · transcript_file_id · source · created_by · created_at · updated_at`
+
+> **Meeting summaries on a folder (Tom, 2026-09-21: "we should definitely add a
+> meeting summary feature to projects… we can add these summaries").** The
+> HUMAN layer over the 9/18 transcript reader. That reader files the machine
+> record — a `transcript` document with real bytes, provenance and a
+> `graph_audit` row per touch — and nobody browses a vtt. This is the row a
+> person reads: what the call was called, when, who was on it, and the DIGEST.
+> `project_id` is required because the folder is the unit a season's browsable
+> list is built on; `show_id` is the optional narrowing for the call that
+> really was about one venue, and a **show delete NULLS it** rather than taking
+> the meeting (the folder still happened). `held_at` is an ISO text date like
+> `bookings.booked_date`, with `held_time` as the optional `HH:MM` beside it —
+> most digests carry a day and no clock, and an invented `00:00` prints as a
+> real start time. `attendees` is **free text**, the `room_assignments.person`
+> argument one step further: half the people on a client call are not users.
+> `summary_md` is **markdown, stored raw** and rendered once, by
+> `public/components.js` `mdHTML()`, which **escapes the whole source first and
+> transforms second** — so nothing out of a paste can become markup, and there
+> is no link syntax at all (a `[text](url)` would put a caller's URL in an
+> `href`). `transcript_file_id` points at the document the digest was written
+> from; a **file delete NULLS it, never cascades the meeting** — losing the
+> recording does not un-decide what was decided (mutation-tested both ways).
+> `source` is `'manual'` today; `'graph'` is **reserved** for the extraction
+> pipeline, and the manual door shipped first on purpose (the 9/16 law).
+> Gates mirror the schedule family exactly, predicate included: reads open to
+> anyone signed in (a tech who missed the call is who needs to read it), writes
+> pm+ rank **AND** `canEditProject`. **Meeting digests are INTERNAL**:
+> `meetings` is in `RECAP_FORBIDDEN_TABLES`, one level up from the
+> `transcript` file-kind exclusion, because a digest is the transcript
+> *distilled* — the decisions, the money and the client politics with a quoted
+> receipt under each one.
+
 ### Deliverables
 
 **`deliverables`** *(idx: `(show_id, kind)`)* — `id · project_id · show_id · kind · status · body JSONB · generated_by · generated_at · edited_by · edited_at · approved_by · approved_at · sent_at · sent_to · provenance JSONB`
@@ -783,8 +819,8 @@ or the per-user agents of `ARCHITECTURE.md`; this app does not fake one.
 | Entry point | Reaches |
 |---|---|
 | `deletePoCascade(poId)` | po-anchored `notes` (+ their reads/mentions), `po_lines`, `activity`, nulls `expenses.po_id`, **reopens `purchase_needs` this PO was covering** (`covered_by_po_id` nulled, `covered` → `open`), the PO |
-| `deleteShowCascade(showId)` | notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, **`room_assignments`**, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, **`gear_snapshots`**, `proposals`, **`tech_reports`**, **`notification_outbox`**, **`show_contacts`** (the LINK — the contact row survives, deliberately), `activity`, nulls `po_lines.show_id` and `purchase_needs.show_id`, the show |
-| `deleteProjectCascade(projectId)` | every show (via the show cascade), every PO (via the PO cascade), job- and project-anchored notes, `budget_lines`, **`purchase_needs`**, `jobs`, project-level `steps`/`files`/`expenses`/`milestones`/`deliverables`/`proposals`/**`tech_reports`**/**`notification_outbox`**, `activity`, the project |
+| `deleteShowCascade(showId)` | nulls **`meetings.show_id`** and **`meetings.transcript_file_id`** for this show's documents *(both BEFORE the files delete — a meeting belongs to the folder, not to the show it concerned)*, then notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, **`room_assignments`**, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, **`gear_snapshots`**, `proposals`, **`tech_reports`**, **`notification_outbox`**, **`show_contacts`** (the LINK — the contact row survives, deliberately), `activity`, nulls `po_lines.show_id` and `purchase_needs.show_id`, the show |
+| `deleteProjectCascade(projectId)` | every show (via the show cascade), every PO (via the PO cascade), job- and project-anchored notes, `budget_lines`, **`purchase_needs`**, `jobs`, project-level `steps`/`files`/`expenses`/`milestones`/`deliverables`/`proposals`/**`tech_reports`**/**`notification_outbox`**, **`meetings`** (a meeting dies with the season it is a record of), `activity`, the project |
 | `DELETE /api/jobs/:id` (`routes/finance.js`) | refuses while shows/expenses/po_lines still attach; then `budget_lines`, **`purchase_needs`**, job-anchored `notes`, the job |
 | `DELETE /api/files/:id` (single file, `routes/files.js`) | file-anchored `notes` (+ reads/mentions), **`spec_renders` by `file_id`**, nulls `expenses.file_id` / `bookings.file_id` / `purchase_orders.quote_file_id` / `.invoice_file_id`, the file. The NAS bytes are left on disk deliberately. `spec_renders` was added in the 2026-08-27 hardening pass: `spec_renders.file_id` is `NOT NULL`, so a render cannot be orphaned the way a nullable FK can — it goes with the file or it is a dangling row |
 
@@ -939,6 +975,10 @@ Schedule    GET /api/shows/:id/call-sheet   (the assembled sheet — CANONICAL)
 Rooming     GET/POST /api/shows/:id/rooming · POST /api/shows/:id/rooming/from-crew
             PUT/DELETE /api/rooming/:id      (reads open; writes pm+ AND ownership,
                                               the bookings floor exactly)
+Meetings    GET/POST /api/projects/:id/meetings
+            PUT/DELETE /api/meetings/:id     (reads open; writes pm+ AND ownership
+                                              on the FOLDER — the schedule floor,
+                                              same canEditProject predicate)
 Photos      GET /api/shows/:id/photos · GET /api/photos[/:id] · GET /api/shows/:id/photo-facets
             GET /api/shows/:id/recap-picks · POST /api/shows/:id/photos
             PUT /api/photos/:id · /pick · /content · PATCH /api/photos/:id/thumb
@@ -1115,6 +1155,8 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | `myInbox` / `markNotesRead` / `markAllNotesRead` / `notesUnreadCount` | `GET /api/me/inbox` · `POST /api/me/inbox/read {ids}` · `{all:true}` · `GET /api/me/inbox/count` |
 | `getSchedule` / `addScheduleItem` / `updateScheduleItem` / `removeScheduleItem` | `GET /api/shows/:id/call-sheet` (alias `/run-of-show`) · `POST /api/shows/:id/schedule` · `PUT`/`DELETE /api/schedule/:id` |
 | `listRooming` / `addRooming` / `updateRooming` / `deleteRooming` / `seedRoomingFromCrew` | `GET`/`POST /api/shows/:id/rooming` · `PUT`/`DELETE /api/rooming/:id` · `POST /api/shows/:id/rooming/from-crew` |
+| `listMeetings` / `addMeeting` / `updateMeeting` / `deleteMeeting` | `GET`/`POST /api/projects/:id/meetings` · `PUT`/`DELETE /api/meetings/:id` |
+| `listFolderFiles(pid)` | `GET /api/projects/:id` + `GET /api/files?project_id=` + one `?show_id=` per show — the server stores exactly one of the two ids per row, so "the folder's documents" is genuinely two questions |
 | `listPhotos` / `listAllPhotos` / `updatePhoto` / `setRecapPick` | `GET /api/shows/:id/photos` · `GET /api/photos` · `PUT /api/photos/:id` · `/pick` |
 | `confirmPhoto` / `rejectPhoto` | same proposal routes as `confirmDoc`/`rejectDoc` |
 | `getDeliverables` / `getRecap` / `generateRecap` / `updateRecap` | `GET /api/shows/:id/deliverables` · `/recap` · `POST /api/shows/:id/recap` · `PUT /api/shows/:id/recap` |

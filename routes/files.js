@@ -697,6 +697,11 @@ router.delete('/files/:id', asyncH(async (req, res) => {
     await c.query('UPDATE content_versions SET file_id=NULL WHERE file_id=$1', [cur.id]);
     await c.query('UPDATE purchase_orders SET quote_file_id=NULL WHERE quote_file_id=$1', [cur.id]);
     await c.query('UPDATE purchase_orders SET invoice_file_id=NULL WHERE invoice_file_id=$1', [cur.id]);
+    // A meeting's transcript is its SOURCE, not its life. Deleting the vtt
+    // unpicks the link and leaves the digest — what was decided in the room is
+    // not undecided because the recording went away. Same rule, and the same
+    // reasoning, as room_assignments.booking_id on a booking delete.
+    await c.query('UPDATE meetings SET transcript_file_id=NULL, updated_at=NOW() WHERE transcript_file_id=$1', [cur.id]);
     // HARDENING 7. A spec RENDER is a projection OF this file — its svg/html/png
     // for the email-bound view — and spec_renders.file_id is NOT NULL, so it
     // cannot be orphaned the way expenses.file_id can. It goes with the file.

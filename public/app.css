@@ -1617,3 +1617,40 @@ tr.archived:hover td{opacity:1}
 .search-pop .sp-t span{font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 .search-pop .sp-note{font-size:11px; color:var(--muted); padding:8px 9px 6px; line-height:1.5; border-top:1px solid var(--border); margin-top:4px}
 .search-pop .sp-note:first-child{border-top:0; margin-top:0}
+
+/* ═══ MEETINGS · the season's meeting summaries + the markdown renderer ═══
+   The digest is a PASTE, rendered by components.js mdHTML() — which escapes
+   first and transforms second, so nothing below ever styles live markup out of
+   a summary. Sizes are deliberately close to the app's body text: a digest is
+   read, not scanned. */
+.md{font-size:13px; line-height:1.62; color:var(--text)}
+.md > *:first-child{margin-top:0}
+.md > *:last-child{margin-bottom:0}
+.md p{margin:0 0 10px}
+.md h3.md-h1{font-size:14.5px; font-weight:700; margin:18px 0 8px; letter-spacing:-.01em}
+.md h4.md-h2{font-size:13px; font-weight:700; margin:16px 0 7px; text-transform:uppercase; letter-spacing:.07em; color:var(--text-2)}
+.md h5.md-h3{font-size:12.5px; font-weight:700; margin:13px 0 6px; color:var(--text-2)}
+.md ul,.md ol{margin:0 0 10px; padding-left:20px}
+.md li{margin:0 0 5px}
+.md b{font-weight:650; color:var(--text)}
+.md code{font-family:var(--font-mono); font-size:11.5px; background:var(--surface-2); border:1px solid var(--border); border-radius:4px; padding:1px 5px}
+.md hr{border:0; border-top:1px solid var(--border); margin:16px 0}
+/* the verbatim receipt under an action item — quoted, timestamped, and visibly
+   somebody else's words */
+.md blockquote{margin:0 0 10px; padding:7px 12px; border-left:3px solid var(--border-strong); background:var(--surface-2); border-radius:0 var(--r-sm) var(--r-sm) 0; color:var(--text-2); font-size:12.5px}
+.md blockquote code{background:transparent; border:0; padding:0; color:var(--text-2)}
+
+/* the list row on the season dashboard */
+.mtg-row{display:flex; align-items:flex-start; gap:11px; width:100%; text-align:left; background:none; border:0; border-bottom:1px solid var(--border); padding:10px 2px; cursor:pointer; color:var(--text); font-family:inherit}
+.mtg-row:last-child{border-bottom:0}
+.mtg-row:hover{background:var(--surface-2)}
+.mtg-ic{flex:none; width:28px; height:28px; border-radius:8px; background:var(--surface-2); border:1px solid var(--border); display:flex; align-items:center; justify-content:center; color:var(--muted)}
+.mtg-ic svg{width:14px; height:14px}
+.mtg-tx{min-width:0; flex:1}
+.mtg-tx b{display:block; font-size:12.8px; font-weight:600; line-height:1.35}
+.mtg-tx .mtg-meta{display:block; font-size:11px; color:var(--muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.mtg-tx .mtg-prev{display:block; font-size:11.5px; color:var(--text-2); margin-top:4px; line-height:1.45; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
+.mtg-acts{flex:none; display:flex; gap:5px; align-items:center}
+/* the digest as read in the modal — capped so a 4,000-word digest scrolls
+   inside the dialog rather than pushing the footer off the screen */
+.mtg-body{max-height:min(52vh,540px); overflow:auto; padding:2px 4px 2px 0}

@@ -3524,6 +3524,139 @@ function demoCrewNames() {
 })();
 
 /* ============================================================================
+   MEETINGS — the season's meeting summaries  (Tom, 2026-09-21: "we should
+   definitely add a meeting summary feature to projects... we can add these
+   summaries")
+   ----------------------------------------------------------------------------
+   A meeting hangs off the FOLDER, because that is the unit a season's
+   browsable list is built on; `show_id` is the optional narrowing for the call
+   that was really about one venue. `summary_md` is the DIGEST — markdown,
+   rendered by components.js mdHTML(), which escapes first and transforms
+   second. `transcript_file_id` points at the `files` row the digest was written
+   from when there is one, and a file delete NULLS it: losing the recording
+   does not un-decide what was decided.
+   ========================================================================== */
+var _mtgSeq = 0;
+var MEETINGS_BY_ID = {}, ALL_MEETINGS = [];
+
+function mkMeeting(project, o) {
+  o = o || {};
+  var m = { id: ++_mtgSeq, project_id: project.id, show_id: o.show_id || null,
+            title: o.title, held_at: o.held_at || null, held_time: o.held_time || '',
+            attendees: o.attendees || '', summary_md: o.summary_md || '',
+            transcript_file_id: o.transcript_file_id || null,
+            source: o.source || 'manual',
+            created_by: o.by || 'tandres',
+            created_at: dayISO(o.off == null ? 0 : o.off),
+            updated_at: dayISO(o.off == null ? 0 : o.off) };
+  MEETINGS_BY_ID[m.id] = m;
+  ALL_MEETINGS.push(m);
+  return m;
+}
+/* Newest first, undated last — the same ordering the route's SQL produces
+   (ORDER BY held_at DESC NULLS LAST, id DESC), so the demo and the server
+   render the list in the same order rather than merely rendering it. */
+function meetingsForProject(projectId) {
+  return ALL_MEETINGS.filter(function (m) { return m.project_id === Number(projectId); })
+    .sort(function (a, b) {
+      var ad = a.held_at || '', bd = b.held_at || '';
+      if (ad !== bd) { if (!ad) return 1; if (!bd) return -1; return ad < bd ? 1 : -1; }
+      return b.id - a.id;
+    });
+}
+function meetingCount(projectId) {
+  var n = 0;
+  ALL_MEETINGS.forEach(function (m) { if (m.project_id === Number(projectId)) n++; });
+  return n;
+}
+
+(function seedMeetings() {
+  var LOVB = PROJECTS_BY_ID[3], S_MAD = SHOWS_BY_ID[3];
+  if (!LOVB) return;
+
+  /* The transcript the 9/18 unattended reader would have filed for this call —
+     registered post-hydration exactly the way poDoc() files paperwork, so the
+     link from the digest to its source document is real from file:// and not a
+     dangling id. */
+  var tFile = null;
+  if (S_MAD) {
+    tFile = mkFile({ name: '2026-09-17 LOVB / MLV Training sync (transcript c0de9a71)',
+      ext: 'vtt', kind: 'transcript', size: 74240, by: 'tandres', off: -4,
+      meta: 'filed by the unattended reader · INTERNAL' });
+    tFile.show_id = S_MAD.id; tFile.project_id = LOVB.id;
+    FILES_BY_ID[tFile.id] = tFile;
+    S_MAD.files.push(tFile);
+  }
+
+  /* The real 9/17 digest, condensed — but keeping every markdown SHAPE the
+     renderer has to survive: headings at two levels, bold action-item leads,
+     bullets, a numbered list, `code` spans, a horizontal rule and the quoted
+     verbatim receipts that are the whole reason a digest is trusted. */
+  mkMeeting(LOVB, {
+    title: 'LOVB / MLV: Training — Deliveries and First Match Tech Support',
+    held_at: dayISO(-4), attendees: 'Tom Andres, Tony Vigon, Jim Eaton',
+    by: 'tandres', off: -4,
+    transcript_file_id: tFile ? tFile.id : null,
+    summary_md: [
+      '# LOVB / MLV: Training — Deliveries and First Match Tech Support',
+      '**Tom Andres, Tony Vigon, Jim Eaton | transcript covers 00:00:00–00:54:50**',
+      '',
+      '> Every action item and decision below carries a verbatim timestamped receipt.',
+      '',
+      '## 1. Summary',
+      '',
+      'Season-wide planning across every LOVB and MLV delivery — who staffs each one, and',
+      'when operator training happens. Everything on the map is signed and ordered except',
+      'Minneapolis, which Wes directed be structured as a one-year rental. The blocker on',
+      'everything downstream is the LOVB schedule, due October 1.',
+      '',
+      '## 2. Action items',
+      '',
+      '**Tony — Send meeting requests to each team for next week**, attaching the two operator',
+      'documents, to identify candidates and funnel them into the Nov 2 / Nov 9 windows.',
+      '> `[00:50:34] Tony: "in those documents and start to try and identify and the dates that we\'re trying to funnel into the 2nd and the 9th."`',
+      '',
+      '**Jim — Share the tracking / expense spreadsheet with the group.** When: "later", no date given.',
+      '> `[00:21:54] Jim: "And I\'ll share it with everybody later, but..."`',
+      '',
+      '### Decisions recorded',
+      '',
+      '- **Houston is off the target list.** `[00:20:50] Tony: "Okay, Houston is no longer with us."`',
+      '- **Systems stay in their cities — no movement this season.** Atlanta, Madison, Minneapolis.',
+      '- **Training is not gated on the incoming shipment.** `[00:39:30] Tom: "we don\'t need that to train."`',
+      '',
+      '## 3. Open questions',
+      '',
+      '1. Minneapolis — paperwork, and whether it happens at all.',
+      '2. The LOVB schedule — due Oct 1; the early-look request is unanswered.',
+      '3. San Francisco\'s venue is still unknown.',
+      '',
+      '---',
+      '',
+      'Next check-in rides on the schedule drop.'
+    ].join('\n')
+  });
+
+  mkMeeting(LOVB, {
+    title: 'Madison venue advance — dock window and power tie-in',
+    held_at: dayISO(-11), held_time: '10:30',
+    attendees: 'Brendon Sawyer, Tony Vigon, UW Field House ops (Marcus Hale)',
+    by: 'bsawyer', off: -11, show_id: S_MAD ? S_MAD.id : null,
+    summary_md: [
+      '## What we settled',
+      '',
+      '- Dock window is **06:00–09:00 only** — the Field House has one bay and it is shared.',
+      '- No house feeder. Power tie-in is on our ticket, union electrician, same as Fiserv.',
+      '- Operator position moves to the camera deck; fiber run to court is ours to pull.',
+      '',
+      '> Marcus: "If you are not off the dock by nine we are pushing you to the afternoon."',
+      '',
+      'Open: floor protection still unconfirmed for the courtside run.'
+    ].join('\n')
+  });
+})();
+
+/* ============================================================================
    EVENT PHOTOS — NAS-backed photo organization  (photo pass)
    ----------------------------------------------------------------------------
    The model (TEAM_FEEDBACK "Deliverables & onsite"): each user's agent sorts

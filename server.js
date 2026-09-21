@@ -300,6 +300,10 @@ app.use('/api', require('./routes/content'));
 app.use('/api', require('./routes/dropbox'));
 app.use('/api', require('./routes/notes'));
 app.use('/api', require('./routes/schedule'));
+// Meeting summaries on a folder — the human layer over the transcript reader.
+// Session-only (router-level requireAuth, which 403s an x-agent-key), so it
+// belongs in this fourth group with everything else that needs a person.
+app.use('/api', require('./routes/meetings'));
 app.use('/api', require('./routes/deliverables'));
 // F2 tech show reports · F3 the notification outbox + F6 the admin sweep. Both
 // are session-only (router-level requireAuth, which 403s an x-agent-key), so

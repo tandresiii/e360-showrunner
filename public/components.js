@@ -41,6 +41,139 @@ function toastAttrs(title, sub) {
   return 'data-act="toast" data-toast="' + esc(title) + '" data-toast-sub="' + esc(sub || '') + '"';
 }
 
+/* ============================================================================
+   MARKDOWN — the meeting-digest renderer (meetings pass)
+   ----------------------------------------------------------------------------
+   A meeting summary is a PASTE. Somebody copies a digest out of a chat window
+   or a document and drops it into a textarea, and what arrives is markdown:
+   headings, bold, bullets, numbered action items, blockquoted verbatim
+   receipts, `code` spans, rules. Rendering it as flat text throws the shape of
+   the document away; rendering it with a library imports a parser — and every
+   markdown parser on earth is in the business of EMITTING HTML, which is
+   precisely the thing a paste must never be allowed to do here.
+
+   So: ~50 lines, no dependency, and ONE safety rule that the whole design hangs
+   off —
+
+       esc() RUNS FIRST, OVER THE WHOLE SOURCE. Every transform below then
+       operates on text that is ALREADY escaped, and emits only fixed tags of
+       its own. There is no path by which a character out of the source becomes
+       markup, because by the time any rule looks at it, `<` is `&lt;`.
+
+   That ordering is the feature. `<script>`, `<img onerror=…>`, a stray
+   `data-act="deleteFolder"` and a `"` closing an attribute early all arrive
+   already neutered. Note the consequence the blockquote rule makes visible:
+   after esc() a quote marker is `&gt;`, not `>`, and matching on `&gt;` is what
+   proves the escape ran before the parse rather than after it.
+
+   NO LINK SYNTAX, deliberately. `[text](url)` stays literal text, because the
+   moment a URL is interpolated into an href this renderer acquires a
+   javascript:/data: problem it does not otherwise have. A digest's value is its
+   words; a URL in one is still readable, and still clickable by hand.
+
+   persona-walk §M walks a deliberately hostile digest through this function and
+   asserts the output contains no live tag and no data-act (mutation target:
+   drop the esc() on the first line and it goes red).
+   ========================================================================== */
+function mdInline(escaped) {
+  /* Inline rules, applied to ALREADY-ESCAPED text. `code` goes first so a
+     literal ** inside a code span is left alone, which is what somebody
+     quoting a glob pattern expects. */
+  return String(escaped)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+}
+function mdHTML(src) {
+  if (src == null || String(src).trim() === '') return '';
+  /* ── THE LINE THIS WHOLE FUNCTION IS BUILT AROUND ── */
+  var lines = esc(String(src)).replace(/\r\n?/g, '\n').split('\n');
+  var out = [], list = null, quote = [], para = [];
+
+  var flushPara = function () {
+    if (!para.length) return;
+    /* a single newline inside a paragraph is a line break the author typed,
+       and in a digest it usually IS meaningful (a two-line header block) */
+    out.push('<p>' + mdInline(para.join('<br>')) + '</p>');
+    para = [];
+  };
+  var flushList = function () {
+    if (!list) return;
+    out.push('<' + list.tag + '>' + list.items.map(function (t) {
+      return '<li>' + mdInline(t) + '</li>';
+    }).join('') + '</' + list.tag + '>');
+    list = null;
+  };
+  var flushQuote = function () {
+    if (!quote.length) return;
+    out.push('<blockquote>' + mdInline(quote.join('<br>')) + '</blockquote>');
+    quote = [];
+  };
+  var flushAll = function () { flushPara(); flushList(); flushQuote(); };
+
+  lines.forEach(function (raw) {
+    var line = raw.replace(/\s+$/, '');
+    /* blank line — closes a paragraph and a quote, but NOT a list: markdown's
+       loose lists put a blank line between items and a person pasting one
+       means it to stay one list */
+    if (!line.trim()) { flushPara(); flushQuote(); return; }
+
+    var hr = /^\s*([-*_])\1\1+\s*$/.exec(line);
+    if (hr) { flushAll(); out.push('<hr>'); return; }
+
+    var h = /^(#{1,3})\s+(.*)$/.exec(line);
+    if (h) {
+      flushAll();
+      var lvl = h[1].length;                       /* # → h3, ## → h4, ### → h5 */
+      out.push('<h' + (lvl + 2) + ' class="md-h' + lvl + '">' + mdInline(h[2]) + '</h' + (lvl + 2) + '>');
+      return;
+    }
+
+    /* AFTER esc(), a quote marker is `&gt;` — see the header. */
+    var q = /^\s*&gt;\s?(.*)$/.exec(line);
+    if (q) { flushPara(); flushList(); quote.push(q[1]); return; }
+
+    var ul = /^\s*[-*+]\s+(.*)$/.exec(line);
+    if (ul) {
+      flushPara(); flushQuote();
+      if (!list || list.tag !== 'ul') { flushList(); list = { tag: 'ul', items: [] }; }
+      list.items.push(ul[1]);
+      return;
+    }
+    var ol = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (ol) {
+      flushPara(); flushQuote();
+      if (!list || list.tag !== 'ol') { flushList(); list = { tag: 'ol', items: [] }; }
+      list.items.push(ol[1]);
+      return;
+    }
+
+    /* anything else is prose — escaped text with its line breaks preserved */
+    flushList(); flushQuote();
+    para.push(line);
+  });
+  flushAll();
+  return '<div class="md">' + out.join('') + '</div>';
+}
+/* The one-line preview a list row shows: the first line of the digest that is
+   actual prose, with the markdown furniture stripped off it. Returns PLAIN
+   TEXT — callers esc() it like any other value. */
+function mdPreview(src, max) {
+  var lines = String(src == null ? '' : src).replace(/\r\n?/g, '\n').split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    var t = lines[i].trim();
+    if (!t) continue;
+    if (/^([-*_])\1\1+$/.test(t)) continue;               /* a rule says nothing */
+    t = t.replace(/^#{1,6}\s+/, '')                        /* heading marker */
+         .replace(/^>\s?/, '')                             /* quote marker */
+         .replace(/^[-*+]\s+/, '').replace(/^\d+[.)]\s+/, '') /* list marker */
+         .replace(/\*\*/g, '').replace(/`/g, '').trim();
+    if (!t) continue;
+    var cap = max || 150;
+    return t.length > cap ? t.slice(0, cap - 1).replace(/\s+\S*$/, '') + '…' : t;
+  }
+  return '';
+}
+
 /* ---------------- formatters ---------------- */
 var MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 function parseISO(s) { if (!s) return null; var d = new Date(s.slice(0, 10) + 'T00:00:00'); return isNaN(d) ? null : d; }
