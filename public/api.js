@@ -2332,10 +2332,21 @@ var api = (function () {
           amount: amount, vendor: vendor, doc_date: TODAY_ISO,
           job_id: body.job_id ? Number(body.job_id) : (linkExp ? linkExp.job_id : (linkBk ? linkBk.job_id : (linkPo ? linkPo.job_id : null))) });
         f.show_id = s.id; f.project_id = s.project_id;
+        f.po_link = 'none';          /* the twin answers in the server's words */
         FILES_BY_ID[f.id] = f;
         s.files.unshift(f);
         if (linkPo) {
-          /* PO paperwork — never a second expense: the PO owns its cost rows */
+          /* PO paperwork — never a second expense: the PO owns its cost rows.
+             The slot is resolved the way routes/files.js resolves it, and it is
+             NEVER dropped: the demo twin used to read `if (!linkPo.quote_file_id)`
+             beside the server's `else if (!po.quote_file_id)`, so both halves
+             told the same lie about a second quote. An occupied slot is
+             SUPERSEDED — the old document stays on the show, the swap is named
+             in the log — and the outcome rides home on the row as po_link. */
+          var poSlot = body.kind === 'invoice' ? 'invoice' : 'quote';
+          var poPrior = poSlot === 'invoice' ? linkPo.invoice_file_id : linkPo.quote_file_id;
+          var poSup = !!poPrior && poPrior !== f.id;
+          f.po_link = poSup ? 'superseded-' + poSlot : poSlot;
           if (body.kind === 'invoice') {
             linkPo.invoice_file_id = f.id;
             (PO_LINES_BY_PO[linkPo.id] || []).forEach(function (l) {
@@ -2350,8 +2361,13 @@ var api = (function () {
               linkPo.activity.unshift(mkAct(ME, 'attached the vendor invoice to ' + linkPo.po_number, 'reconciles on receipt', 0, _nowHM()));
             }
           } else {
-            if (!linkPo.quote_file_id) linkPo.quote_file_id = f.id;
+            linkPo.quote_file_id = f.id;
             linkPo.activity.unshift(mkAct(ME, 'attached a ' + kindLbl + ' to ' + linkPo.po_number, vendor, 0, _nowHM()));
+          }
+          if (poSup) {
+            var oldDoc = FILES_BY_ID[poPrior];
+            linkPo.activity.unshift(mkAct(ME, 'replaced the ' + poSlot + ' on ' + linkPo.po_number,
+              f.name + ' supersedes ' + (oldDoc ? oldDoc.name : 'file #' + poPrior), 0, _nowHM(), true));
           }
         } else if (linkExp) {
           linkExp.file_id = f.id;                         /* clears its exception */
@@ -2407,6 +2423,11 @@ var api = (function () {
       return SR.post('/api/files', b, { notifyOk: true }).then(function (r) {
         var f = A.file(r && r.file ? r.file : r);
         if (r && r.expense) A.expense(r.expense);
+        /* The SERVER's account of what the PO linkage did, carried back verbatim
+           so the caller's receipt is a report rather than a guess. Re-stamped on
+           every call — a row that was superseded last time must not keep saying
+           so the next time it is filed somewhere else. */
+        f.po_link = (r && r.po_link) || 'none';
         var s2 = SHOWS_BY_ID[Number(showId)];
         if (s2 && s2.files) s2.files.unshift(f);
         return f;
@@ -2524,7 +2545,17 @@ var api = (function () {
         var po = POS_BY_ID[Number(id)];
         return po ? ok(po) : fail('PO ' + id + ' not found');
       }
-      return SR.get('/api/pos/' + Number(id)).then(A.po);
+      /* The DETAIL read carries the PO's linked documents and the expense rows
+         that evidence them, and absorbing them here IS the fix for the Linked
+         docs panel that emptied itself on refresh: viewPO reads FILES_BY_ID and
+         EXPENSES_BY_ID synchronously — the demo way — and on a cold tab nothing
+         had ever put those rows in either map. Same shape as fetchShow()
+         absorbing show.files: the seam warms the store, the view just reads it. */
+      return SR.get('/api/pos/' + Number(id)).then(function (p) {
+        (p.docs || []).forEach(A.file);
+        (p.expenses || []).forEach(A.expense);
+        return A.po(p);
+      });
     },
     /* one call for the Purchasing view — stats + board + risks + queue */
     getPurchasingOverview: function () {

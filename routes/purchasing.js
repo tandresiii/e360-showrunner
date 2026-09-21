@@ -51,7 +51,7 @@ const {
   deletePoCascade, getConfig, setConfig
 } = require('../lib/db');
 const {
-  pick, has, dbToPO, dbToPOLine, dbToNeed, dbToExpense, dbToShow, dbToActivity
+  pick, has, dbToPO, dbToPOLine, dbToNeed, dbToExpense, dbToFile, dbToShow, dbToActivity
 } = require('../lib/mappers');
 const {
   asyncH, badRequest, forbidden, notFound, conflict, idParam, limitOf
@@ -220,6 +220,39 @@ async function loadPO(id, q = pool, opts) {
   const r = await q.query('SELECT * FROM purchase_orders WHERE id=$1', [id]);
   if (!r.rows.length) throw notFound(`PO ${id} not found`);
   return (await hydrate(q, r.rows, opts))[0];
+}
+
+// THE PO DETAIL CARRIES ITS LINKED DOCUMENTS  (Tom 2026-09-21, live)
+// ────────────────────────────────────────────────────────────────────────────
+// The Linked docs panel draws its cards out of the CLIENT's file store
+// (views-purchasing.js docCards reads FILES_BY_ID / EXPENSES_BY_ID), and a cold
+// load of the PO view had never fetched those rows. The panel only ever filled
+// because the upload that had just happened planted the row client-side; one
+// refresh later PO-26-010's invoice read as gone, with invoice_file_id = 44
+// sitting correctly in the database the whole time.
+//
+// The show detail composes its files exactly this way (public/api.js
+// fetchShow); this is that pattern put where the ids already are, so ONE GET
+// answers the whole panel — the two slot documents, the PO's expense rows, and
+// whatever evidences them. List reads are deliberately untouched: the board
+// renders no doc cards, and a per-row files query for 200 POs buys nothing.
+async function loadPODetail(id, q = pool) {
+  const po = await loadPO(id, q);
+  const lineExp = (po.lines || []).map((l) => l.expense_id).filter(Boolean);
+  const exp = await q.query(
+    'SELECT * FROM expenses WHERE po_id=$1 OR id = ANY($2::int[]) ORDER BY id',
+    [po.id, lineExp]);
+  po.expenses = exp.rows.map(dbToExpense);
+  const ids = [];
+  for (const fid of [po.quote_file_id, po.invoice_file_id,
+                     ...po.expenses.map((e) => e.file_id)]) {
+    if (fid && !ids.includes(fid)) ids.push(fid);
+  }
+  po.docs = ids.length
+    ? (await q.query('SELECT * FROM files WHERE id = ANY($1::int[]) ORDER BY id', [ids]))
+        .rows.map(dbToFile)
+    : [];
+  return po;
 }
 
 // The shows referenced by any line on these POs (risk needs their load-in dates).
@@ -450,9 +483,9 @@ router.get('/pos', requireAuth, asyncH(async (req, res) => {
   res.json(await hydrate(pool, r.rows));
 }));
 
-// GET /api/pos/:id   (api.js getPO)
+// GET /api/pos/:id   (api.js getPO) — the DETAIL read, docs and all
 router.get('/pos/:id', requireAuth, asyncH(async (req, res) => {
-  res.json(await loadPO(idParam(req), pool));
+  res.json(await loadPODetail(idParam(req), pool));
 }));
 
 // GET /api/purchasing/overview — one call for the Purchasing view.

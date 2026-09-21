@@ -640,6 +640,128 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('the PO approval threshold is server config, default 5000 (punch 28)',
      threshold.status === 200 && Number(threshold.body.value) === 5000, threshold.body);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // THE PO SLOT IS RESOLVED, NEVER DROPPED  (Tom 2026-09-21, live)
+  // ──────────────────────────────────────────────────────────────────────────
+  // POST /api/files with a po_id read `else if (!po.quote_file_id)`. A second
+  // non-invoice document on a PO that already carried a quote linked to
+  // NOTHING — no error, no word of it in the 200 — so the client's toast said
+  // "→ the PO" while the PO had taken no file at all, and the document vanished
+  // from Linked docs on the next refresh. A request that names a po_id now ends
+  // with the file reachable from that PO or it refuses out loud, and `po_link`
+  // is the server saying WHICH of those happened.
+  //
+  // MUTATION GATE: put `else if (!po.quote_file_id)` back in routes/files.js and
+  // the supersede assertions below go red naming the silent drop. Drop the
+  // `docs` embed from loadPODetail and the cold-read assertion goes red.
+  const dpo = await POST('/api/pos', { vendor: TAG + ' Deposit Vendor', project_id: P, job_id: J,
+    memo: TAG + ' deposit / proforma path' }, { token: A });
+  const DPO = dpo.body.id;
+  await POST(`/api/pos/${DPO}/lines`, { item: TAG + ' stage deposit', qty: 1, unit_cost: 900,
+    category: 'gear', show_id: S }, { token: A });
+  await PUT(`/api/pos/${DPO}/status`, { status: 'quoted' }, { token: A });
+
+  const dq1 = await POST('/api/files', { show_id: S, name: TAG + ' vendor quote v1', ext: '.pdf',
+    kind: 'po', vendor: TAG + ' Deposit Vendor', po_id: DPO }, { token: A });
+  const dpoQ1 = await GET(`/api/pos/${DPO}`, { token: A });
+  ok('a vendor quote fills the PO’s empty quote slot — and the ANSWER says so',
+     dq1.status === 200 && dq1.body.po_link === 'quote', dq1.body.po_link);
+  ok('...and the pointer really moved, read back off the PO',
+     dpoQ1.body.quote_file_id === dq1.body.id, dpoQ1.body.quote_file_id);
+
+  const dq2 = await POST('/api/files', { show_id: S, name: TAG + ' vendor quote v2 revised',
+    ext: '.pdf', kind: 'po', vendor: TAG + ' Deposit Vendor', po_id: DPO }, { token: A });
+  const dpoQ2 = await GET(`/api/pos/${DPO}`, { token: A });
+  ok('A SECOND QUOTE SUPERSEDES — it is NEVER filed to nothing (the silent drop)',
+     dq2.status === 200 && dpoQ2.body.quote_file_id === dq2.body.id,
+     { po_link: dq2.body.po_link, slot: dpoQ2.body.quote_file_id, filed: dq2.body.id });
+  ok('...and po_link reports the SUPERSESSION — the field matches the column',
+     dq2.body.po_link === 'superseded-quote', dq2.body.po_link);
+  const dq1Back = await GET(`/api/files/${dq1.body.id}`, { token: A });
+  ok('...the superseded quote SURVIVES as a document on the show (supersede, never delete)',
+     dq1Back.status === 200 && dq1Back.body.show_id === S, dq1Back.status);
+  const supAct = await pool.query(
+    `SELECT detail FROM activity WHERE po_id=$1 AND action='po.supersede'`, [DPO]);
+  ok('...and the swap is NAMED in the PO’s activity, not left to be inferred',
+     supAct.rows.length === 1 && supAct.rows[0].detail.includes('vendor quote v2 revised')
+     && supAct.rows[0].detail.includes('vendor quote v1'), supAct.rows.map((r) => r.detail));
+
+  // today's real case: a deposit invoice arriving while the order sits QUOTED
+  const dinv = await POST('/api/files', { show_id: S, name: TAG + ' deposit invoice', ext: '.pdf',
+    kind: 'invoice', vendor: TAG + ' Deposit Vendor', po_id: DPO }, { token: A });
+  const dpoInv = await GET(`/api/pos/${DPO}`, { token: A });
+  ok('AN INVOICE LANDS ON A QUOTED PO — a deposit does not wait for "ordered"',
+     dinv.status === 200 && dinv.body.po_link === 'invoice'
+     && dpoInv.body.invoice_file_id === dinv.body.id,
+     { po_link: dinv.body.po_link, slot: dpoInv.body.invoice_file_id });
+  ok('...and the quote beside it is untouched — two slots, two documents',
+     dpoInv.body.quote_file_id === dq2.body.id, dpoInv.body.quote_file_id);
+  ok('...while a QUOTED PO does NOT reconcile off one — that stays receipt’s job',
+     dpoInv.body.status === 'quoted', dpoInv.body.status);
+
+  // THE COLD READ — the other half of the live defect. The Linked docs panel
+  // draws from the client's file store, so a PO detail that hands back pointers
+  // and no rows renders an empty panel on any tab that has not loaded the show.
+  ok('THE PO DETAIL CARRIES ITS LINKED DOC ROWS — a fresh fetch answers the panel',
+     (dpoInv.body.docs || []).some((d) => d.id === dq2.body.id)
+     && (dpoInv.body.docs || []).some((d) => d.id === dinv.body.id),
+     (dpoInv.body.docs || []).map((d) => d.id));
+  ok('...as whole file rows, name and all — not bare ids the panel cannot draw',
+     (dpoInv.body.docs || []).every((d) => !!d.name && !!d.kind),
+     (dpoInv.body.docs || []).map((d) => d.name));
+
+  // po_link is only worth reading if it cannot DRIFT from the column it claims
+  // to describe, so it is checked against the database rather than beside it.
+  // THIS is the assertion the silent-drop branch fails: restore it and po_link
+  // keeps saying 'superseded-quote' over a quote_file_id that never moved.
+  const linkAgrees = (link, poRow, fileId) => (
+    link === 'invoice' || link === 'superseded-invoice' ? poRow.invoice_file_id === fileId
+    : link === 'quote' || link === 'superseded-quote' ? poRow.quote_file_id === fileId
+    : link === 'none' && poRow.quote_file_id !== fileId && poRow.invoice_file_id !== fileId);
+  ok('po_link IS the database, not a hope about it — every answer agrees with the column',
+     linkAgrees(dq1.body.po_link, dpoQ1.body, dq1.body.id)
+     && linkAgrees(dq2.body.po_link, dpoQ2.body, dq2.body.id)
+     && linkAgrees(dinv.body.po_link, dpoInv.body, dinv.body.id),
+     [dq1.body.po_link, dq2.body.po_link, dinv.body.po_link]);
+
+  const ghostPo = await POST('/api/files', { show_id: S, name: TAG + ' doc for a ghost PO',
+    ext: '.pdf', kind: 'invoice', po_id: 99999901 }, { token: A });
+  ok('a po_id that does not exist is a 404 — never a file quietly filed to nowhere',
+     ghostPo.status === 404, ghostPo.body);
+  const noLinkDoc = await POST('/api/files', { show_id: S, name: TAG + ' unlinked receipt',
+    ext: '.pdf', kind: 'receipt' }, { token: A });
+  ok("...while a file with no po_id answers po_link 'none', never a slot it did not fill",
+     noLinkDoc.body.po_link === 'none', noLinkDoc.body.po_link);
+
+  // RECONCILE-ON-RECEIVED, UNCHANGED. The reshuffle above moved the invoice
+  // slot write out of the `kind === 'invoice'` branch; this is the assertion
+  // that the behaviour riding beside it did not move with it.
+  const rpo2 = await POST('/api/pos', { vendor: TAG + ' Reconcile Vendor', project_id: P,
+    job_id: J, memo: TAG + ' receipt path' }, { token: A });
+  const RPO2 = rpo2.body.id;
+  // ownership is spelled out: it derives from the job's deal type otherwise, and
+  // an INVENTORY line is E360 capex that generates no expense at all — which
+  // would make the evidence assertion below vacuously true.
+  await POST(`/api/pos/${RPO2}/lines`, { item: TAG + ' cable', qty: 1, unit_cost: 400,
+    category: 'gear', show_id: S, ownership: 'cogs' }, { token: A });
+  for (const st of ['quoted', 'ordered', 'shipped', 'received']) {
+    await PUT(`/api/pos/${RPO2}/status`, { status: st }, { token: A });
+  }
+  const rInv = await POST('/api/files', { show_id: S, name: TAG + ' final invoice', ext: '.pdf',
+    kind: 'invoice', vendor: TAG + ' Reconcile Vendor', po_id: RPO2 }, { token: A });
+  const rpoAfter = await GET(`/api/pos/${RPO2}`, { token: A });
+  ok('an invoice on a RECEIVED PO still reconciles it — byte-identical behaviour',
+     rInv.status === 200 && rInv.body.po_link === 'invoice'
+     && rpoAfter.body.status === 'reconciled', rpoAfter.body.status);
+  const recAct = await pool.query(
+    `SELECT detail FROM activity WHERE po_id=$1 AND action='po.reconcile'`, [RPO2]);
+  ok('...with the same accented po.reconcile line it always wrote',
+     recAct.rows.length === 1, recAct.rows.length);
+  const rExp = await pool.query('SELECT file_id FROM expenses WHERE po_id=$1', [RPO2]);
+  ok('...and the actuals it generated carry that invoice as their evidence',
+     rExp.rows.length > 0 && rExp.rows.every((e) => e.file_id === rInv.body.id),
+     rExp.rows.map((e) => e.file_id));
+
   // ── the NEEDS LIST (Tom, 2026-09-02) — per-job ancillaries checklist ──────
   const { LED_ANCILLARIES } = require('../lib/enums');
   const seed1 = await POST(`/api/jobs/${J}/needs/seed`, {}, { token: A });

@@ -2631,6 +2631,28 @@ var FIN_DOC_KINDS = [
   { kind: 'po', label: 'Purchase order', desc: 'ordered — committed spend', ic: 'box' },
   { kind: 'confirmation', label: 'Confirmation', desc: 'booked — reservation held', ic: 'checkC' }
 ];
+/* ── THE TWO SLOTS A PO HAS, SAID OUT LOUD  (Tom 2026-09-21) ────────────────
+   A purchase order holds exactly two documents: the vendor's quote and the
+   vendor's invoice. Every other doc type the modal offers resolves to the quote
+   slot on the server, so on a PO the honest choice is these two and only these
+   two — prefilled from the button that opened the modal, and CHANGEABLE, so
+   what the server is about to do is on screen before the commit.
+   `kind` is the existing file kind each slot is filed under: a vendor quote is
+   the 'po' document type this app has always used for one (data.js q4). */
+var FIN_PO_SLOTS = [
+  { kind: 'po', slot: 'quote', label: 'Vendor quote',
+    desc: 'fills this PO’s QUOTE slot — backs the quoted stage' },
+  { kind: 'invoice', slot: 'invoice', label: 'Vendor invoice',
+    desc: 'fills this PO’s INVOICE slot — reconciles the order on receipt' }
+];
+/* The toast's destination, keyed by what the SERVER said it did. Anything not
+   on this list is an unlinked file, and the copy says that instead. */
+var PO_LINK_WHERE = {
+  quote: 'the PO (quote)',
+  invoice: 'the PO (invoice)',
+  'superseded-quote': 'the PO (quote — replacing the one on file)',
+  'superseded-invoice': 'the PO (invoice — replacing the one on file)'
+};
 var PENDING_FIN = null;
 /* `hint` is optional helper text under the field. It has to undo the label's
    own uppercase/tracking/weight — the label is a caps micro-heading and a
@@ -2643,6 +2665,68 @@ function finLabelWrap(text, inner, hint) {
         hint + '</span>'
       : '') +
     '</label>';
+}
+/* ── THE PO SLOT, CHOSEN IN THE OPEN  (Tom 2026-09-21) ──────────────────────
+   The four doc-type cards are four doors into two rooms on a PO: the server
+   files 'invoice' into the invoice slot and EVERYTHING ELSE into the quote one.
+   Brendon's real sequence was quote on file → "Attach quote" (the only door the
+   PO view offered him) → the vendor INVOICE filed as a quote → linked nowhere.
+   So on a PO link the kind stops being a side effect of which card you click:
+   it is a labelled control, prefilled from the button that opened the modal,
+   naming the slot it fills and saying so when that slot is already full. */
+function finPoSlotRow(link) {
+  var po = POS_BY_ID[Number(link.poId)];
+  var want = link.poKindHint === 'invoice' ? 'invoice' : 'po';
+  var opts = FIN_PO_SLOTS.map(function (s) {
+    return '<option value="' + esc(s.kind) + '"' + (s.kind === want ? ' selected' : '') + '>' +
+      esc(s.label + ' — ' + s.desc) + '</option>';
+  }).join('');
+  var occupied = po && FIN_PO_SLOTS.filter(function (s) {
+    return s.kind === want && (s.slot === 'invoice' ? po.invoice_file_id : po.quote_file_id);
+  }).length;
+  return '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    finLabelWrap('What this PO gets', '<select id="fdPoSlot" class="cell-in">' + opts + '</select>',
+      'Prefilled from the button you clicked — change it here and the PO gets what you pick.' +
+      (occupied
+        ? ' That slot already holds a document: filing this one <b>replaces</b> it, and the old one stays on the show.'
+        : ' A slot that already holds a document is replaced, never silently skipped.')) +
+    '</div>';
+}
+/* The commit cards. On a PO link there is exactly ONE — the slot row above IS
+   the choice — everywhere else the card you click is still the kind you file. */
+function finCardsHTML() {
+  var link = (PENDING_FIN && PENDING_FIN.link) || {};
+  if (link.poId) {
+    var po = POS_BY_ID[Number(link.poId)];
+    return '<button class="tpl-card fin-kind" style="text-align:left" ' +
+      act('commitFinDoc', finPoHintIndex()) + '><div class="ti">' + icon('cart') + '</div><b>File it to ' +
+      esc(po ? po.po_number : 'the PO') + '</b><div class="td">' +
+      esc('into the slot chosen above — the toast reports what the PO actually took') +
+      '</div></button>';
+  }
+  return FIN_DOC_KINDS.map(function (t, i) {
+    return '<button class="tpl-card fin-kind" style="text-align:left" ' + act('commitFinDoc', i) + '><div class="ti">' + icon(t.ic) + '</div><b>' + esc(t.label) + '</b><div class="td">' + esc(t.desc) + '</div></button>';
+  }).join('');
+}
+/* The index the PO card carries. Only a FALLBACK — the select is the live
+   answer — but it is the HINTED kind, so a modal whose control cannot be read
+   still commits what the button promised rather than whatever is at index 0. */
+function finPoHintIndex() {
+  var link = (PENDING_FIN && PENDING_FIN.link) || {};
+  var want = link.poKindHint === 'invoice' ? 'invoice' : 'po';
+  for (var i = 0; i < FIN_DOC_KINDS.length; i += 1) if (FIN_DOC_KINDS[i].kind === want) return i;
+  return 0;
+}
+/* The kind the commit will actually send: the visible choice when there is one,
+   the card that was clicked otherwise. One place, so both commit paths agree. */
+function finPickedKind(i) {
+  var sel = document.getElementById('fdPoSlot');
+  if (sel && sel.value) {
+    for (var k = 0; k < FIN_DOC_KINDS.length; k += 1) {
+      if (FIN_DOC_KINDS[k].kind === sel.value) return FIN_DOC_KINDS[k];
+    }
+  }
+  return FIN_DOC_KINDS[Number(i)];
 }
 function guessCategory(label) {
   var s = String(label || '').toLowerCase();
@@ -2678,8 +2762,9 @@ async function openAddFinDoc(showId, link) {
       pre.category = l0 ? l0.category : 'gear';
       ctxLine = '<div class="callout" style="margin-bottom:14px"><div class="ci">' + icon('cart') + '</div><div><b>Attaching paperwork to ' + esc(lpo.po_number) + '</b><p>' +
         (link.poKindHint === 'invoice'
-          ? 'Pick <b>Invoice</b> to reconcile — it evidences the PO’s cost lines and clears the chase-list flag. No duplicate expense is created; the PO already owns its costs.'
-          : 'Pick the doc type — a vendor quote backs the quoted stage; the invoice reconciles it later.') + '</p></div></div>';
+          ? 'The <b>invoice</b> evidences the PO’s cost lines and clears the chase-list flag — on a received order it reconciles it. No duplicate expense is created; the PO already owns its costs.'
+          : 'A vendor <b>quote</b> backs the quoted stage; the invoice reconciles it later.') +
+        ' The slot below is what the PO will actually take — change it if the paper says otherwise.</p></div></div>';
     }
   }
   var catOpts = BUDGET_CAT_ORDER.map(function (c) {
@@ -2692,7 +2777,8 @@ async function openAddFinDoc(showId, link) {
      the label says all three and writes to bookings.confirmation_number — the
      column the call sheet and the delivery view already read. */
   var vendorHint = link.bookingId ? 'from the booking — change it if the paper says otherwise' : null;
-  var inputs = '<div class="fin-inputs">' +
+  var inputs = (link.poId ? finPoSlotRow(link) : '') +
+    '<div class="fin-inputs">' +
     finLabelWrap('Vendor', '<input id="fdVendor" class="cell-in" value="' + esc(pre.vendor) + '" placeholder="who billed us">', vendorHint) +
     finLabelWrap('Amount $', '<input id="fdAmount" class="cell-in" type="number" min="0" value="' + esc(pre.amount) + '" placeholder="0">') +
     (link.expenseId ? '' : finLabelWrap('Category', '<select id="fdCat" class="cell-in">' + catOpts + '</select>')) +
@@ -2703,9 +2789,7 @@ async function openAddFinDoc(showId, link) {
           '<input id="fdConf" class="cell-in" value="' + esc(pre.conf) + '" placeholder="the number on the paperwork">',
           'optional — goes on the booking, where the call sheet reads it') + '</div>'
       : '');
-  var cards = FIN_DOC_KINDS.map(function (t, i) {
-    return '<button class="tpl-card fin-kind" style="text-align:left" ' + act('commitFinDoc', i) + '><div class="ti">' + icon(t.ic) + '</div><b>' + esc(t.label) + '</b><div class="td">' + esc(t.desc) + '</div></button>';
-  }).join('');
+  var cards = finCardsHTML();
 
   /* ══════════════════════════════════════════════════════════════════════
      THE FILE, AND IT IS NOT OPTIONAL  (HARDENING 21 — the line still open)
@@ -2796,7 +2880,9 @@ function finPickedFile() {
 }
 async function commitFinDoc(i) {
   if (!PENDING_FIN) return;
-  var t = FIN_DOC_KINDS[Number(i)];
+  /* the VISIBLE choice wins over the card's own index — on a PO that control
+     is the only thing standing between the click and the slot */
+  var t = finPickedKind(i);
   if (!t) return;
   /* API mode moves real bytes or it does not create. */
   if (apiMode()) return commitFinDocReal(t);
@@ -2907,8 +2993,17 @@ async function commitFinDocReal(t) {
     (f.amount ? ' · ' + fmtMoney(f.amount) : '') + (fs2 ? ' — ' + showLabel(fs2) : ''));
   /* The toast NAMES THE FILE. "Confirmation filed · Vendor TBD" was true of
      nothing in particular; "Midwest Freight conf.pdf · 240 KB → the Trucking
-     booking" is a receipt for the act that just happened. */
-  var where = link.bookingId ? 'the booking' : link.poId ? 'the PO' : 'Accounting’s feed';
+     booking" is a receipt for the act that just happened.
+     ------------------------------------------------------------------------
+     AND IT ANSWERS FROM THE SERVER, NOT FROM THE REQUEST (Tom 2026-09-21).
+     `where` used to read `link.poId ? 'the PO'` — the INTENT of the click,
+     asserted as an outcome. On a quoted PO that already had a quote, the
+     server linked nothing and this still said "→ the PO". The destination is
+     now whatever the route says it did (`po_link`), so the only sentence this
+     can print is a true one — including the one nobody wants to read. */
+  var where = link.bookingId ? 'the booking'
+    : link.poId ? (PO_LINK_WHERE[f.po_link] || 'Accounting’s feed — the PO linked nothing')
+    : 'Accounting’s feed';
   if (stored) {
     toast(t.label + ' attached',
       nm + ' · ' + fmtBytes(size) + (vendor ? ' · ' + vendor : '') + ' → ' + where + suffix);
@@ -2935,11 +3030,7 @@ function finUploadingUI(file) {
 function finUploadFailedUI() {
   var host = document.getElementById('fdCards');
   if (!host) return;
-  host.innerHTML = FIN_DOC_KINDS.map(function (t, i) {
-    return '<button class="tpl-card fin-kind" style="text-align:left" ' + act('commitFinDoc', i) +
-      '><div class="ti">' + icon(t.ic) + '</div><b>' + esc(t.label) + '</b><div class="td">' +
-      esc(t.desc) + '</div></button>';
-  }).join('');
+  host.innerHTML = finCardsHTML();
 }
 
 /* ---- add expense ----------------------------------------------------------- */

@@ -355,15 +355,39 @@ router.post('/files', requireRole('tech'), asyncH(async (req, res) => {
     );
     const file = ins.rows[0];
     const created = { file_id: file.id, expense_id: null };
+    // What the PO linkage ACTUALLY did, so the answer can say so. 'none' is the
+    // honest value for a request that never named a PO — never for one that did.
+    let poLink = 'none';
 
     // ── the financial-doc flow (mirrors api.addFinancialDoc) ────────────────
     if (linkPoId) {
       // 29/PO paperwork — NEVER a second expense: the PO owns its cost rows.
       const po = (await c.query('SELECT * FROM purchase_orders WHERE id=$1', [linkPoId])).rows[0];
       if (!po) throw notFound('PO not found');
+      // ── THE SLOT IS RESOLVED, NEVER DROPPED  (Tom 2026-09-21, live) ───────
+      // This read `else if (!po.quote_file_id)`. On a PO that already carried a
+      // quote, a second non-invoice document linked to NOTHING — no error, no
+      // signal in the 200, and the toast said "→ the PO" because the CLIENT was
+      // guessing from the request. The doc filed to the show, linked nowhere,
+      // and vanished from Linked docs on the next refresh: the 9/3 green-
+      // checkmark lie wearing a different hat.
+      //
+      // A request that names a po_id now ends with the file reachable from that
+      // PO, or it refuses out loud. The slot is deterministic — invoice → the
+      // invoice slot, anything else → the quote slot — and an OCCUPIED slot is
+      // SUPERSEDED rather than silently kept: the newer paper is the one the
+      // buyer just filed, the old document survives untouched on the show
+      // (house stance — supersede, never delete), and the swap is named in the
+      // PO's activity so the history reads back. The outcome rides home in
+      // `po_link`, which is what the toast is allowed to speak from.
+      const slot = kind === 'invoice' ? 'invoice' : 'quote';
+      const col = slot === 'invoice' ? 'invoice_file_id' : 'quote_file_id';
+      const prior = slot === 'invoice' ? po.invoice_file_id : po.quote_file_id;
+      const superseded = !!prior && prior !== file.id;
+      poLink = superseded ? `superseded-${slot}` : slot;
+      await c.query(`UPDATE purchase_orders SET ${col}=$1, updated_at=NOW() WHERE id=$2`,
+        [file.id, po.id]);
       if (kind === 'invoice') {
-        await c.query('UPDATE purchase_orders SET invoice_file_id=$1, updated_at=NOW() WHERE id=$2',
-          [file.id, po.id]);
         await c.query('UPDATE expenses SET file_id=$1 WHERE po_id=$2 AND file_id IS NULL',
           [file.id, po.id]);
         if (po.status === 'received') {
@@ -371,9 +395,12 @@ router.post('/files', requireRole('tech'), asyncH(async (req, res) => {
           await logActivity(c, { poId: po.id, projectId: po.project_id, actor: req.actor,
             action: 'po.reconcile', detail: `${po.po_number} — vendor invoice on file`, accent: true });
         }
-      } else if (!po.quote_file_id) {
-        await c.query('UPDATE purchase_orders SET quote_file_id=$1, updated_at=NOW() WHERE id=$2',
-          [file.id, po.id]);
+      }
+      if (superseded) {
+        const old = (await c.query('SELECT name FROM files WHERE id=$1', [prior])).rows[0];
+        await logActivity(c, { poId: po.id, projectId: po.project_id, actor: req.actor,
+          action: 'po.supersede', accent: true,
+          detail: `${po.po_number} — ${name} supersedes ${old ? old.name : `file #${prior}`} in the ${slot} slot` });
       }
       await logActivity(c, { poId: po.id, projectId: po.project_id, actor: req.actor,
         action: 'file.add', detail: `${kind}: ${name}` });
@@ -411,9 +438,12 @@ router.post('/files', requireRole('tech'), asyncH(async (req, res) => {
       projectId: project.id, showId: show ? show.id : null, actor: req.actor,
       summary: `filed a ${kind} — “${name}” —`
     });
-    return { file, created };
+    return { file, created, poLink };
   });
-  res.json({ ...dbToFile(out.file), created: out.created,
+  // `po_link` is the server's own account of the linkage — 'invoice' | 'quote' |
+  // 'superseded-invoice' | 'superseded-quote' | 'none'. The client renders its
+  // receipt from THIS, not from what it asked for.
+  res.json({ ...dbToFile(out.file), created: out.created, po_link: out.poLink,
              upload_url: `/api/files/${out.file.id}/content` });
 }));
 

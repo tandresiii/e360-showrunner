@@ -4716,6 +4716,236 @@ async function main() {
        /CURRENT_USER\.role === 'admin'/.test(vo53) && /act\('outboxScope'/.test(vo53));
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('54 · the PO takes the document, and the receipt says what it took');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom, in production, 2026-09-21. A quoted PO with a quote already on file.
+  // The vendor's INVOICE arrived (a deposit — they bill on acceptance). The PO
+  // view offered exactly one door, "Attach quote", because the invoice door was
+  // gated to ordered+. He used it. The server's `else if (!po.quote_file_id)`
+  // found the slot full and did NOTHING; the toast said "→ the PO" anyway,
+  // because the client rendered its receipt from what it had ASKED for. The
+  // document filed to the show, linked to nowhere, and was gone from Linked
+  // docs on the next refresh.
+  //
+  // Three separate lies, all of them workflow-level, all of them green at the
+  // row level — P7 again. This section walks the whole sequence: the door, the
+  // choice, the linkage, the receipt, and the panel after a reload.
+  {
+    reach('Attach a document to a PO', {
+      seam: ['getPO', 'addFinancialDoc'],
+      action: ['poAttachInvoice', 'poAttachQuote', 'commitFinDoc'] });
+
+    // ── the fixture: a QUOTED order, the exact shape that bit him ───────────
+    const dpo = await POST('/api/pos', { project_id: PROJ, job_id: JOB,
+      vendor: 'Deposit Vendor Co', memo: 'walk — bills on acceptance' }, { token: T.brenden });
+    const DPO = dpo.body.id;
+    await POST(`/api/pos/${DPO}/lines`, { item: 'floor deposit', qty: 1, unit_cost: 800,
+      category: 'gear', show_id: SHOW }, { token: T.brenden });
+    await PUT(`/api/pos/${DPO}/status`, { status: 'quoted' }, { token: T.brenden });
+
+    // ── the seam, executed against this walk's server ──────────────────────
+    // Its own vm context, loaded in index.html's order, because the render half
+    // below needs the view files and the store they read. location.protocol is
+    // http:, so probe() lands in API mode and every call is a real request.
+    const poTab = (() => {
+      const store = new Map();
+      const ctx = {
+        fetch: (p, opts) => fetch(new URL(p, BASE), opts),
+        localStorage: {
+          getItem: (k) => (store.has(k) ? store.get(k) : null),
+          setItem: (k, v) => store.set(k, String(v)),
+          removeItem: (k) => store.delete(k)
+        },
+        location: { protocol: 'http:' },
+        setTimeout, clearTimeout, AbortController, console,
+        document: { addEventListener: () => {}, querySelector: () => null,
+                    querySelectorAll: () => [], getElementById: () => null },
+        navigator: { userAgent: 'walk' }
+      };
+      ctx.window = ctx;
+      vm.createContext(ctx);
+      for (const f of ['data.js', 'api.js', 'components.js', 'views-notes.js',
+                       'views-contacts.js', 'views-finance.js', 'views-purchasing.js',
+                       'views-folder.js', 'views-dashboard.js']) {
+        new vm.Script(SRC[f], { filename: 'public/' + f }).runInContext(ctx);
+      }
+      return ctx;
+    })();
+    ok('the REAL browser half loads headless in API mode, views and all',
+       (await poTab.SR.probe()) === 'api' && typeof poTab.viewPO === 'function');
+    poTab.SR.setToken(T.brenden);
+
+    const q1 = await poTab.api.addFinancialDoc(SHOW, {
+      kind: 'po', name: 'Deposit Vendor quote v1', ext: 'pdf',
+      vendor: 'Deposit Vendor Co', poId: DPO });
+    ok('a vendor quote fills the empty quote slot — and the SEAM is told which slot',
+       q1.po_link === 'quote', q1.po_link);
+
+    // THE BRANCH THAT WAS A SILENT NO-OP
+    const q2 = await poTab.api.addFinancialDoc(SHOW, {
+      kind: 'po', name: 'Deposit Vendor quote v2 revised', ext: 'pdf',
+      vendor: 'Deposit Vendor Co', poId: DPO });
+    const dpoQ2 = await GET(`/api/pos/${DPO}`, { token: T.brenden });
+    ok('A SECOND QUOTE SUPERSEDES — a request that names a po_id never ends linked to nothing',
+       dpoQ2.body.quote_file_id === q2.id && q2.po_link === 'superseded-quote',
+       { slot: dpoQ2.body.quote_file_id, filed: q2.id, link: q2.po_link });
+    ok('…and the quote it replaced is STILL a document on the show — supersede, never delete',
+       (await GET(`/api/files/${q1.id}`, { token: T.brenden })).status === 200);
+
+    // TODAY'S CASE: the invoice, on an order that is still quoted
+    const inv = await poTab.api.addFinancialDoc(SHOW, {
+      kind: 'invoice', name: 'Deposit Vendor deposit invoice', ext: 'pdf',
+      vendor: 'Deposit Vendor Co', poId: DPO });
+    const dpoInv = await GET(`/api/pos/${DPO}`, { token: T.brenden });
+    ok('THE DEPOSIT INVOICE LANDS ON A QUOTED PO, in the INVOICE slot',
+       inv.po_link === 'invoice' && dpoInv.body.invoice_file_id === inv.id,
+       { link: inv.po_link, slot: dpoInv.body.invoice_file_id });
+    ok('…beside the quote, which it did not disturb — two slots, two documents',
+       dpoInv.body.quote_file_id === q2.id, dpoInv.body.quote_file_id);
+
+    // ── THE PANEL AFTER A REFRESH ──────────────────────────────────────────
+    // The half that actually bit him today: PO-26-010 carried invoice_file_id
+    // = 44 the whole time and the card still vanished, because Linked docs
+    // draws out of FILES_BY_ID and a cold PO view had never fetched those rows.
+    // The two ids are dropped from the store here to stand for the tab that
+    // never loaded this show — everything else about the view is untouched.
+    // MUTATION GATE: drop the `docs` embed from loadPODetail (routes/purchasing)
+    // or the absorb from api.getPO, and the two assertions below go red.
+    await poTab.api.getProject(PROJ);
+    await poTab.api.getShow(SHOW);
+    delete poTab.FILES_BY_ID[q2.id];
+    delete poTab.FILES_BY_ID[inv.id];
+    const coldPo = await poTab.api.getPO(DPO);
+    ok('THE COLD READ · api.getPO rehydrates the PO’s linked file rows into the store',
+       !!poTab.FILES_BY_ID[q2.id] && !!poTab.FILES_BY_ID[inv.id]
+       && poTab.FILES_BY_ID[inv.id].name === 'Deposit Vendor deposit invoice',
+       [!!poTab.FILES_BY_ID[q2.id], !!poTab.FILES_BY_ID[inv.id]]);
+    const coldHtml = poTab.viewPO(coldPo);
+    ok('…so the Linked docs panel DRAWS BOTH CARDS on a tab that just opened the PO',
+       /Linked docs · 2/.test(coldHtml)
+       && coldHtml.indexOf(`data-act="openViewer" data-id="${q2.id}"`) >= 0
+       && coldHtml.indexOf(`data-act="openViewer" data-id="${inv.id}"`) >= 0,
+       (coldHtml.match(/Linked docs · \d+/) || [])[0]);
+    ok('…naming each one by its role, so the invoice is not mistaken for the quote',
+       /Linked docs · 2/.test(coldHtml) && />invoice</.test(coldHtml) && />quote</.test(coldHtml),
+       (coldHtml.match(/>(invoice|quote)</g) || []));
+
+    // ── THE DOOR, RENDERED ON A QUOTED PO ──────────────────────────────────
+    // It was gated to ordered/shipped/received, so on this exact order the only
+    // affordance was "Attach quote" — which routes the kind AWAY from invoice.
+    const quotedNoInv = await GET(`/api/pos/${DPO}`, { token: T.brenden });
+    ok('the fixture really is a QUOTED order (the gate’s excluded status)',
+       quotedNoInv.body.status === 'quoted', quotedNoInv.body.status);
+    const doorPo = poTab.POS_BY_ID[DPO];
+    const savedInv = doorPo.invoice_file_id;
+    doorPo.invoice_file_id = null;                 // an order still waiting on one
+    const doorHtml = poTab.viewPO(doorPo);
+    doorPo.invoice_file_id = savedInv;
+    ok('THE INVOICE DOOR RENDERS ON A QUOTED PO — a deposit does not wait for "ordered"',
+       /data-act="poAttachInvoice"/.test(doorHtml), doorHtml.indexOf('poAttachInvoice'));
+    ok('…wearing the plain label, because reconciling is not what this click does yet',
+       />Attach invoice</.test(doorHtml) && !/Attach invoice — reconcile/.test(doorHtml));
+    const recvPo = Object.assign({}, doorPo, { status: 'received', invoice_file_id: null });
+    ok('…and the reconcile LABEL still belongs to received, where the click reconciles',
+       /Attach invoice — reconcile/.test(poTab.viewPO(recvPo)));
+
+    // ── THE CHOICE, EXECUTED ───────────────────────────────────────────────
+    // The modal's PO half lifted out of the shipped app.js and driven directly,
+    // the sweepMailBit way: a scan could not tell a prefilled control from a
+    // hardcoded one, and the prefill is the whole point.
+    const finLift = [
+      /var FIN_DOC_KINDS = \[[\s\S]*?\n\];/,
+      /var FIN_PO_SLOTS = \[[\s\S]*?\n\];/,
+      /var PO_LINK_WHERE = \{[\s\S]*?\n\};/,
+      /function finLabelWrap\(text, inner, hint\)[\s\S]*?\n\}/,
+      /function finPoSlotRow\(link\)[\s\S]*?\n\}/,
+      /function finCardsHTML\(\)[\s\S]*?\n\}/,
+      /function finPoHintIndex\(\)[\s\S]*?\n\}/,
+      /function finPickedKind\(i\)[\s\S]*?\n\}/
+    ].map((re) => (re.exec(APP_JS) || [''])[0]);
+    ok('the modal’s PO half is liftable — every piece of it found in the shipped app.js',
+       finLift.every((s) => s.length > 40), finLift.map((s) => s.length));
+    const finTab = (() => {
+      const ctx = {
+        console, POS_BY_ID: { [DPO]: { id: DPO, po_number: 'PO-WALK-54',
+          quote_file_id: 900001, invoice_file_id: null } },
+        PENDING_FIN: null, esc: poTab.esc, icon: poTab.icon, act: poTab.act,
+        _sel: null
+      };
+      ctx.document = { getElementById: (id) => (id === 'fdPoSlot' ? ctx._sel : null) };
+      ctx.window = ctx;
+      vm.createContext(ctx);
+      new vm.Script(finLift.join('\n'), { filename: 'public/app.js#finPoHalf' }).runInContext(ctx);
+      return ctx;
+    })();
+
+    finTab.PENDING_FIN = { showId: SHOW, link: { poId: DPO, poKindHint: 'invoice' } };
+    const rowInv = finTab.finPoSlotRow(finTab.PENDING_FIN.link);
+    ok('THE KIND IS A CONTROL, NOT A SIDE EFFECT — the PO modal draws a labelled slot choice',
+       /id="fdPoSlot"/.test(rowInv) && /Vendor quote/.test(rowInv) && /Vendor invoice/.test(rowInv));
+    ok('…PREFILLED from the button that opened it — Attach invoice selects the invoice slot',
+       /value="invoice" selected/.test(rowInv), rowInv.slice(rowInv.indexOf('<select'), 400));
+    finTab.PENDING_FIN = { showId: SHOW, link: { poId: DPO, poKindHint: 'quote' } };
+    const rowQuote = finTab.finPoSlotRow(finTab.PENDING_FIN.link);
+    ok('…and Attach quote selects the quote slot — the same control, the other default',
+       /value="po" selected/.test(rowQuote) && !/value="invoice" selected/.test(rowQuote));
+    ok('…and it says out loud that an occupied slot is REPLACED, because this one is',
+       /replaces<\/b> it/.test(rowQuote), rowQuote.indexOf('replaces'));
+    ok('…while an EMPTY slot gets the plain promise instead of a false warning',
+       /never silently skipped/.test(rowInv) && !/already holds a document: filing/.test(rowInv));
+
+    finTab.PENDING_FIN = { showId: SHOW, link: { poId: DPO, poKindHint: 'invoice' } };
+    const poCards = finTab.finCardsHTML();
+    ok('…the commit is ONE card on a PO, naming the order it files to',
+       (poCards.match(/data-act="commitFinDoc"/g) || []).length === 1
+       && poCards.indexOf('PO-WALK-54') >= 0, poCards.slice(0, 200));
+    finTab.PENDING_FIN = { showId: SHOW, link: {} };
+    ok('…and OFF a PO the four doc-type cards are untouched — nothing else changed shape',
+       (finTab.finCardsHTML().match(/data-act="commitFinDoc"/g) || []).length === 4);
+
+    finTab.PENDING_FIN = { showId: SHOW, link: { poId: DPO, poKindHint: 'invoice' } };
+    ok('THE VISIBLE CHOICE WINS · the commit sends what the control says, not the card’s index',
+       finTab.finPickedKind(finTab.finPoHintIndex()).kind === 'invoice');
+    finTab._sel = { value: 'po' };
+    ok('…so changing it to Vendor quote really changes the kind that is POSTed',
+       finTab.finPickedKind(finTab.finPoHintIndex()).kind === 'po');
+    finTab._sel = null;
+    ok('…and with no reachable control it still commits the HINT, never index 0',
+       finTab.finPickedKind(finTab.finPoHintIndex()).kind === 'invoice',
+       finTab.FIN_DOC_KINDS[0].kind);
+
+    // ── THE TOAST, AND THE MUTATION THAT PUTS THE LIE BACK ──────────────────
+    // MUTATION GATE: restore `link.poId ? 'the PO'` in commitFinDocReal and both
+    // of these go red — that string IS the 9/3 green-checkmark lie, reprinted.
+    // Comments are stripped first, the same way §HARDENING-21's scan strips
+    // them and for the same reason: the comment that replaced this bug QUOTES
+    // the bug, and a scan that cannot tell prose from code would force the fix
+    // to be silent about what it fixed.
+    const finRealSrc = (/async function commitFinDocReal\(t\)[\s\S]*?\n\}/.exec(APP_JS) || [''])[0]
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    ok('THE TOAST ANSWERS FROM THE SERVER · commitFinDocReal reads the route’s po_link',
+       /PO_LINK_WHERE\[f\.po_link\]/.test(finRealSrc), finRealSrc.indexOf('po_link'));
+    ok('…and the hardcoded "the PO" — the request’s INTENT, printed as an outcome — is gone',
+       !/link\.poId \? 'the PO'/.test(finRealSrc) && !/:\s*'the PO'\s*:/.test(finRealSrc));
+    ok('…with a distinct, true sentence for every outcome the route can report',
+       ['quote', 'invoice', 'superseded-quote', 'superseded-invoice']
+         .every((k) => typeof finTab.PO_LINK_WHERE[k] === 'string'
+                    && finTab.PO_LINK_WHERE[k].indexOf('the PO (') === 0)
+       && new Set(Object.values(finTab.PO_LINK_WHERE)).size === 4,
+       finTab.PO_LINK_WHERE);
+    ok('…and an unlinked answer falls through to copy that does NOT claim the PO',
+       (finTab.PO_LINK_WHERE.none === undefined)
+       && /the PO linked nothing/.test(finRealSrc));
+
+    // the DEMO twin told the same lie in its own words — it is fixed too
+    const seamDemo = API_JS.slice(API_JS.indexOf('addFinancialDoc: function'),
+      API_JS.indexOf('/* API: POST /api/files'));
+    ok('DEMO TWIN · the file:// half no longer skips an occupied quote slot either',
+       !/if \(!linkPo\.quote_file_id\) linkPo\.quote_file_id = f\.id;/.test(seamDemo)
+       && /superseded-/.test(seamDemo));
+  }
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

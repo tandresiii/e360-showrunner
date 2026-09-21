@@ -239,7 +239,13 @@ function viewPO(po) {
   if (po.status === 'quoted' && poNeedsApproval(po) && canApprovePOs(CURRENT_USER)) {
     acts.push('<button class="btn primary" ' + act('poApprove', po.id) + '>' + icon('check') + 'Approve</button>');
   }
-  if (!po.invoice_file_id && (po.status === 'ordered' || po.status === 'shipped' || po.status === 'received')) {
+  /* THE INVOICE DOOR IS NOT A LATE-STATUS AFFORDANCE (Tom 2026-09-21, live).
+     This was gated to ordered/shipped/received, so on a QUOTED order the only
+     door on the page was "Attach quote" — and a deposit invoice, a proforma or
+     a vendor who bills on acceptance went through it, away from kind 'invoice'.
+     The reconcile LABEL still belongs to received, where reconciling is what
+     the click does; the plain door renders wherever there is no invoice yet. */
+  if (!po.invoice_file_id) {
     acts.push('<button class="btn ' + (po.status === 'received' ? 'primary' : 'ghost') + '" ' + act('poAttachInvoice', po.id) + '>' +
       icon('link') + (po.status === 'received' ? 'Attach invoice — reconcile' : 'Attach invoice') + '</button>');
   }
