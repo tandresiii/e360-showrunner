@@ -200,6 +200,17 @@ async function main() {
   delete process.env.GRAPH_CLIENT_SECRET;
   delete process.env.GRAPH_LOGIN_BASE;
   delete process.env.GRAPH_API_BASE;
+  // …and the MAIL_* registration, live in production since 9/21: the walk sends
+  // real notifications through the real seam, and a developer machine carrying
+  // the showrunner@ credentials must never turn that into actual email.
+  delete process.env.MAIL_DRIVER;
+  delete process.env.MAIL_FROM;
+  delete process.env.MAIL_TENANT_ID;
+  delete process.env.MAIL_CLIENT_ID;
+  delete process.env.MAIL_CLIENT_SECRET;
+  delete process.env.MAIL_REPLY_TO;
+  delete process.env.MAIL_GRAPH_LOGIN_BASE;
+  delete process.env.MAIL_GRAPH_API_BASE;
   process.env.ADMIN_PASSWORD = 'walk-admin-pw';
 
   const srv = require(path.join(APP, 'server.js'));
@@ -4318,6 +4329,147 @@ async function main() {
     const wmGone = await demoTab.api.deleteMeeting(wmEvil.id).then(() => null, (e) => String(e.message));
     ok('…and deleting it again is an honest "not found", never a hollow {ok:true}',
        !!wmGone && /not found/.test(wmGone), wmGone);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('53 · "immediate" means immediate — and the sweep says what it mailed  (Tom, 9/21, live)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // The first day of REAL email, three faults in one family — all of them the
+  // second channel failing to tell the truth:
+  //
+  //   1. an 'immediate' row waited for a HUMAN to press Sweep. enqueue() wrote
+  //      it and only boot / the sweep / the admin endpoint ever moved it.
+  //   2. the Sweep toast reported the lifecycle half and hid the mail half, so
+  //      a sweep that mailed somebody and a sweep that found an empty queue
+  //      read identically: "nothing was due — it is idempotent".
+  //   3. GET /api/admin/notification-outbox shipped with F3 and had NO door in
+  //      the product, so an admin could not look at anybody else's stuck mail.
+  //
+  // The server mechanism is proved in the smoke suite (F3 KICK · TX HAZARD ·
+  // SAFETY NET, all mutation-gated). What belongs HERE is the workflow and the
+  // three client surfaces: a person is @mentioned and the mail goes with
+  // NOBODY pressing anything, and the toast and the door say what is true.
+  {
+    // Polls the outbox rather than sleeping a fixed amount: a red line here
+    // must mean "it never happened", never "the machine was busy".
+    const waitRow = async (id, done, ms = 15000) => {
+      const until = Date.now() + ms;
+      for (;;) {
+        const r = await pool.query('SELECT * FROM notification_outbox WHERE note_id=$1', [id]);
+        const row = r.rows[0] || null;
+        if (done(row)) return row;
+        if (Date.now() > until) return row;
+        await new Promise((res) => setTimeout(res, 100));
+      }
+    };
+    const roster53 = await GET('/api/users', { token: A });
+    const omar53 = (roster53.body || []).find((u) => u.username === 'omar');
+    const addr53 = await PUT(`/api/users/${omar53.id}`,
+      { email: 'omar@e360sport.test' }, { token: A });
+    ok('omar has an address to deliver to — entered through the roster, like a person would',
+       addr53.status === 200 && addr53.body.email === 'omar@e360sport.test', addr53.body);
+
+    const note53 = await POST('/api/notes', {
+      anchor_type: 'show', anchor_id: SHOW,
+      body: 'Dock B is confirmed for load-in — @omar you are on it.'
+    }, { token: T.brenden });
+    ok('brenden @mentions omar, and the action answers without waiting on mail',
+       note53.status === 200, note53.body);
+    const row53 = await waitRow(note53.body.id, (r) => !!r && r.status !== 'queued');
+    ok('THE DEFECT, GONE · omar\'s email went out on its own — no sweep, no admin, nobody ' +
+       'pressed anything between the @mention and the delivery',
+       !!row53 && row53.status === 'sent' && row53.mode === 'immediate' && !!row53.sent_at,
+       row53);
+
+    // ── the Sweep toast's mail half, EXECUTED ────────────────────────────────
+    // §37's lesson again: the copy is proved by RUNNING the function the button
+    // renders, never by reading it. The pure half is lifted straight out of the
+    // shipped app.js and driven with real flush shapes.
+    const sweepFn = (() => {
+      const m = /function sweepMailBit\(n\)\s*\{[\s\S]*?\n\}/.exec(APP_JS);
+      if (!m) return null;
+      const ctx = {};
+      vm.createContext(ctx);
+      new vm.Script(m[0], { filename: 'public/app.js#sweepMailBit' }).runInContext(ctx);
+      return ctx.sweepMailBit;
+    })();
+    ok('the sweep toast\'s mail half is a PURE function, and it loads headless',
+       typeof sweepFn === 'function');
+    ok('…a sweep that MAILED somebody says so, in emails and not in jargon',
+       sweepFn({ sent: 1, skipped: 0, queued: 0, failed: 0, configured: true }) === '1 email sent',
+       sweepFn && sweepFn({ sent: 1, configured: true }));
+    ok('…plural counts, and a row that stayed behind names why',
+       sweepFn({ sent: 2, skipped: 0, queued: 1, failed: 0, configured: true }) ===
+         '2 emails sent, 1 still queued (error on the row)',
+       sweepFn && sweepFn({ sent: 2, queued: 1, configured: true }));
+    ok('…an unconfigured driver is NAMED as the reason rather than left to be guessed at',
+       /mail not configured/.test(sweepFn({ sent: 0, queued: 3, configured: false })),
+       sweepFn && sweepFn({ queued: 3, configured: false }));
+    ok('…and an empty queue says EMPTY — the silence is exactly what hid the defect',
+       sweepFn({ considered: 0, sent: 0, skipped: 0, queued: 0, failed: 0, configured: true }) ===
+         'mail queue empty');
+    ok('…a sweep that was asked not to flush says that, instead of claiming empty',
+       sweepFn(null) === 'mail queue not flushed');
+
+    // MUTATION GATE: drop `sweepMailBit(r.notifications)` from runSweepAct and
+    // this goes red — which is the exact toast Tom read while an email waited.
+    const sweepBody = (/async function runSweepAct\(\)[\s\S]*?\n\}/.exec(APP_JS) || [''])[0];
+    ok('MUTATION GATE · runSweepAct ALWAYS appends the mail half, beside the lifecycle half ' +
+       'it already had',
+       /sweepMailBit\(r\.notifications\)/.test(sweepBody) &&
+       /idempotent, so that is the normal answer/.test(sweepBody),
+       sweepBody.slice(0, 160));
+    const sweep53 = await POST('/api/admin/sweep', {}, { token: A });
+    ok('…and the server hands it real counts to say — the flush result rides the sweep answer',
+       sweep53.status === 200 && !!sweep53.body.notifications &&
+       typeof sweep53.body.notifications.sent === 'number' &&
+       typeof sweep53.body.notifications.considered === 'number' &&
+       typeof sweep53.body.notifications.configured === 'boolean',
+       sweep53.body.notifications);
+
+    // ── the admin door onto the whole outbox ────────────────────────────────
+    reach('See everyone\'s notification outbox (admin)',
+      { seam: 'adminOutbox', action: 'outboxScope' });
+    tab.SR.setToken(T.tom);
+    const box53 = await tab.api.adminOutbox({}).then((r) => r, (e) => ({ error: String(e) }));
+    ok('the REAL api.adminOutbox executes — the toggle\'s exact call, as the admin',
+       box53 && !box53.error && Array.isArray(box53.rows) && box53.rows.length >= 1,
+       box53 && (box53.error || box53.rows.length));
+    ok('…and it carries rows belonging to people OTHER than the admin reading it — which is ' +
+       'the whole point of the door',
+       box53.rows.some((r) => r.username !== 'tom'),
+       box53.rows.slice(0, 4).map((r) => r.username));
+    const box53Denied = await (async () => {
+      tab.SR.setToken(T.omar);
+      const r = await tab.api.adminOutbox({}).then(() => null, (e) => e);
+      tab.SR.setToken(T.tom);
+      return r;
+    })();
+    ok('…and a tech is refused by the SERVER, not by the missing button',
+       !!box53Denied && box53Denied.status === 403, box53Denied && box53Denied.status);
+
+    // the render, with hostile upstream text in the field that carries it
+    const rows53 = [{
+      id: 1, username: 'dana', kind: 'mention', mode: 'immediate', status: 'queued',
+      subject: 'Dock B is confirmed', body: 'the sentence the mention lived in',
+      queued_at: '2026-09-21T10:00:00Z',
+      last_error: 'upstream said <img src=x onerror="alert(1)"> & "quoted"'
+    }];
+    const html53 = demoTab.viewOutbox(rows53,
+      { all: true, counts: { queued: 1 }, driver: 'graph', configured: false });
+    ok('ADMIN DOOR · the whole-outbox render names the PERSON each row belongs to',
+       /<th>Person<\/th>/.test(html53) && /dana/.test(html53));
+    ok('ADMIN DOOR · a stuck row shows its last_error — and it is INERT, because upstream ' +
+       'mail-server text is escaped like every other value here',
+       /&lt;img src=x onerror/.test(html53) && !/<img src=x/.test(html53));
+    ok('ADMIN DOOR · an unconfigured driver is flagged on the card rather than guessed at',
+       /mail not configured/.test(html53));
+    const mine53 = demoTab.viewOutbox(rows53, { all: false });
+    ok('…and MINE is untouched — no Person column, and the copy still says yours alone',
+       !/<th>Person<\/th>/.test(mine53) && /Yours alone/.test(mine53));
+    const vo53 = (/function viewOutbox\(rows, opt\)[\s\S]*?\n\}/.exec(SRC['views-global.js']) || [''])[0];
+    ok('ADMIN DOOR · the toggle is drawn for admins only, and the server gate is the real one',
+       /CURRENT_USER\.role === 'admin'/.test(vo53) && /act\('outboxScope'/.test(vo53));
   }
 
   // ── report ─────────────────────────────────────────────────────────────────

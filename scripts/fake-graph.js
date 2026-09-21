@@ -69,6 +69,8 @@ function startFakeGraph({ tenant = 'fake-tenant', clientId = 'fake-client',
     tokenHits: 0,              // "the second call hits the token endpoint zero times"
     listHits: 0,
     contentHits: 0,
+    sendHits: 0,               // lib/mail.js's graph driver
+    sent: [],                  // { fromUser, to, subject, text, replyTo }
     requests: [],              // { method, path, user, auth }
     tokens: new Set(),
     tokenTtl: 3600,
@@ -179,6 +181,41 @@ function startFakeGraph({ tenant = 'fake-tenant', clientId = 'fake-client',
       res.send(t.vtt);
     });
 
+  // ── sendMail (lib/mail.js's graph driver) ─────────────────────────────────
+  // The SAME token endpoint above mints what this route demands, because the
+  // real Graph works that way too — a different app registration, the same
+  // client-credentials shape. Success is 202 Accepted with an EMPTY body, which
+  // is exactly the thing a driver written against a guess gets wrong.
+  //
+  // The payload is CHECKED, not just counted: a sendMail with no recipient or
+  // no subject is a 400 here, so "we posted something" can never pass for "we
+  // posted the right thing".
+  app.post('/users/:uid/sendMail', requireToken, maybeFail, (req, res) => {
+    state.sendHits += 1;
+    const b = req.body || {};
+    const m = b.message || {};
+    const to = ((m.toRecipients || [])[0] || {}).emailAddress || {};
+    if (!to.address) {
+      return res.status(400).json({ error: { code: 'ErrorInvalidRecipients',
+        message: 'At least one recipient is required.' } });
+    }
+    if (!m.subject) {
+      return res.status(400).json({ error: { code: 'ErrorInvalidItem',
+        message: 'A message requires a subject.' } });
+    }
+    state.sent.push({
+      fromUser: req.params.uid,                 // the /users/{id}/ path segment
+      to: to.address,
+      subject: m.subject,
+      contentType: (m.body || {}).contentType || '',
+      text: (m.body || {}).content || '',
+      replyTo: ((m.replyTo || [])[0] || {}).emailAddress
+        ? m.replyTo[0].emailAddress.address : null,
+      saveToSentItems: b.saveToSentItems
+    });
+    res.status(202).end();                      // 202 Accepted, empty body
+  });
+
   // Anything else is Graph's own 404 shape, so a wrong path in our client reads
   // like a wrong path and not like an empty result.
   app.use((req, res) => res.status(404).json({ error: { code: 'ResourceNotFound',
@@ -229,6 +266,21 @@ function startFakeGraph({ tenant = 'fake-tenant', clientId = 'fake-client',
             GRAPH_CLIENT_SECRET: clientSecret,
             GRAPH_LOGIN_BASE: `http://127.0.0.1:${port}`,
             GRAPH_API_BASE: `http://127.0.0.1:${port}`
+          };
+        },
+        // Wire lib/mail.js's graph driver at this same fake. A DIFFERENT app
+        // registration in production (Mail.Send, one mailbox) — here it is the
+        // same token endpoint, which is exactly how the real thing behaves:
+        // two registrations, one Entra.
+        mailEnv(from = 'showrunner@e360sport.test') {
+          return {
+            MAIL_DRIVER: 'graph',
+            MAIL_TENANT_ID: tenant,
+            MAIL_CLIENT_ID: clientId,
+            MAIL_CLIENT_SECRET: clientSecret,
+            MAIL_FROM: from,
+            MAIL_GRAPH_LOGIN_BASE: `http://127.0.0.1:${port}`,
+            MAIL_GRAPH_API_BASE: `http://127.0.0.1:${port}`
           };
         },
         close: () => new Promise((r) => server.close(r))

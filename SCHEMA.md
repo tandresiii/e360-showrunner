@@ -39,8 +39,8 @@ with **Jobs** (the commercial dimension) alongside the shows in the folder.
 | `lib/firewall.js` | 344 | `recapFacts` / `recapUnsafe` / `buildRecapDraft` — the client-content firewall |
 | `lib/http.js` | 67 | `asyncH`, throwable HTTP errors, paging helpers |
 | `lib/mentions.js` | 171 | @mention parsing, the notify principle |
-| `lib/notify.js` | 284 | **F3** — the notification outbox: preferences, enqueue, the digest row, skip-if-read, flush |
-| `lib/mail.js` | 165 | **F3** — the two delivery drivers (`log` default · `graph` skeleton) |
+| `lib/notify.js` | 505 | **F3** — the notification outbox: preferences, enqueue, the digest row, skip-if-read, flush, the post-commit kick + its safety net |
+| `lib/mail.js` | 303 | **F3** — the two delivery drivers (`log` default · `graph`, wired 9/21) |
 | `lib/reports.js` | 170 | **F2** — tech show reports: the obligation, the nag, the two gates |
 | `lib/digest.js` | 470 | **the morning digest** — one gathering of what needs a PERSON today: build, sweep, per-day ledger, timer |
 | `lib/lifecycle.js` | 284 | **F5/F6** — the confirm gate, the machine-checked closeout, archiving, the sweep |
@@ -1895,22 +1895,64 @@ notification is delivered" has exactly one call site.
 | `MAIL_CLIENT_ID` | *(unset)* | app-registration GUID. Required by `graph`. |
 | `MAIL_CLIENT_SECRET` | *(unset)* | client secret. Required by `graph`. |
 | `MAIL_REPLY_TO` | *(unset)* | optional `Reply-To`. |
+| `MAIL_TIMEOUT_MS` | `20000` | per-call budget on the token and `sendMail` requests. A host that never answers is status `0`, which classifies as **retryable** — the row keeps its place in the queue. |
+| `MAIL_GRAPH_LOGIN_BASE` · `MAIL_GRAPH_API_BASE` | *(unset)* | **tests only.** Override the two Microsoft hosts so the suites can point the driver at `scripts/fake-graph.js`, exactly as `GRAPH_LOGIN_BASE` / `GRAPH_API_BASE` do for `lib/graph.js`. Production never sets them; both are read at call time so a suite can wire and unwire the fake mid-run. |
+| `NOTIFY_FLUSH_MINUTES` | `5` | the immediate queue's **safety net**, not its engine — see below. A self-rearming `setTimeout` chain like the nightly backup: the timer always arms, and whether a firing runs is gated at fire time. |
+| `NOTIFY_FLUSH_DELAY_MS` | `2000` | the coalescing window on the post-commit kick. One request can enqueue for six people; this makes that one flush pass instead of six. |
+| `NOTIFY_FLUSH_ENABLED` | *(on)* | `0` disables the safety-net timer. The post-commit kick is unaffected — it is the normal path, not an optional one. |
 | `APP_BASE_URL` | *(unset)* | used to make the deep link in a message body absolute. Unset leaves the link relative — still useful, still honest. |
 | `TECH_REPORT_DUE_DAYS` | `3` | how long a tech has to file a show report after strike. |
 | `ARCHIVE_AFTER_DAYS` | `60` | F6 — days after `closeout_complete_at` before the sweep auto-archives. Tom's number. |
 | `SWEEP_ON_BOOT` | *(on)* | `0` disables the boot sweep. |
 | `SWEEP_LOOKBACK_DAYS` | `45` | How far back the sweep reaches to **strike a show it has never seen**. The first boot after this release meets a database full of shows that already happened; unbounded, it would strike all of them and nag every crew member about a job from last year. Older than this is history — a pm can still strike it by hand. A show **already struck** is unaffected, and closeout/archiving have no lookback at all: they are pure re-checks of the record. |
 
-**`graph` is a SKELETON and says so.** The mailbox and app registration are an
-M365-admin task that has not happened (HANDOFF "Open / next"), so the wire call
-is deliberately not written — there is nothing to authenticate against and a
-half-written client would be untestable fiction. What IS built is everything up
-to the wire: config detection, the token + `sendMail` URLs, the exact JSON body
-(`graphTokenUrl()` / `graphSendMailUrl()` / `graphSendMailBody()`), and the
-failure contract. Selected but unconfigured, it answers a **501-shaped
-"mail not configured"** naming the missing vars, and **the item stays queued** —
-so turning the env vars on later delivers the backlog rather than discovering it
+**`graph` is WIRED (2026-09-21).** It was a skeleton for a year — the two URLs,
+the exact JSON body and the failure contract were built, and the two `fetch()`
+calls between them were not — and the day the `MAIL_*` vars landed in production
+every queued row came back carrying *"configured but not yet wired"*: one
+@mention and three days of digests per person, sitting in an outbox behind a
+placeholder. The flow now is the documented one: a client-credentials token
+against `graphTokenUrl()`, cached until five minutes inside Entra's own TTL, and
+a `POST` to `graphSendMailUrl(MAIL_FROM)` that Graph answers **202 Accepted**
+with an empty body. A `401` refreshes the token **once** and retries. The
+classification is the outbox's own two failure states: `0 · 401 · 403 · 408 ·
+429 · 5xx` are **retryable** and keep the row queued with Graph's own words in
+`last_error`; a **400-class payload refusal** marks it `failed`, because
+retrying an address that will never work is a loop, not a recovery.
+
+The client-credentials *decisions* — the token form, the cache margin, the
+failure wording — are shared with `lib/graph.js` (`tokenFormBody` /
+`tokenTtlMs` / `tokenFailureMessage`) so two app registrations cannot drift
+apart. The *transport* is not: `lib/graph.js` writes a `graph_audit` row on
+every exit, and that ledger is Tony Tran's condition on the **unattended
+transcript reader**. Filing system mail under his audit would misrepresent what
+he agreed to.
+
+Selected but unconfigured, it still answers a **501-shaped "mail not
+configured"** naming the missing vars, and **the item stays queued** — so
+turning the env vars on later delivers the backlog rather than discovering it
 was thrown away. `GET /api/admin/mail-status` reports exactly this.
+
+**The immediate queue flushes ITSELF.** Until 9/21 an `immediate` row was
+written by `enqueue()` and moved only by server boot, the admin sweep or
+`POST /api/admin/notifications/flush` — so an @mention email waited for a human.
+Now the transaction that enqueues it registers a kick on its own **after-commit
+hook** (`lib/db.js` `withTx`), coalesced `NOTIFY_FLUSH_DELAY_MS`. The hook is
+the load-bearing part: `enqueue()` runs *inside* the caller's transaction, the
+row is invisible to every other connection until `COMMIT` returns, and
+`flush()` reads through the pool — so a flush fired inline would consider zero
+rows and deliver nothing. `NOTIFY_FLUSH_MINUTES` is a **safety net** for what a
+crash or a hand-written `INSERT` leaves behind, not the engine.
+`GET /api/health`'s `notifications` block carries `lastImmediateFlush`
+`{at, trigger, considered, sent, queuedLeft}` so a stuck queue is visible from
+outside without a login.
+
+**Stale digests collapse.** A `daily_digest` row is one morning's plate. When
+several are queued for the same person — one per day the driver could not
+deliver — only the **newest** is sent and the older ones are marked `skipped`
+with `superseded by newer digest`. Three silent days must not arrive as three
+mornings at once, and a dropped notification that leaves no trace is
+indistinguishable from a bug.
 
 **System mail is not agent outbound.** "File-don't-fire" (`AGENT_API.md` §9) is
 about an agent sending mail *as a person*. This is the app telling a person that

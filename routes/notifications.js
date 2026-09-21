@@ -163,7 +163,9 @@ router.get('/admin/mail-status', requireRole('admin'), asyncH(async (req, res) =
       ? 'The log driver records every delivery in the activity trail. Nothing leaves the building.'
       : (missing.length
         ? 'Graph is selected but not configured — items stay queued and deliver once the vars are set.'
-        : 'Graph is configured; the wire call is pending the mailbox + app registration (SCHEMA.md).')
+        : 'Graph is configured and WIRED — client-credentials token + sendMail from the ' +
+          'dedicated mailbox. A refusal lands on the row as last_error; a transient one keeps ' +
+          'the row queued, a payload rejection marks it failed (lib/mail.js graphSendRetryable).')
   });
 }));
 

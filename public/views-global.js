@@ -1278,15 +1278,25 @@ function viewSettings(ctx) {
    the mail layer is not configured yet. That last one is the honest one: the
    item is not lost, it is waiting.
    ========================================================================== */
-function viewOutbox(rows) {
+function viewOutbox(rows, opt) {
+  /* `opt.all` is the 9/21 ADMIN DOOR: the same renderer over the whole table
+     instead of one person's slice. The username column appears only in that
+     mode (in MINE it would say your own name on every row), and a row that did
+     not go carries its last_error — which is UPSTREAM TEXT from a mail server
+     we do not control, so it goes through esc() like every other value here. */
+  opt = opt || {};
+  var all = !!opt.all;
+  var admin = CURRENT_USER.role === 'admin';
   var list = (rows || []).map(function (n) {
     var m = NOTIFY_STATUS_META[n.status] || NOTIFY_STATUS_META.queued;
     var why = n.status === 'skipped' ? n.skipped_reason
       : n.status === 'failed' ? n.last_error
-      : n.status === 'queued' ? (n.mode === 'digest' ? 'in your digest — flushes when a scheduler exists'
-                                                      : 'waiting for the next flush')
+      : n.status === 'queued' ? (n.mode === 'digest'
+          ? 'in ' + (all ? 'their' : 'your') + ' digest — rides the morning digest timer'
+          : (n.last_error || 'queued — the flush that follows the action will take it'))
       : (n.driver === 'log' ? 'recorded in the activity trail' : 'delivered by ' + (n.driver || 'mail'));
     return '<tr' + (n.show_id ? ' class="rowlink" ' + act('openShow', n.show_id) : '') + '>' +
+      (all ? '<td class="mono" style="font-size:12px">' + esc(n.username || '') + '</td>' : '') +
       '<td><b style="font-weight:600">' + esc(n.subject) + '</b>' +
       '<div class="mini" style="margin-top:2px">' + esc(String(n.body || '').slice(0, 110)) + '</div></td>' +
       '<td><span class="tag">' + esc(NOTIFY_KIND_LABEL[n.kind] || n.kind) + '</span></td>' +
@@ -1295,17 +1305,41 @@ function viewOutbox(rows) {
       '<div class="mini" style="margin-top:3px">' + esc(why || '') + '</div></td>' +
       '<td class="mono" style="font-size:12px">' + esc(fmtDate(String(n.queued_at || '').slice(0, 10))) + '</td>' +
       '</tr>';
-  }).join('') || '<tr><td colspan="5"><div class="empty">Nothing has been queued for you.</div></td></tr>';
+  }).join('') || '<tr><td colspan="' + (all ? 6 : 5) + '"><div class="empty">' +
+    (all ? 'Nothing has been queued for anyone.' : 'Nothing has been queued for you.') + '</div></td></tr>';
 
-  return '<div class="page-h"><div><h1>My notifications</h1><div class="sub">The second channel, audited. ' +
-    'Everything here also reached you in the bell — this is the record of what left the building, what ' +
-    'was deliberately skipped, and what is still waiting.</div></div>' +
+  /* the toggle is drawn for admins only — the server gate is the real one */
+  var scope = !admin ? '' :
+    '<div class="seg" style="margin-left:auto">' +
+      [['mine', 'Mine'], ['all', 'Everyone (admin)']].map(function (m) {
+        return '<button class="' + ((m[0] === 'all') === all ? 'on' : '') + '" ' +
+          act('outboxScope', null, m[0]) + '>' + esc(m[1]) + '</button>';
+      }).join('') +
+    '</div>';
+  var counts = (all && opt.counts) ? Object.keys(opt.counts).map(function (k) {
+    return '<span class="pill idle">' + esc(k) + ' ' + esc(String(opt.counts[k])) + '</span>';
+  }).join(' ') : '';
+
+  return '<div class="page-h"><div><h1>' + (all ? 'Notification outbox' : 'My notifications') + '</h1>' +
+    '<div class="sub">' + (all
+      ? 'Everyone\'s second channel, so a stuck email can be diagnosed for the person it is stuck for. ' +
+        'A row that did not go says why on its face.'
+      : 'The second channel, audited. Everything here also reached you in the bell — this is the record ' +
+        'of what left the building, what was deliberately skipped, and what is still waiting.') +
+    '</div></div>' +
     '<button class="btn ghost" ' + act('gotoTab', null, 'settings') + '>' + icon('gear') + 'Notification settings</button></div>' +
-    '<div class="card"><div class="card-h"><h3>Outbox</h3><span class="pill idle">newest first</span></div>' +
-    '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Message</th><th>Kind</th><th>Preference</th>' +
+    '<div class="card"><div class="card-h"><h3>Outbox</h3><span class="pill idle">newest first</span>' +
+    (counts ? ' ' + counts : '') +
+    (all && opt.configured === false ? ' <span class="pill warn">mail not configured</span>' : '') +
+    scope + '</div>' +
+    '<div class="tbl-wrap"><table class="tbl"><thead><tr>' + (all ? '<th>Person</th>' : '') +
+    '<th>Message</th><th>Kind</th><th>Preference</th>' +
     '<th>Outcome</th><th>Queued</th></tr></thead><tbody>' + list + '</tbody></table></div></div>' +
-    '<div class="hint">' + icon('lock') + '<span>Yours alone — nobody else can read your queue. ' +
-    '<b>Skipped</b> is a deliberate outcome, not a failure: a message you had already read in the app ' +
+    '<div class="hint">' + icon('lock') + '<span>' + (all
+      ? 'Admin view — the per-person queue at /api/me/notifications stays private to its owner; this is ' +
+        'the operator\'s door, and it is gated server-side.'
+      : 'Yours alone — nobody else can read your queue.') +
+    ' <b>Skipped</b> is a deliberate outcome, not a failure: a message you had already read in the app ' +
     'is not mailed to you afterwards.</span></div>';
 }
 

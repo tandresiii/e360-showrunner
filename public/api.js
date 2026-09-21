@@ -4835,6 +4835,27 @@ var api = (function () {
       return SR.get('/api/me/notifications' + SR.qs({ status: status || null }))
         .then(function (rows) { (rows || []).forEach(A.notification); return rows || []; });
     },
+    /* THE ADMIN DOOR onto the same table (Tom, 9/21, live). Until this pass
+       GET /api/admin/notification-outbox — admin-gated, filterable, shipped
+       with F3 — had NO way in from the product: Settings' "See what was sent"
+       renders /me/notifications only, so an admin diagnosing somebody ELSE's
+       stuck email had no surface at all. That is the manual-door law broken in
+       the other direction: a capability nobody can reach is not shipped. */
+    adminOutbox: function (opts) {
+      var o = opts || {};
+      if (!API()) {
+        if (CURRENT_USER.role !== 'admin') return fail('the whole outbox is an admin view');
+        return ok(adminOutboxLocal(o));
+      }
+      /* NOT run through A.notification, deliberately, and this is the one place
+         in the seam where that adapter is skipped on purpose: it files a row
+         into the LOCAL notification store, which is MINE. These rows belong to
+         other people, and adopting them would leak somebody else's queue into
+         api.myNotifications(). The admin view renders straight off the answer. */
+      return SR.get('/api/admin/notification-outbox' +
+          SR.qs({ status: o.status || null, kind: o.kind || null, username: o.username || null }))
+        .then(function (r) { return r || { rows: [], counts: {} }; });
+    },
     mailStatus: function () {
       if (!API()) {
         return ok({ driver: MAIL_DRIVER, configured: MAIL_CONFIGURED, missing: [],

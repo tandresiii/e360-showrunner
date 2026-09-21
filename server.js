@@ -257,7 +257,15 @@ app.get('/api/health', async (req, res) => {
                // audit-row count that proves Tony Tran's condition is being
                // kept. `configured` is config; the first live sweep is the
                // measurement, and `stale` is the silently-stopped detector.
-               graph: await require('./lib/transcripts').healthBlock() });
+               graph: await require('./lib/transcripts').healthBlock(),
+               // F3's automatic half. ADDITIVE, same doctrine as the blocks
+               // above: config booleans plus the one real MEASUREMENT —
+               // lastImmediateFlush {at, trigger, considered, sent,
+               // queuedLeft}. Until 9/21 an 'immediate' notification waited
+               // for a human to press Sweep, and nothing outside the database
+               // could see that it was waiting. queuedImmediate + a stale
+               // lastImmediateFlush is what a stuck queue looks like from here.
+               notifications: await require('./lib/notify').healthBlock() });
   } catch (e) {
     res.status(503).json({ ok: false, error: e.message });
   }
@@ -455,6 +463,16 @@ async function boot() {
   const transcriptsLib = require('./lib/transcripts');
   const sweepNextAt = transcriptsLib.armTranscriptSweepTimer();
 
+  // F3's SAFETY NET, not its engine. An immediate notification is flushed by
+  // the action that enqueued it (lib/notify.js THE IMMEDIATE KICK, on the
+  // transaction's after-commit hook); this slow chain exists only to meet the
+  // rows a crash, a redeploy mid-request or a hand-written INSERT left behind.
+  // Same doctrine as the three timers above: always arms, gated at fire time
+  // (NOTIFY_FLUSH_ENABLED, DATABASE_URL), unref()'d, and /api/health's
+  // `notifications` block says which way the last pass went.
+  const notifyLib = require('./lib/notify');
+  const notifyNextAt = notifyLib.armImmediateFlushTimer();
+
   return new Promise((resolve) => {
     const server = app.listen(PORT, () => {
       console.log(`E360 Showrunner ${APP_VERSION} running on port ${PORT}`);
@@ -486,6 +504,10 @@ async function boot() {
                   (graphCfg.graphConfigured()
                     ? 'app-only Graph configured — every call writes a graph_audit row'
                     : `DARK — ${graphCfg.graphMissing().join(', ')} unset, nothing is swept`) + ')');
+      console.log(`  notify net     : armed for ${notifyNextAt.toISOString()} ` +
+                  `(NOTIFY_FLUSH_MINUTES=${process.env.NOTIFY_FLUSH_MINUTES || '5'}; a SAFETY NET — ` +
+                  `an immediate notification is flushed by the action that enqueued it, ` +
+                  `${notifyLib.flushDelayMs()}ms after its transaction commits)`);
       resolve(server);
     });
   });

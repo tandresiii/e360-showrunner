@@ -12,6 +12,11 @@
 
 var CUR = { view: 'projects', projectId: null, showId: null, jobId: null, poId: null };
 
+/* F3 admin door (9/21): which half of the outbox the Notifications view is
+   showing. Session-only and deliberately NOT stored — "everyone" is a
+   diagnostic posture an admin steps into, not a preference. */
+var OUTBOX_ALL = false;
+
 /* ---------------------------------------------------------------- theme --- */
 var THEME_KEY = 'showrunner.theme';
 function loadTheme() { try { return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'; } catch (_) { return 'dark'; } }
@@ -168,9 +173,21 @@ async function renderView(view, arg) {
     navOn('projects');
 
   } else if (view === 'outbox') {
-    /* F3 — a person's own notification record. */
-    s.innerHTML = viewOutbox(await api.myNotifications());
-    crumb([{ t: 'Settings', act: act('gotoTab', null, 'settings') }, { t: 'My notifications' }]);
+    /* F3 — a person's own notification record, and (9/21, admin only) the
+       whole table. An admin diagnosing somebody ELSE'S stuck email had no
+       surface at all: GET /api/admin/notification-outbox shipped with F3 and
+       nothing in the product ever called it. The toggle is per session and
+       falls back to MINE for anyone who is not an admin — the gate is on the
+       server, this only decides which door is drawn. */
+    if (OUTBOX_ALL && CURRENT_USER.role === 'admin') {
+      var box = await api.adminOutbox({});
+      s.innerHTML = viewOutbox(box.rows, { all: true, counts: box.counts,
+                                           driver: box.driver, configured: box.configured });
+      crumb([{ t: 'Settings', act: act('gotoTab', null, 'settings') }, { t: 'Notification outbox' }]);
+    } else {
+      s.innerHTML = viewOutbox(await api.myNotifications(), { all: false });
+      crumb([{ t: 'Settings', act: act('gotoTab', null, 'settings') }, { t: 'My notifications' }]);
+    }
     navOn('settings');
 
   } else if (view === 'today') {
@@ -4063,6 +4080,34 @@ async function flushDigestAct() {
   return render('settings');
 }
 
+/* The MAIL half of the sweep's answer, said out loud in every direction.
+   Tom, 9/21, live: he pressed Run it now while a queued @mention email was
+   waiting and read "Sweep done — nothing was due — it is idempotent, so that
+   is the normal answer". The sweep ALWAYS flushes the immediate queue
+   (lib/lifecycle.js sweep -> notify.flush), so that toast reported the
+   lifecycle half and hid the mail half entirely: a sweep that mailed somebody
+   and a sweep that found an empty queue read identically. Every count here
+   comes off the real flush result; nothing is inferred and nothing is
+   rounded to a reassuring word. Pure and tiny so the walk can run it. */
+function sweepMailBit(n) {
+  if (!n) return 'mail queue not flushed';
+  var parts = [];
+  if (n.sent) parts.push(n.sent + ' email' + (n.sent === 1 ? '' : 's') + ' sent');
+  if (n.skipped) parts.push(n.skipped + ' skipped');
+  if (n.queued) {
+    parts.push(n.queued + ' still queued' +
+      (n.configured ? ' (error on the row)' : ' — mail not configured'));
+  }
+  if (n.failed) parts.push(n.failed + ' failed');
+  /* the stale-digest collapse: older queued daily digests are skipped rather
+     than delivered, and a sweep that did that must say so — three mornings
+     arriving at once would otherwise look like a bug nobody could explain. */
+  if (n.superseded) {
+    parts.push(n.superseded + ' stale digest' + (n.superseded === 1 ? '' : 's') + ' superseded');
+  }
+  return parts.length ? parts.join(', ') : 'mail queue empty';
+}
+
 async function runSweepAct() {
   var r;
   try { r = await api.sweep(); }
@@ -4073,8 +4118,11 @@ async function runSweepAct() {
   if (r.nagged) bits.push(r.nagged + ' nagged');
   if (r.closeout_complete) bits.push(r.closeout_complete + ' closed out');
   if (r.archived) bits.push(r.archived + ' archived');
-  if (r.notifications && r.notifications.sent) bits.push(r.notifications.sent + ' notifications sent');
-  toast('Sweep done', bits.length ? bits.join(' · ') : 'nothing was due — it is idempotent, so that is the normal answer');
+  // the lifecycle half keeps its own idempotent-is-normal phrasing, and the
+  // mail half is ALWAYS appended — a silent sweep is what hid the defect
+  toast('Sweep done', (bits.length ? bits.join(' · ')
+    : 'nothing was due — it is idempotent, so that is the normal answer') +
+    ' · ' + sweepMailBit(r.notifications));
   await updateBellBadge();
   await updateMineCount();
   return render('settings');
@@ -8203,7 +8251,9 @@ var ACTIONS = {
   unarchiveProject: function (t, id) { return unarchiveProjectAct(id); },
   /* F3 */
   notifPref:     function (t, id, k) { return notifPrefAct(k); },
-  openOutbox:    function () { return render('outbox'); },
+  openOutbox:    function () { OUTBOX_ALL = false; return render('outbox'); },
+  /* the admin door onto the same view — k is 'all' or 'mine' */
+  outboxScope:   function (t, id, k) { OUTBOX_ALL = (k === 'all'); return render('outbox'); },
   runSweep:      function () { return runSweepAct(); },
   backupNow:     function () { return backupNowAct(); },
   transcriptSweepNow: function () { return transcriptSweepNowAct(); },

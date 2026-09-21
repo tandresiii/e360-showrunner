@@ -58,6 +58,18 @@ delete process.env.GRAPH_CLIENT_ID;
 delete process.env.GRAPH_CLIENT_SECRET;
 delete process.env.GRAPH_LOGIN_BASE;
 delete process.env.GRAPH_API_BASE;
+// F3's mail driver went LIVE in production on 9/21, which makes MAIL_* the same
+// hazard the three families above already are: a developer machine carrying the
+// real showrunner@ credentials must never have this suite send actual email.
+// Cleared before anything reads them; the fake's are set and unset mid-run.
+delete process.env.MAIL_DRIVER;
+delete process.env.MAIL_FROM;
+delete process.env.MAIL_TENANT_ID;
+delete process.env.MAIL_CLIENT_ID;
+delete process.env.MAIL_CLIENT_SECRET;
+delete process.env.MAIL_REPLY_TO;
+delete process.env.MAIL_GRAPH_LOGIN_BASE;
+delete process.env.MAIL_GRAPH_API_BASE;
 
 const assert = require('assert');
 const { pool } = require('../lib/db');
@@ -3560,11 +3572,310 @@ const DEL = (p, o) => call('DELETE', p, o);
      stillQueuedRow.rows[0].status === 'queued' && stillQueuedRow.rows[0].attempts >= 1 &&
      /not configured/.test(String(stillQueuedRow.rows[0].last_error)), stillQueuedRow.rows[0]);
   process.env.MAIL_DRIVER = wasDriver || 'log';
-  ok('F3 MAIL: the Graph skeleton knows its own endpoints, so wiring it is credentials only',
+  ok('F3 MAIL: the driver builds the documented endpoints and body — the pure half, held ' +
+     'here so the wired half below is only ever about the two calls between them',
      /login\.microsoftonline\.com/.test(mail.graphTokenUrl()) &&
      /graph\.microsoft\.com\/v1\.0\/users\/.*\/sendMail/.test(mail.graphSendMailUrl('a@b.c')) &&
      mail.graphSendMailBody({ to: 'a@b.c', subject: 's', text: 't' }).message.subject === 's');
   await POST('/api/admin/notifications/flush', {}, { token: A });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // F3 IMMEDIATE MEANS IMMEDIATE — the action flushes its own mail  (9/21)
+  // ──────────────────────────────────────────────────────────────────────────
+  // The defect, found on the first day of REAL email: nothing flushed an
+  // immediate row at ACTION time. enqueue() wrote it, and the only things that
+  // ever moved it were server boot, the admin sweep and the admin endpoint —
+  // so a person's @mention email sat queued for minutes until somebody pressed
+  // Sweep. Under the 'log' driver that was invisible (a flush was bookkeeping).
+  // Under Graph it is the product being wrong.
+  //
+  // NOTHING IN THIS BLOCK CALLS A SWEEP OR A MANUAL FLUSH between an action and
+  // its assertion. That absence IS the test. MUTATION GATE (1): delete the
+  // kickImmediate() call in lib/notify.js enqueue() and the delivery assertion
+  // below goes red with the row still 'queued' after the full wait.
+  const notifyLib = require('../lib/notify');
+  const { withTx: smokeTx } = require('../lib/db');
+  // Polls a row until it satisfies `done`, or gives up. Deliberately longer
+  // than the coalescing window so a red line means "it never happened", never
+  // "the machine was busy".
+  async function waitForRow(sql, params, done, ms = 15000) {
+    const until = Date.now() + ms;
+    for (;;) {
+      const r = await pool.query(sql, params);
+      const row = r.rows[0] || null;
+      if (done(row)) return row;
+      if (Date.now() > until) return row;
+      await new Promise((res) => setTimeout(res, 100));
+    }
+  }
+
+  const kickUser = TAG + 'kick';
+  const kickCreated = await POST('/api/users',
+    { username: kickUser, password: 'smokepass123', role: 'tech', name: 'KICK TARGET',
+      email: kickUser + '@e360sport.test' }, { token: A });
+  ok('F3 KICK: a person with a real address on file to deliver to',
+     kickCreated.status === 200 && !!kickCreated.body.email, kickCreated.body);
+  const actBefore = (await pool.query(
+    `SELECT COUNT(*)::int AS n FROM activity WHERE action='notification.sent'`)).rows[0].n;
+  const kickNote = await POST('/api/notes', {
+    anchor_type: 'show', anchor_id: S, body: `Kick probe — @${kickUser} no sweep is coming.`
+  }, { token: A });
+  ok('F3 KICK: posting the note succeeded', kickNote.status === 200, kickNote.body);
+  const kickRow = await waitForRow(
+    'SELECT * FROM notification_outbox WHERE note_id=$1', [kickNote.body.id],
+    (r) => !!r && r.status !== 'queued');
+  ok('F3 KICK: the @mention email DELIVERED on its own — no sweep, no admin flush, ' +
+     'nobody pressed anything',
+     !!kickRow && kickRow.status === 'sent' && kickRow.driver === 'log' && !!kickRow.sent_at,
+     kickRow);
+  const actAfter = (await pool.query(
+    `SELECT COUNT(*)::int AS n FROM activity WHERE action='notification.sent'`)).rows[0].n;
+  ok('F3 KICK: ...and the driver recorded the delivery, so the automatic half is auditable',
+     actAfter > actBefore, { actBefore, actAfter });
+
+  // ── THE TRANSACTION HAZARD, PINNED BY RUNNING IT ─────────────────────────
+  // enqueue() runs INSIDE the caller's transaction. The row it writes is
+  // invisible to every other connection until COMMIT returns, and flush() reads
+  // through the pool — a DIFFERENT connection. So a flush fired from inside
+  // enqueue() would consider ZERO rows and deliver nothing, which is why the
+  // kick is registered on the after-commit hook instead of called inline.
+  // This proves the invisibility rather than asserting it in a comment.
+  // MUTATION GATE (2): make kickImmediate() call armKick() directly (the
+  // inside-the-transaction shape) and the second half goes red — the delivery
+  // never happens, exactly as `considered === 0` predicts.
+  const hazard = await smokeTx(async (c) => {
+    const row = await notifyLib.enqueue(c, {
+      username: kickUser, kind: 'assignment', actor: 'admin',
+      subject: TAG + ' hazard probe', body: 'written inside an open transaction'
+    });
+    const mid = await notifyLib.flush({ digest: false, username: kickUser, trigger: 'smoke-inside-tx' });
+    const seen = await c.query('SELECT status FROM notification_outbox WHERE id=$1', [row.id]);
+    // Precisely the invisibility claim, not a count that another queued row
+    // could satisfy by accident: the row THIS transaction just wrote must not
+    // appear among the ids that flush touched.
+    return { id: row.id, sawMine: (mid.results || []).some((x) => x.id === row.id),
+             considered: mid.considered, inside: seen.rows[0].status };
+  });
+  ok('F3 TX HAZARD: a flush fired INSIDE the transaction cannot even SEE the row that ' +
+     'transaction just wrote — it is invisible to every other connection until COMMIT',
+     hazard.sawMine === false && hazard.inside === 'queued', hazard);
+  const hazardRow = await waitForRow(
+    'SELECT * FROM notification_outbox WHERE id=$1', [hazard.id],
+    (r) => !!r && r.status !== 'queued');
+  ok('F3 TX HAZARD: ...and once the transaction COMMITTED, the registered kick delivered ' +
+     'it anyway — that is the seam, and it is commit-safe by construction',
+     !!hazardRow && hazardRow.status === 'sent', hazardRow);
+
+  // ── A FAILING DRIVER MUST NOT TOUCH THE USER'S ACTION ────────────────────
+  const wasKickDriver = process.env.MAIL_DRIVER;
+  process.env.MAIL_DRIVER = 'graph';            // configured? no → retryable 501
+  const failNote = await POST('/api/notes', {
+    anchor_type: 'show', anchor_id: S, body: `Bad-driver probe — @${kickUser} this cannot go.`
+  }, { token: A });
+  ok('F3 KICK FAILS SAFE: the person\'s action still succeeded — mail is a side effect of ' +
+     'the work, never a condition of it', failNote.status === 200, failNote.body);
+  const failRow = await waitForRow(
+    'SELECT * FROM notification_outbox WHERE note_id=$1', [failNote.body.id],
+    (r) => !!r && r.attempts >= 1);
+  ok('F3 KICK FAILS SAFE: the kick ran, the driver refused, and the row is STILL QUEUED ' +
+     'carrying last_error — a backlog, never a discarded notification',
+     !!failRow && failRow.status === 'queued' && failRow.attempts >= 1 &&
+     /not configured/.test(String(failRow.last_error)), failRow);
+  process.env.MAIL_DRIVER = wasKickDriver || 'log';
+  // clean up after deliberately breaking the driver, so nothing downstream
+  // inherits a backlog this block created
+  await POST('/api/admin/notifications/flush', {}, { token: A });
+
+  // ── THE SAFETY NET ───────────────────────────────────────────────────────
+  // Proven by RUNNING what the timer calls, never by waiting five minutes for
+  // it. The row below is written by raw SQL, so it never went through enqueue()
+  // and no kick is holding it — exactly the shape a crash or a redeploy
+  // mid-request leaves behind.
+  const orphan = await pool.query(
+    `INSERT INTO notification_outbox (username, kind, mode, status, subject, body)
+     VALUES ($1,'assignment','immediate','queued',$2,'nothing is holding this row') RETURNING id`,
+    [kickUser, TAG + ' orphaned immediate row']);
+  const netArmed = notifyLib.armImmediateFlushTimer();
+  ok('F3 SAFETY NET: the timer ARMS and says when it will next fire',
+     netArmed instanceof Date && netArmed.getTime() > Date.now() &&
+     netArmed.getTime() - Date.now() <= notifyLib.flushMinutes() * 60000 + 2000, netArmed);
+  ok('F3 SAFETY NET: ...on NOTIFY_FLUSH_MINUTES, defaulting to 5',
+     notifyLib.flushMinutes() === 5 && notifyLib.immediateFlushArmedFor() === netArmed,
+     notifyLib.flushMinutes());
+  const netRun = await notifyLib.runSafetyNetFlush();
+  const orphanRow = await pool.query('SELECT * FROM notification_outbox WHERE id=$1',
+    [orphan.rows[0].id]);
+  ok('F3 SAFETY NET: ...and a firing DRAINS the row no kick was holding',
+     orphanRow.rows[0].status === 'sent' && netRun.sent >= 1, orphanRow.rows[0]);
+  ok('F3 SAFETY NET: an empty queue is a cheap no-op, not an error',
+     (await notifyLib.runSafetyNetFlush()).considered === 0);
+
+  // ── /api/health says whether the automatic half is alive ─────────────────
+  const nHealth = (await GET('/api/health')).body.notifications;
+  ok('F3 HEALTH: /api/health gains an ADDITIVE `notifications` block',
+     !!nHealth && nHealth.driver === 'log' && nHealth.immediateOnAction === true &&
+     typeof nHealth.queuedImmediate === 'number', nHealth);
+  ok('F3 HEALTH: ...carrying lastImmediateFlush {at, sent, queuedLeft} — a stuck queue is ' +
+     'visible from outside without a login',
+     !!nHealth.lastImmediateFlush && !!nHealth.lastImmediateFlush.at &&
+     typeof nHealth.lastImmediateFlush.sent === 'number' &&
+     typeof nHealth.lastImmediateFlush.queuedLeft === 'number', nHealth.lastImmediateFlush);
+  ok('F3 HEALTH: ...and the safety net names its own env var and cadence',
+     nHealth.safetyNet && nHealth.safetyNet.envVar === 'NOTIFY_FLUSH_MINUTES' &&
+     nHealth.safetyNet.everyMinutes === 5 && nHealth.safetyNet.enabled === true,
+     nHealth.safetyNet);
+  ok('F3 HEALTH: ...in the house configuredMeans style — it says what it is NOT claiming',
+     /NOT a send test/.test(String(nHealth.configuredMeans)), nHealth.configuredMeans);
+
+  // ── THE ADMIN DOOR onto the whole outbox (9/21) ──────────────────────────
+  const adminBox = await GET(`/api/admin/notification-outbox?username=${kickUser}`, { token: A });
+  ok('F3 ADMIN DOOR: an admin can read somebody ELSE\'s queue to diagnose it',
+     adminBox.status === 200 && adminBox.body.rows.length >= 1 &&
+     adminBox.body.rows.every((r) => r.username === kickUser), adminBox.body.counts);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // F3 THE GRAPH DRIVER, WIRED — there is water in the pipe now  (9/21)
+  // ──────────────────────────────────────────────────────────────────────────
+  // THE ROOT CAUSE of "the mail never arrived", and the reason the flush-timing
+  // fix above would otherwise have been a fix to nothing: sendViaGraph() was a
+  // SKELETON. graphTokenUrl(), graphSendMailUrl() and graphSendMailBody() had
+  // been written and unit-shaped for a year; the two fetch() calls between them
+  // never were, so a CONFIGURED graph driver returned 501 "configured but not
+  // yet wired" unconditionally. Production proved it: every queued row carried
+  // that exact sentence.
+  //
+  // Everything here runs against scripts/fake-graph.js — the same rig §G uses
+  // for the transcript reader, extended with the token+sendMail pair. The live
+  // tenant is off the table by hard rule.
+  {
+    const { startFakeGraph } = require('./fake-graph');
+    const fg = await startFakeGraph({ tenant: 'mail-tenant', clientId: 'mail-client',
+                                      clientSecret: 'mail-secret' });
+    const mailEnv = fg.mailEnv('showrunner@e360sport.test');
+    const mailEnvWas = {};
+    for (const k of Object.keys(mailEnv)) { mailEnvWas[k] = process.env[k]; process.env[k] = mailEnv[k]; }
+    const mailLib = require('../lib/mail');
+    mailLib.mailResetToken(); mailLib.mailResetTokenStats();
+    try {
+      ok('F3 GRAPH: with MAIL_* present the driver is graph AND reports configured',
+         mailLib.driverName() === 'graph' && mailLib.mailConfigured() === true &&
+         mailLib.graphMissing().length === 0);
+
+      // ── 1. an @mention really leaves the building ───────────────────────
+      const gNote = await POST('/api/notes', {
+        anchor_type: 'show', anchor_id: S, body: `Graph probe — @${kickUser} this one is real mail.`
+      }, { token: A });
+      ok('F3 GRAPH: the action answers without waiting on Microsoft', gNote.status === 200, gNote.body);
+      const gRow = await waitForRow(
+        'SELECT * FROM notification_outbox WHERE note_id=$1', [gNote.body.id],
+        (r) => !!r && r.status !== 'queued');
+      ok('F3 GRAPH: the @mention DELIVERED through Graph on its own — the wired driver behind ' +
+         'the post-commit kick, with nobody sweeping',
+         !!gRow && gRow.status === 'sent' && gRow.driver === 'graph' && !!gRow.sent_at, gRow);
+      const gSent = fg.state.sent[fg.state.sent.length - 1];
+      ok('F3 GRAPH: ...as a sendMail on the CONFIGURED mailbox\'s path, to the right address, ' +
+         'carrying the real subject',
+         !!gSent && gSent.fromUser === 'showrunner@e360sport.test' &&
+         gSent.to === kickUser + '@e360sport.test' && /mentioned you/.test(gSent.subject), gSent);
+      ok('F3 GRAPH: ...plain text with the deep link and the settings footer, and NOT filed in ' +
+         'Sent Items — this mailbox is a transmitter, not an archive',
+         !!gSent && gSent.contentType === 'Text' && /#show\//.test(gSent.text) &&
+         /e360 Showrunner/.test(gSent.text) && gSent.saveToSentItems === false, gSent);
+      const tokAfter1 = fg.state.tokenHits;
+      ok('F3 GRAPH: exactly one token round trip so far', tokAfter1 === 1, fg.state.tokenHits);
+      const gNote2 = await POST('/api/notes', {
+        anchor_type: 'show', anchor_id: S, body: `Graph probe two — @${kickUser} same token, please.`
+      }, { token: A });
+      await waitForRow('SELECT * FROM notification_outbox WHERE note_id=$1', [gNote2.body.id],
+        (r) => !!r && r.status !== 'queued');
+      ok('F3 GRAPH: the token is CACHED — a second email is one sendMail and zero new tokens',
+         fg.state.tokenHits === tokAfter1 && fg.state.sendHits === 2,
+         { tokenHits: fg.state.tokenHits, sendHits: fg.state.sendHits });
+
+      // ── 2. a 401 is a BACKLOG, not a loss ───────────────────────────────
+      const tokBefore401 = fg.state.tokenHits;
+      fg.state.failWhen = (req) => (req.path.endsWith('/sendMail')
+        ? { status: 401, body: { error: { code: 'InvalidAuthenticationToken',
+              message: 'Access token has expired or is not yet valid.' } } }
+        : null);
+      const gBad = await POST('/api/notes', {
+        anchor_type: 'show', anchor_id: S, body: `Graph 401 probe — @${kickUser} this cannot go yet.`
+      }, { token: A });
+      ok('F3 GRAPH 401: the person\'s action still succeeded', gBad.status === 200, gBad.body);
+      const gBadRow = await waitForRow(
+        'SELECT * FROM notification_outbox WHERE note_id=$1', [gBad.body.id],
+        (r) => !!r && r.attempts >= 1);
+      ok('F3 GRAPH 401: the row stays QUEUED carrying GRAPH\'S OWN words — the backlog survives ' +
+         'to be delivered when the credential does',
+         !!gBadRow && gBadRow.status === 'queued' && gBadRow.attempts >= 1 &&
+         /InvalidAuthenticationToken|Access token has expired/.test(String(gBadRow.last_error)),
+         gBadRow);
+      ok('F3 GRAPH 401: ...and it refreshed the token EXACTLY ONCE before giving up — a stale ' +
+         'token is retried, a bad one is not hammered',
+         fg.state.tokenHits === tokBefore401 + 1,
+         { before: tokBefore401, after: fg.state.tokenHits });
+
+      // ── 3. a payload refusal is FAILED, never a forever loop ────────────
+      fg.state.failWhen = (req) => (req.path.endsWith('/sendMail')
+        ? { status: 400, body: { error: { code: 'ErrorInvalidRecipients',
+              message: 'The recipient address is not valid.' } } }
+        : null);
+      const g400 = await mailLib.send({ to: 'not-an-address', subject: 'bad payload', text: 't' });
+      ok('F3 GRAPH 400: Graph refusing the PAYLOAD is NOT retryable — that row lands `failed` ' +
+         'instead of being retried against an address that will never work',
+         g400.ok === false && g400.retryable === false && g400.driver === 'graph' &&
+         /ErrorInvalidRecipients/.test(String(g400.error)), g400);
+      fg.state.failWhen = null;
+      ok('F3 GRAPH: the classification is the outbox\'s two failure states, spelled once — ' +
+         'transient keeps the row, a payload refusal ends it',
+         [0, 401, 403, 408, 429, 500, 503].every((s) => mailLib.graphSendRetryable(s)) &&
+         ![400, 404, 413, 422].some((s) => mailLib.graphSendRetryable(s)));
+
+      // ── 4. THE STALE DIGEST COLLAPSE ────────────────────────────────────
+      // Production carried three queued daily_digest rows for some people — one
+      // per silent day the skeleton driver could not deliver. First light must
+      // not dump three stale mornings on everyone. MUTATION GATE: delete the
+      // collapse UPDATE in lib/notify.js flush() and the first assertion below
+      // goes red with all three rows 'sent'.
+      const dgUser = TAG + 'dgbacklog';
+      await POST('/api/users',
+        { username: dgUser, password: 'smokepass123', role: 'tech', name: 'DIGEST BACKLOG',
+          email: dgUser + '@e360sport.test' }, { token: A });
+      for (const day of ['Monday', 'Tuesday', 'Wednesday']) {
+        await pool.query(
+          `INSERT INTO notification_outbox (username, kind, mode, status, subject, body)
+           VALUES ($1,'daily_digest','immediate','queued',$2,'the plate for that morning')`,
+          [dgUser, `Showrunner — your ${day}`]);
+      }
+      const dgFlush = await notifyLib.flush(
+        { digest: false, username: dgUser, trigger: 'smoke-collapse' });
+      const dgRows = (await pool.query(
+        `SELECT id, status, skipped_reason, subject FROM notification_outbox
+          WHERE username=$1 AND kind='daily_digest' ORDER BY id ASC`, [dgUser])).rows;
+      ok('F3 STALE DIGEST: only the NEWEST queued daily digest is delivered — three silent days ' +
+         'must not arrive as three mornings at once',
+         dgRows.length === 3 &&
+         dgRows[0].status === 'skipped' && dgRows[1].status === 'skipped' &&
+         dgRows[2].status === 'sent' && /Wednesday/.test(dgRows[2].subject), dgRows);
+      ok('F3 STALE DIGEST: ...and the ones that were dropped say WHY, like every other ' +
+         'non-delivery in this table',
+         dgRows.slice(0, 2).every((r) => r.skipped_reason === 'superseded by newer digest'),
+         dgRows.slice(0, 2));
+      ok('F3 STALE DIGEST: the flush REPORTS the collapse rather than quietly doing it',
+         dgFlush.superseded === 2 && dgFlush.sent === 1, dgFlush);
+      ok('F3 STALE DIGEST: a single queued digest is NEVER collapsed — there is nothing newer',
+         (await notifyLib.flush({ digest: false, username: dgUser })).superseded === 0);
+    } finally {
+      for (const k of Object.keys(mailEnv)) {
+        if (mailEnvWas[k] === undefined) delete process.env[k];
+        else process.env[k] = mailEnvWas[k];
+      }
+      mailLib.mailResetToken();
+      await fg.close();
+    }
+    ok('F3 GRAPH: the fake is unwired and the driver is back to `log` for the rest of the run',
+       require('../lib/mail').driverName() === 'log');
+  }
 
   const myNotifs = await GET('/api/me/notifications', { token: TECHT });
   ok('F3: a person can audit their OWN queue',

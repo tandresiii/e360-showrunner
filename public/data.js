@@ -4661,6 +4661,21 @@ function notificationsFor(username, status) {
     return n.username === username && (!status || n.status === status);
   }).slice().reverse();
 }
+/* THE ADMIN VIEW of the same table (9/21). Same rows, same shape, no filter on
+   who they belong to — the demo twin of GET /api/admin/notification-outbox,
+   counts included, so the admin door renders identically on file:// and live. */
+function adminOutboxLocal(opts) {
+  var o = opts || {};
+  var rows = NOTIF_OUTBOX.filter(function (n) {
+    if (o.status && n.status !== o.status) return false;
+    if (o.kind && n.kind !== o.kind) return false;
+    if (o.username && n.username !== o.username) return false;
+    return true;
+  }).slice().reverse();
+  var counts = {};
+  NOTIF_OUTBOX.forEach(function (n) { counts[n.status] = (counts[n.status] || 0) + 1; });
+  return { rows: rows, counts: counts, driver: MAIL_DRIVER, configured: MAIL_CONFIGURED, missing: [] };
+}
 function notifyQueuedCount(username) {
   return NOTIF_OUTBOX.filter(function (n) {
     return n.username === username && n.status === 'queued' && n.kind !== 'digest';
