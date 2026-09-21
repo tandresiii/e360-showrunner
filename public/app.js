@@ -152,6 +152,13 @@ async function renderView(view, arg) {
   } else if (view === 'show') {
     var show = await api.getShow(arg);
     await api.listNotes('show', show.id);
+    /* the FOLDER's meetings, warmed the same way the season dashboard warms
+       them — tabMeetings and the tab's own count badge read the flat store
+       synchronously. The folder read rather than a per-show one on purpose:
+       every meeting the adopt path caches here is one the reader modal can
+       open without a second round trip, and a single-show folder's tab lists
+       the whole folder anyway. */
+    await api.listMeetings(show.project_id);
     CUR.showId = show.id; CUR.projectId = show.project_id;
     s.innerHTML = viewShow(show);
     if (show.project.single) crumb([{ t: 'Projects', act: act('goProjects') }, { t: show.project.name }]);
@@ -5657,10 +5664,18 @@ async function roomDeleteAct(id) {
    rendered — safely — by components.js mdHTML() on the way back out. */
 function meetingById(id) { return MEETINGS_BY_ID[Number(id)] || null; }
 
+/* Which surface the dialog was opened FROM. The season dashboard passes
+   nothing; the show's Meetings tab passes its own id, and every dialog opened
+   from there — reader, editor, delete — carries it so the commit comes back to
+   that tab instead of dumping the person on the season dashboard they were
+   deliberately not looking at. It rides the delegated action's `k` slot, the
+   same way editBooking and roomEdit carry their show. */
+function meetingFrom(k) { return k == null || k === '' ? null : Number(k); }
+
 /* the reader. Opening a row is a READ, available to anybody signed in — the
    edit affordances appear inside it only for somebody who could also have
    pressed the pencil on the row. */
-async function openMeetingAct(id) {
+async function openMeetingAct(id, fromShowId) {
   var m = meetingById(id);
   if (!m && CUR.projectId) {
     try { await api.listMeetings(CUR.projectId); } catch (_) { /* the modal says so below */ }
@@ -5669,31 +5684,41 @@ async function openMeetingAct(id) {
   if (!m) { toast('Not found', 'That meeting is no longer on this folder — refresh the season', 'err'); return; }
   var project = PROJECTS_BY_ID[m.project_id] || null;
   var canEdit = canEditFolder(project);
+  var from = meetingFrom(fromShowId);
+  var k = from == null ? null : String(from);
   var foot = '<div style="display:flex;justify-content:' + (canEdit ? 'space-between' : 'flex-end') +
     ';gap:9px;margin-top:12px;align-items:center">' +
-    (canEdit ? '<button class="btn ghost" ' + act('deleteMeeting', m.id) + '>' + icon('trash') + 'Delete</button>' : '') +
+    (canEdit ? '<button class="btn ghost" ' + act('deleteMeeting', m.id, k) + '>' + icon('trash') + 'Delete</button>' : '') +
     '<span style="display:flex;gap:9px">' +
     '<button class="btn ghost" ' + act('closeModal') + '>Close</button>' +
-    (canEdit ? '<button class="btn primary" ' + act('editMeeting', m.id) + '>' + icon('pencil') + 'Edit</button>' : '') +
+    (canEdit ? '<button class="btn primary" ' + act('editMeeting', m.id, k) + '>' + icon('pencil') + 'Edit</button>' : '') +
     '</span></div>';
   openModal(m.title, meetingDetailHTML(m) + foot);
 }
 
 /* the writer — add (meetingId null) and edit are the same dialog, like every
    other pair in this file */
-async function openMeeting(projectId, meetingId) {
+async function openMeeting(projectId, meetingId, fromShowId) {
   var m = meetingId ? meetingById(meetingId) : null;
   var pid = Number(m ? m.project_id : projectId);
   var project = await api.getProject(pid);
   if (meetingId && !m) { toast('Not found', 'That meeting is no longer on this folder', 'err'); return; }
-  PENDING_MEETING = { projectId: pid, id: m ? m.id : null };
+  var from = meetingFrom(fromShowId);
+  PENDING_MEETING = { projectId: pid, id: m ? m.id : null, fromShowId: from };
 
   /* which show, if any. Most planning calls are season-wide — that is the
-     preselected answer, and it is a real answer rather than an empty one. */
+     preselected answer, and it is a real answer rather than an empty one.
+
+     Opened from a SHOW's Meetings tab, that show is the preselected answer
+     instead: somebody standing on Salt Lake pressing Add meeting means a Salt
+     Lake call. It is a <select>, not a fixed label, because the person who
+     pinned a call to the wrong venue has to be able to move it — and moving it
+     off this show is exactly what makes it leave this tab, which is honest. */
+  var preselect = m ? m.show_id : from;
   var showOpts = '<option value="">— the whole season —</option>' +
     (project.shows || []).slice().sort(function (a, b) { return a.event_date.localeCompare(b.event_date); })
       .map(function (s) {
-        return '<option value="' + Number(s.id) + '"' + (m && m.show_id === s.id ? ' selected' : '') + '>' +
+        return '<option value="' + Number(s.id) + '"' + (Number(preselect) === s.id ? ' selected' : '') + '>' +
           esc(s.name) + '</option>';
       }).join('');
 
@@ -5742,7 +5767,12 @@ async function openMeeting(projectId, meetingId) {
       'placeholder="# Title&#10;**date | who was on it**&#10;&#10;## Action items&#10;**Tony — send the operator document.**&#10;&gt; `[00:22:41] Tony: &quot;I will send it to them...&quot;`">' +
       esc(m ? m.summary_md || '' : '') + '</textarea>') + '</div>' +
     _foot(act('mtgCommit'), m ? 'Save meeting' : 'Add meeting', m ? 'check' : 'plus',
-      m ? '<button class="btn ghost" ' + act('deleteMeeting', m.id) + '>' + icon('trash') + 'Delete</button>' : ''));
+      /* the origin rides this button too. PENDING_MEETING would carry it, but a
+         control that states where it came from does not depend on a global
+         still being what it was when the dialog opened. */
+      m ? '<button class="btn ghost" ' +
+        act('deleteMeeting', m.id, from == null ? null : String(from)) + '>' +
+        icon('trash') + 'Delete</button>' : ''));
 }
 async function mtgCommit() {
   if (!PENDING_MEETING) return;
@@ -5760,17 +5790,26 @@ async function mtgCommit() {
   try {
     saved = p.id ? await api.updateMeeting(p.id, body) : await api.addMeeting(p.projectId, body);
   } catch (e) { toast(p.id ? 'Not saved' : 'Not added', String(e && e.message || e), 'err'); return; }
-  var projectId = p.projectId, wasEdit = !!p.id;
+  var projectId = p.projectId, wasEdit = !!p.id, from = p.fromShowId;
   PENDING_MEETING = null;
   closeM();
   toast(wasEdit ? 'Meeting saved' : 'Meeting filed',
     saved.title + (saved.held_at ? ' · ' + fmtDate(saved.held_at) : '') +
     (saved.summary_md ? '' : ' — no summary yet'));
-  return render('folder', projectId);
+  /* back to the surface it was opened from. Repinning a call to another show
+     while standing on this one makes it LEAVE this tab, which is the correct
+     and visible consequence of the change that was just saved — badge
+     included, which is why the count is repainted rather than left to rot. */
+  if (!from) return render('folder', projectId);
+  var freshM = await refreshShowTab(from, 'meetings');
+  refreshMeetingsTabBadge(freshM);
+  return freshM;
 }
-async function meetingDeleteAct(id) {
+async function meetingDeleteAct(id, fromShowId) {
   var m = meetingById(id);
   var projectId = m ? m.project_id : (PENDING_MEETING ? PENDING_MEETING.projectId : CUR.projectId);
+  var from = meetingFrom(fromShowId) ||
+    (PENDING_MEETING ? PENDING_MEETING.fromShowId : null);
   if (!askConfirm('Delete "' + ((m && m.title) || 'this meeting') + '"?\n\n' +
       'The summary goes and the removal is logged. Any linked transcript document is ' +
       'left exactly where it is.')) return;
@@ -5779,7 +5818,17 @@ async function meetingDeleteAct(id) {
   PENDING_MEETING = null;
   closeM();
   toast('Meeting deleted', ((m && m.title) || 'The record') + ' — logged to activity');
-  return render('folder', projectId);
+  if (!from) return render('folder', projectId);
+  var freshD = await refreshShowTab(from, 'meetings');
+  refreshMeetingsTabBadge(freshD);
+  return freshD;
+}
+/* the season roll-up's show chip — the way from "this call was about Salt
+   Lake" to Salt Lake's own list of them. Same two-step as the viewer's jump to
+   the photos tab: open the show, then land on the tab. */
+async function openShowMeetings(showId) {
+  await openShow(showId);
+  return setFolderTab('meetings');
 }
 
 /* ── B8 · THE PO's EXPECTED DATE — the delivery alarm's only input ─────────── */
@@ -8152,12 +8201,16 @@ var ACTIONS = {
   roomCommit:    function () { return roomCommit(); },
   roomDelete:    function (t, id) { return roomDeleteAct(id); },
   roomSeedCrew:  function (t, id) { return roomSeedCrewAct(id); },
-  /* meetings — the season's meeting summaries (Tom, 2026-09-21) */
-  openMeeting:   function (t, id) { return openMeetingAct(id); },
-  addMeeting:    function (t, id) { return openMeeting(id, null); },
-  editMeeting:   function (t, id) { return openMeeting(null, id); },
+  /* meetings — the season's meeting summaries (Tom, 2026-09-21). `k` is the
+     show whose Meetings tab the click came from, absent on the season
+     roll-up — see meetingFrom(). addMeeting's id is the PROJECT (the folder a
+     meeting hangs off); its k is the show to preselect. */
+  openMeeting:   function (t, id, k) { return openMeetingAct(id, k); },
+  addMeeting:    function (t, id, k) { return openMeeting(id, null, k); },
+  editMeeting:   function (t, id, k) { return openMeeting(null, id, k); },
   mtgCommit:     function () { return mtgCommit(); },
-  deleteMeeting: function (t, id) { return meetingDeleteAct(id); },
+  deleteMeeting: function (t, id, k) { return meetingDeleteAct(id, k); },
+  showMeetings:  function (t, id) { return openShowMeetings(id); },
   /* B8 the delivery-risk alarm's inputs */
   editPOEta:     function (t, id) { return openPOEta(id); },
   poEtaCommit:   function () { return poEtaCommit(); },

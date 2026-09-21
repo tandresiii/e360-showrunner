@@ -165,7 +165,7 @@ function recapGlyph(s) {
 }
 
 /* ============================================================================
-   MEETINGS — the season's meeting summaries
+   MEETINGS — the season's meeting summaries, as the WHOLE-SEASON roll-up
    ----------------------------------------------------------------------------
    Tom, 2026-09-21, verbatim: "we should definitely add a meeting summary
    feature to projects... we can add these summaries."
@@ -179,47 +179,17 @@ function recapGlyph(s) {
    per meeting on the folder, newest first, and the digest rendered as a
    document when you open it.
 
-   The summary is MARKDOWN and it is a PASTE, so it goes through
-   components.js mdHTML() — which escapes the whole source FIRST and transforms
-   second. Nothing out of a digest can become markup. See that function's header
-   for the argument; persona-walk §52 walks a hostile digest through this
-   section and asserts the output is inert.
+   THIS PANEL IS THE ROLL-UP — every meeting on the folder, season-wide calls
+   and venue-specific ones together, each venue-specific one wearing the chip
+   that says which show it was about. The per-show half lives on the show's own
+   Meetings tab (views-folder.js tabMeetings), because Tom, 2026-09-21: "That
+   was a Salt Lake–specific meeting, and it's filed under the whole season.
+   We'll have like 9 more of those. Shouldn't it be attached to Salt Lake
+   specifically?" — with ~10 team calls incoming, the roll-up alone becomes a
+   pile. BOTH SURFACES DRAW THE SAME ROW: meetingRow() lives in components.js
+   and neither file has its own copy, so a change to how a meeting reads is one
+   edit in one place.
    ========================================================================== */
-
-/* the chips on a meeting row: which show it was about, and the transcript it
-   was written from. Both optional, both silent when absent. */
-function meetingChips(m) {
-  var out = '';
-  var show = m.show_id ? SHOWS_BY_ID[m.show_id] : null;
-  if (show) out += '<span class="mini dep">' + esc(show.name) + '</span>';
-  var f = m.transcript_file_id ? FILES_BY_ID[m.transcript_file_id] : null;
-  if (f) {
-    out += '<span class="mini" title="' + esc('Written from ' + f.name + ' — the transcript the ' +
-      'unattended reader filed. Deleting that document would unpick this link and leave the ' +
-      'summary standing.') + '">' + inlineIcon('file') + ' transcript</span>';
-  }
-  return out;
-}
-/* one row. A DIV, not a button, because it carries its own Edit/Delete buttons
-   and a button inside a button is invalid — the delegated listener's
-   closest('[data-act]') gives the inner controls priority either way. */
-function meetingRow(m, canEdit) {
-  var when = m.held_at ? fmtDateFull(m.held_at) + (m.held_time ? ' · ' + m.held_time : '') : 'no date';
-  var meta = [when, m.attendees || 'attendees not recorded'].join(' · ');
-  var prev = mdPreview(m.summary_md, 190);
-  return '<div class="mtg-row" ' + act('openMeeting', m.id) + '>' +
-    '<div class="mtg-ic">' + icon('users') + '</div>' +
-    '<div class="mtg-tx"><b>' + esc(m.title) + '</b>' +
-    '<span class="mtg-meta">' + esc(meta) + ' ' + meetingChips(m) + '</span>' +
-    (prev ? '<span class="mtg-prev">' + esc(prev) + '</span>' : '') + '</div>' +
-    (canEdit
-      ? '<div class="mtg-acts">' +
-        '<button class="iconbtn" title="Edit this meeting" ' + act('editMeeting', m.id) + '>' + icon('pencil') + '</button>' +
-        '<button class="iconbtn" title="Delete this meeting" ' + act('deleteMeeting', m.id) + '>' + icon('trash') + '</button>' +
-        '</div>'
-      : '') +
-    '</div>';
-}
 function meetingsPanel(project) {
   var rows = meetingsForProject(project.id);
   var canEdit = canEditFolder(project);
@@ -239,25 +209,6 @@ function meetingsPanel(project) {
     'called, when, who was on it, and the <b>digest</b> — action items and the verbatim quotes ' +
     'they came from. Written by hand today; the transcript reader files the recording beside it. ' +
     'Meeting summaries are <b>internal</b> — the client-recap generator can never read one.</div></div>';
-}
-/* The digest, rendered as a document. Lives here rather than in app.js so the
-   walk can render it headless, the same way it renders the season dashboard. */
-function meetingDetailHTML(m) {
-  var when = m.held_at ? fmtDateFull(m.held_at) + (m.held_time ? ' · ' + m.held_time : '') : 'No date recorded';
-  var show = m.show_id ? SHOWS_BY_ID[m.show_id] : null;
-  var f = m.transcript_file_id ? FILES_BY_ID[m.transcript_file_id] : null;
-  var head = '<div class="mtg-meta" style="margin:0 0 10px;white-space:normal">' +
-    esc(when) + ' · <b>' + esc(m.attendees || 'attendees not recorded') + '</b>' +
-    (show ? ' · ' + esc(show.name) : '') +
-    (m.created_by ? ' · filed by ' + esc(userName(m.created_by)) : '') + '</div>';
-  var src = f
-    ? '<div class="hint" style="margin:0 0 12px">' + icon('file') + '<span>Written from <b>' +
-      esc(f.name) + '</b>. That transcript is an <b>internal</b> document; deleting it would ' +
-      'unpick this link and leave the summary standing.</span></div>'
-    : '';
-  var body = mdHTML(m.summary_md) ||
-    '<div class="empty">No summary was written for this meeting.</div>';
-  return head + src + '<div class="mtg-body">' + body + '</div>';
 }
 
 /* ============================================================================

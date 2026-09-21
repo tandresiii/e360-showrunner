@@ -174,6 +174,92 @@ function mdPreview(src, max) {
   return '';
 }
 
+/* ============================================================================
+   THE MEETING ROW AND THE MEETING READER — one decision, one place
+   ----------------------------------------------------------------------------
+   A meeting summary now renders on TWO surfaces: the season dashboard's
+   whole-folder roll-up (views-dashboard.js meetingsPanel) and the show's own
+   Meetings tab (views-folder.js tabMeetings), which Tom asked for on 9/21 —
+   "That was a Salt Lake–specific meeting, and it's filed under the whole
+   season... Shouldn't it be attached to Salt Lake specifically?"
+
+   Two surfaces is exactly when a renderer stops belonging to a view file. A
+   forked row is a promise to keep two files in step forever, and the fork
+   shows up the first time somebody changes what a row says on one of them. So
+   the row, its chips and the reader body live HERE, beside mdPreview()/mdHTML()
+   — the functions that exist for no other reason — and both views call them.
+
+   `fromShowId` is the ONE thing the two surfaces disagree about: on a show's
+   own tab every row is that show, so the show chip would be noise and the
+   dialogs must come back to the tab you opened them from rather than bouncing
+   to the season dashboard. It rides the delegated action's `k` slot, which is
+   the same way editBooking/roomEdit carry their show.
+   ========================================================================== */
+
+/* the chips on a meeting row: which show it was about, and the transcript it
+   was written from. Both optional, both silent when absent.
+
+   On the SEASON roll-up the show chip is also the way to that show's Meetings
+   tab — a season with ten venue-specific calls on it is a list you navigate,
+   not one you read top to bottom. On the show's OWN tab the chip is dropped:
+   it would say the name of the page you are standing on. */
+function meetingChips(m, fromShowId) {
+  var out = '';
+  var show = m.show_id ? SHOWS_BY_ID[m.show_id] : null;
+  if (show && Number(fromShowId) !== Number(m.show_id)) {
+    out += '<span class="mini dep mtg-chip" title="' +
+      esc('Pinned to ' + show.name + ' — open that show\'s Meetings tab') + '" ' +
+      act('showMeetings', show.id) + '>' + esc(show.name) + '</span>';
+  }
+  var f = m.transcript_file_id ? FILES_BY_ID[m.transcript_file_id] : null;
+  if (f) {
+    out += '<span class="mini" title="' + esc('Written from ' + f.name + ' — the transcript the ' +
+      'unattended reader filed. Deleting that document would unpick this link and leave the ' +
+      'summary standing.') + '">' + inlineIcon('file') + ' transcript</span>';
+  }
+  return out;
+}
+/* one row. A DIV, not a button, because it carries its own Edit/Delete buttons
+   and a button inside a button is invalid — the delegated listener's
+   closest('[data-act]') gives the inner controls priority either way. */
+function meetingRow(m, canEdit, fromShowId) {
+  var from = fromShowId == null ? null : String(Number(fromShowId));
+  var when = m.held_at ? fmtDateFull(m.held_at) + (m.held_time ? ' · ' + m.held_time : '') : 'no date';
+  var meta = [when, m.attendees || 'attendees not recorded'].join(' · ');
+  var prev = mdPreview(m.summary_md, 190);
+  return '<div class="mtg-row" ' + act('openMeeting', m.id, from) + '>' +
+    '<div class="mtg-ic">' + icon('users') + '</div>' +
+    '<div class="mtg-tx"><b>' + esc(m.title) + '</b>' +
+    '<span class="mtg-meta">' + esc(meta) + ' ' + meetingChips(m, fromShowId) + '</span>' +
+    (prev ? '<span class="mtg-prev">' + esc(prev) + '</span>' : '') + '</div>' +
+    (canEdit
+      ? '<div class="mtg-acts">' +
+        '<button class="iconbtn" title="Edit this meeting" ' + act('editMeeting', m.id, from) + '>' + icon('pencil') + '</button>' +
+        '<button class="iconbtn" title="Delete this meeting" ' + act('deleteMeeting', m.id, from) + '>' + icon('trash') + '</button>' +
+        '</div>'
+      : '') +
+    '</div>';
+}
+/* The digest, rendered as a document. Lives out here rather than in app.js so
+   the walk can render it headless, the same way it renders the dashboard. */
+function meetingDetailHTML(m) {
+  var when = m.held_at ? fmtDateFull(m.held_at) + (m.held_time ? ' · ' + m.held_time : '') : 'No date recorded';
+  var show = m.show_id ? SHOWS_BY_ID[m.show_id] : null;
+  var f = m.transcript_file_id ? FILES_BY_ID[m.transcript_file_id] : null;
+  var head = '<div class="mtg-meta" style="margin:0 0 10px;white-space:normal">' +
+    esc(when) + ' · <b>' + esc(m.attendees || 'attendees not recorded') + '</b>' +
+    (show ? ' · ' + esc(show.name) : '') +
+    (m.created_by ? ' · filed by ' + esc(userName(m.created_by)) : '') + '</div>';
+  var src = f
+    ? '<div class="hint" style="margin:0 0 12px">' + icon('file') + '<span>Written from <b>' +
+      esc(f.name) + '</b>. That transcript is an <b>internal</b> document; deleting it would ' +
+      'unpick this link and leave the summary standing.</span></div>'
+    : '';
+  var body = mdHTML(m.summary_md) ||
+    '<div class="empty">No summary was written for this meeting.</div>';
+  return head + src + '<div class="mtg-body">' + body + '</div>';
+}
+
 /* ---------------- formatters ---------------- */
 var MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 function parseISO(s) { if (!s) return null; var d = new Date(s.slice(0, 10) + 'T00:00:00'); return isNaN(d) ? null : d; }

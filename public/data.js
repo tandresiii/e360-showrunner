@@ -3569,9 +3569,29 @@ function meetingCount(projectId) {
   ALL_MEETINGS.forEach(function (m) { if (m.project_id === Number(projectId)) n++; });
   return n;
 }
+/* The per-SHOW half, which is the whole of Tom's 9/21 ask: "That was a Salt
+   Lake–specific meeting, and it's filed under the whole season. We'll have like
+   9 more of those. Shouldn't it be attached to Salt Lake specifically?"
+   `show_id` carried that fact from the first commit; nothing read it. This is
+   what the show's Meetings tab lists — ONLY the calls pinned to this show, and
+   never a sibling's, which is the one thing that makes the tab worth having on
+   a season with ten team-specific calls on it. Same ordering as the roll-up. */
+function meetingsForShow(showId) {
+  return ALL_MEETINGS.filter(function (m) { return m.show_id === Number(showId); })
+    .sort(function (a, b) {
+      var ad = a.held_at || '', bd = b.held_at || '';
+      if (ad !== bd) { if (!ad) return 1; if (!bd) return -1; return ad < bd ? 1 : -1; }
+      return b.id - a.id;
+    });
+}
+function meetingCountForShow(showId) {
+  var n = 0;
+  ALL_MEETINGS.forEach(function (m) { if (m.show_id === Number(showId)) n++; });
+  return n;
+}
 
 (function seedMeetings() {
-  var LOVB = PROJECTS_BY_ID[3], S_MAD = SHOWS_BY_ID[3];
+  var LOVB = PROJECTS_BY_ID[3], S_MAD = SHOWS_BY_ID[3], S_SLC = SHOWS_BY_ID[6];
   if (!LOVB) return;
 
   /* The transcript the 9/18 unattended reader would have filed for this call —
@@ -3652,6 +3672,38 @@ function meetingCount(projectId) {
       '> Marcus: "If you are not off the dock by nine we are pushing you to the afternoon."',
       '',
       'Open: floor protection still unconfirmed for the courtside run.'
+    ].join('\n')
+  });
+
+  /* THE CALL TOM WAS LOOKING AT. 2026-09-21, verbatim: "That was a Salt
+     Lake–specific meeting, and it's filed under the whole season. We'll have
+     like 9 more of those. Shouldn't it be attached to Salt Lake specifically?"
+     Two pinned meetings on TWO DIFFERENT shows is the fixture that makes the
+     show tab worth trusting from file://: Madison's tab must show Madison's
+     call and Salt Lake's must show Salt Lake's, and neither may show the
+     other's. */
+  mkMeeting(LOVB, {
+    title: 'Salt Lake team call — QB number, freight leg and operator bench',
+    held_at: dayISO(-2), held_time: '14:00',
+    attendees: 'Tom Andres, Tony Vigon, Ana Ramos, LOVB Salt Lake (ops)',
+    by: 'tandres', off: -2, show_id: S_SLC ? S_SLC.id : null,
+    summary_md: [
+      /* the first prose line is what the row's one-line preview shows, so it
+         earns its place by saying something the title does not */
+      '## Where the leg stands',
+      '',
+      '**Accounting — the job is still on `TEMP-26-014`.** The team sale is signed; the real',
+      'QuickBooks number has not come back, so every cost on this leg is landing against a temp',
+      'number and the finance chase list is carrying it.',
+      '> Tom: "The work does not wait on the number. But somebody has to close it out."',
+      '',
+      '### Decisions',
+      '',
+      '- Maverik Center advance stays with Tony — **no site visit**, the floor is known.',
+      '- Freight leg is Houston → Salt Lake, booked behind the earlier legs, not ahead of them.',
+      '- Operator bench: two local candidates to be funneled into the Nov 9 training window.',
+      '',
+      'Open: nothing blocking. The leg is light and it is meant to stay that way.'
     ].join('\n')
   });
 })();

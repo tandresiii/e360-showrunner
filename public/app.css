@@ -1651,6 +1651,10 @@ tr.archived:hover td{opacity:1}
 .mtg-tx .mtg-meta{display:block; font-size:11px; color:var(--muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 .mtg-tx .mtg-prev{display:block; font-size:11.5px; color:var(--text-2); margin-top:4px; line-height:1.45; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
 .mtg-acts{flex:none; display:flex; gap:5px; align-items:center}
+/* the show chip on the SEASON roll-up is the way to that show's Meetings tab —
+   it is a control, so it says so on hover (dropped on the show's own tab) */
+.mtg-chip{cursor:pointer}
+.mtg-chip:hover{color:var(--text); border-color:var(--warn)}
 /* the digest as read in the modal — capped so a 4,000-word digest scrolls
    inside the dialog rather than pushing the footer off the screen */
 .mtg-body{max-height:min(52vh,540px); overflow:auto; padding:2px 4px 2px 0}

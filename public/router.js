@@ -42,7 +42,7 @@ var ROUTE_VIEWS = {
 var ROUTE_SHOW_TABS = {
   overview: 1, schedule: 1, pipeline: 1, specs: 1, gear: 1, content: 1,
   files: 1, photos: 1, reports: 1, recap: 1, financials: 1, proofs: 1,
-  bookings: 1, activity: 1
+  bookings: 1, meetings: 1, activity: 1
 };
 
 /* view + arg (+ tab) -> the canonical hash, or null for a view that has no

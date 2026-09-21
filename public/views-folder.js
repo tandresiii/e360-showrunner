@@ -79,6 +79,17 @@ function viewShow(show, opts) {
   var schedDaysN = (show.schedule_items || []).length ? scheduleDays(show.id).length : 0;
   var schedTab = '<button data-t="schedule">Schedule' + (schedDaysN ? ' <span class="n">' + schedDaysN + 'd</span>' : '') + '</button>';
 
+  /* meetings — the planning calls PINNED TO THIS SHOW (Tom, 9/21: "That was a
+     Salt Lake–specific meeting, and it's filed under the whole season...
+     Shouldn't it be attached to Salt Lake specifically?"). The badge counts
+     only this show's; the season roll-up keeps its own count on the folder
+     dashboard. The tab renders with zero rows on purpose — the P3 rule above:
+     the Add door lives inside it, so hiding it until a row exists would hide
+     the only way to make the first one. */
+  var mtgN = meetingCountForShow(show.id);
+  var mtgTab = '<button data-t="meetings">Meetings' +
+    (mtgN ? ' <span class="n">' + mtgN + '</span>' : '') + '</button>';
+
   /* F2 — show reports. The badge is the OWED count, because that is the number
      the show owner is chasing; a show nobody owes anything on shows no badge.
      A tech with nothing owed still gets the tab: their own filed report is
@@ -211,6 +222,7 @@ function viewShow(show, opts) {
     recTab +
     finTab +
     thirdTab +
+    mtgTab +
     '<button data-t="activity">Activity</button>' +
     '</div>' +
     '<div id="ftab"></div>';
@@ -231,6 +243,7 @@ function drawShowTab(show, t) {
     : t === 'financials' ? tabFinancials(show)
     : t === 'proofs' ? tabProofs(show)
     : t === 'bookings' ? tabBookings(show)
+    : t === 'meetings' ? tabMeetings(show)
     : tabActivity(show);
 }
 function bindFolder(show) {
@@ -251,6 +264,16 @@ function setFolderTab(tabKey) { var b = document.querySelector('#ftabs button[da
 function refreshSpecTabBadge(show) {
   var b = document.querySelector('#ftabs button[data-t="specs"]');
   if (b) b.innerHTML = 'Specs &amp; Chain' + (chainAnyStale(show.chain) ? ' <span class="n" style="color:var(--crit)">stale</span>' : '');
+}
+/* …and the same for the Meetings count. refreshShowTab() redraws the tab BODY
+   only, so filing the first call on a show would leave the strip above it
+   still saying "none" — on a surface whose whole job is "how many of these
+   were there?", that is the one number that may not go stale. */
+function refreshMeetingsTabBadge(show) {
+  var b = document.querySelector('#ftabs button[data-t="meetings"]');
+  if (!b) return;
+  var n = meetingCountForShow(show.id);
+  b.innerHTML = 'Meetings' + (n ? ' <span class="n">' + n + '</span>' : '');
 }
 
 /* -------------------------------------------------------------- overview -- */
@@ -1239,6 +1262,81 @@ function roomingSection(show) {
     '<div class="hint">' + icon('moon') + 'One row per bed. These rows print on the call sheet when any exist; ' +
     'a linked booking’s tag ties the person back to the paperwork above — cancelling that booking ' +
     'clears the tag but never the person’s row.</div>';
+}
+
+/* ========================================================== meetings tab --
+   Tom, 2026-09-21, verbatim: "That was a Salt Lake–specific meeting, and it's
+   filed under the whole season. We'll have like 9 more of those. Shouldn't it
+   be attached to Salt Lake specifically?"
+
+   `meetings.show_id` carried that fact from the feature's first commit and
+   NOTHING READ IT: a call pinned to a venue rendered in exactly one place, the
+   folder's whole-season roll-up, wearing a chip. With one team-specific call
+   that is a chip; with the ten this season is going to produce it is a pile,
+   and the show it was about is the last place you can find it. This tab is the
+   other half — ONLY the calls pinned to THIS show, newest first, drawn by the
+   same components.js meetingRow() the roll-up draws, opening the same reader.
+
+   THE MANUAL DOOR SHIPS WITH THE SURFACE (the 9/16 law). Add meeting here is
+   the same dialog as the dashboard's with this show already chosen — still
+   changeable, because the person who mis-pins a call has to be able to say so.
+
+   A SINGLE-SHOW FOLDER HAS NO SEASON DASHBOARD. openFolder() collapses it
+   straight into this view, so viewSeason never renders for it and the roll-up
+   is unreachable — which, until this tab, meant the meetings feature was
+   unreachable there too, door included. So for a single-show folder this tab
+   lists the FOLDER'S meetings: the show and the season are the same thing, and
+   pointing somebody at a dashboard that bounces them back here would be a dead
+   link dressed as a way out. */
+function tabMeetings(show) {
+  var p = show.project;
+  var single = !!p.single;
+  var editable = canEditFolderOf(show);
+  /* the filter Tom asked for. Break it — swap meetingsForShow(show.id) for
+     meetingsForProject(show.project_id) on a multi-show folder — and the walk's
+     "each show's tab shows exactly its own" pair goes red. */
+  var rows = single ? meetingsForProject(show.project_id) : meetingsForShow(show.id);
+  var addBtn = editable
+    ? '<button class="btn primary" ' + act('addMeeting', p.id, String(show.id)) + '>' +
+      icon('plus') + 'Add meeting</button>'
+    : '';
+  var head = '<div class="files-head"><h3>Meetings · ' + rows.length + '</h3>' + addBtn + '</div>';
+
+  /* the way back to the whole-season list — a real link, not a sentence about
+     one. Suppressed on a single-show folder, where it would loop right back. */
+  var seasonLink = single ? ''
+    : '<button class="btn ghost" ' + act('openFolder', p.id) + '>' + icon('folder') +
+      'Open the season\'s meetings</button>';
+
+  if (!rows.length) {
+    return head + '<div class="gear-empty">' + icon('users') +
+      '<div style="font-weight:600;font-size:14px">' +
+      (single ? 'No meetings filed on this event yet'
+              : 'No meetings pinned to this show') + '</div>' +
+      '<div style="font-size:12.5px;margin-top:7px;max-width:470px;margin-left:auto;margin-right:auto;line-height:1.5">' +
+      /* reads as one sentence down the page, which is what the bold line + body
+         shape of every empty state in this app is for: "No meetings pinned to
+         this show — the season's meetings live on the folder dashboard." */
+      (single
+        ? 'This folder holds one event, so its planning calls are this event’s calls. Paste a ' +
+          'digest into <b>Add meeting</b> — title, date, who was on it, and the summary.'
+        : 'The season’s meetings live on the <b>folder dashboard</b>. Pin a call here when it ' +
+          'really was about this venue; season-wide planning belongs on the season.') + '</div>' +
+      '<div style="display:flex;gap:9px;justify-content:center;margin-top:16px;flex-wrap:wrap">' +
+      seasonLink + addBtn + '</div></div>';
+  }
+
+  return head + '<div class="card" style="padding:4px 14px"><div class="mtg-list">' +
+    rows.map(function (m) { return meetingRow(m, editable, show.id); }).join('') +
+    '</div></div>' +
+    '<div class="hint">' + icon('bolt') + '<span>' +
+    (single
+      ? 'Every planning call on this folder. '
+      : 'Only the calls pinned to <b>' + esc(show.name) + '</b>. Season-wide planning — and ' +
+        'every other show’s calls — stay on the folder dashboard. ') +
+    'Meeting summaries are <b>internal</b>: the client-recap generator can never read one.' +
+    '</span></div>' +
+    (seasonLink ? '<div style="margin-top:12px">' + seasonLink + '</div>' : '');
 }
 
 

@@ -4169,8 +4169,14 @@ async function main() {
 
     // ── the section, rendered inside the real season dashboard ─────────────
     const wmHtml = demoTab.viewSeason(wmProj);
-    ok('DEMO RENDER · the season dashboard grows a Meetings section',
-       />Meetings · 2/.test(wmHtml), wmHtml.indexOf('Meetings'));
+    // THE ROLL-UP STAYS THE WHOLE SEASON. Two of the three seeded calls are
+    // pinned to a show (Madison, Salt Lake) and one is season-wide; all three
+    // render here, which is the point of the folder list. §52b proves the
+    // other half — that each SHOW's tab carries only its own.
+    ok('DEMO RENDER · the season dashboard grows a Meetings section, and it is the WHOLE ' +
+       'season — the venue-specific calls stay in the roll-up beside the season-wide one',
+       />Meetings · 3/.test(wmHtml) && wmSeeded.length === 3,
+       [wmSeeded.length, wmHtml.indexOf('Meetings')]);
     ok('…with the Add meeting door on it (the manual door, shipped first)',
        /data-act="addMeeting" data-id="3"/.test(wmHtml));
     ok('…a row per meeting, each openable, each wearing its title, its day and who was on it',
@@ -4345,6 +4351,228 @@ async function main() {
     const wmGone = await demoTab.api.deleteMeeting(wmEvil.id).then(() => null, (e) => String(e.message));
     ok('…and deleting it again is an honest "not found", never a hollow {ok:true}',
        !!wmGone && /not found/.test(wmGone), wmGone);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('52b · a venue-specific call belongs to the VENUE  (Tom, 9/21, live)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom, 2026-09-21, verbatim: "That was a Salt Lake–specific meeting, and it's
+  // filed under the whole season. We'll have like 9 more of those. Shouldn't it
+  // be attached to Salt Lake specifically?"
+  //
+  // `meetings.show_id` was right from the first commit and NOTHING READ IT. A
+  // call pinned to a venue rendered in exactly one place — the folder's roll-up
+  // — wearing a chip. With one such call that is a chip; with the ten this
+  // season will produce it is a pile, and the show it was about is the last
+  // place you can find it.
+  //
+  // The whole of this section is one question asked two ways: does each show's
+  // tab carry ITS OWN calls and NOT ITS SIBLINGS'? Two shows, two pinned
+  // meetings, one season-wide meeting, and every assertion below is written so
+  // that swapping meetingsForShow(show.id) for meetingsForProject() — the
+  // obvious "simplification" — turns it red rather than leaving it green.
+  {
+    reach('Add a meeting from the SHOW page, pinned to that show',
+      { seam: ['listMeetings', 'addMeeting'], action: ['addMeeting', 'mtgCommit'] });
+    reach('Jump from a roll-up row\'s show chip to that show\'s meetings',
+      { seam: ['getShow'], action: ['showMeetings'] });
+
+    // the three seeded calls, sorted into what each surface owes
+    const mbAll = await demoTab.api.listMeetings(3);
+    const mbMad = mbAll.filter((m) => m.show_id === 3);       // LOVB Madison — Match 1
+    const mbSlc = mbAll.filter((m) => m.show_id === 6);       // LOVB Salt Lake — Match 4
+    const mbSeason = mbAll.filter((m) => !m.show_id);
+    ok('DEMO · the LOVB season carries calls pinned to TWO DIFFERENT shows, plus a season-wide ' +
+       'one — which is the only fixture that can tell a real filter from a missing one',
+       mbMad.length === 1 && mbSlc.length === 1 && mbSeason.length === 1,
+       { madison: mbMad.length, saltLake: mbSlc.length, season: mbSeason.length });
+    ok('…and the Salt Lake one is the call Tom was actually looking at',
+       /Salt Lake/.test(mbSlc[0].title) && mbSlc[0].summary_md.length > 0, mbSlc[0].title);
+
+    const showMad = await demoTab.api.getShow(3);
+    const showSlc = await demoTab.api.getShow(6);
+    const showAtl = await demoTab.api.getShow(4);             // LOVB Atlanta — nothing pinned
+
+    // ── THE ASSERTION THIS SECTION EXISTS FOR ─────────────────────────────
+    const tabMad = demoTab.tabMeetings(showMad);
+    const tabSlc = demoTab.tabMeetings(showSlc);
+    ok('SHOW TAB · Salt Lake\'s Meetings tab carries Salt Lake\'s call',
+       tabSlc.indexOf('data-act="openMeeting" data-id="' + mbSlc[0].id + '"') >= 0 &&
+       tabSlc.indexOf(demoTab.esc(mbSlc[0].title)) >= 0, mbSlc[0].id);
+    ok('SHOW TAB · …and Madison\'s carries Madison\'s',
+       tabMad.indexOf('data-act="openMeeting" data-id="' + mbMad[0].id + '"') >= 0 &&
+       tabMad.indexOf(demoTab.esc(mbMad[0].title)) >= 0, mbMad[0].id);
+    ok('SHOW TAB · NEITHER TAB CARRIES THE OTHER\'S — a season with ten team-specific calls on ' +
+       'it is only navigable if the filter is real (swap meetingsForShow(show.id) for ' +
+       'meetingsForProject(show.project_id) in tabMeetings and this goes red)',
+       tabSlc.indexOf('data-act="openMeeting" data-id="' + mbMad[0].id + '"') < 0 &&
+       tabMad.indexOf('data-act="openMeeting" data-id="' + mbSlc[0].id + '"') < 0,
+       { slcHasMad: tabSlc.indexOf('data-id="' + mbMad[0].id + '"'),
+         madHasSlc: tabMad.indexOf('data-id="' + mbSlc[0].id + '"') });
+    ok('SHOW TAB · …and neither carries the SEASON-WIDE call either — that one is about the ' +
+       'whole folder and belongs on the folder, which is the distinction Tom drew',
+       tabSlc.indexOf('data-act="openMeeting" data-id="' + mbSeason[0].id + '"') < 0 &&
+       tabMad.indexOf('data-act="openMeeting" data-id="' + mbSeason[0].id + '"') < 0 &&
+       />Meetings · 1</.test(tabSlc) && />Meetings · 1</.test(tabMad));
+    ok('SHOW TAB · the row is components.js meetingRow() — the SAME one the roll-up draws, not ' +
+       'a second copy that has to be kept in step',
+       /function meetingRow\(/.test(SRC['components.js']) &&
+       !/function meetingRow\(/.test(SRC['views-folder.js']) &&
+       !/function meetingRow\(/.test(SRC['views-dashboard.js']) &&
+       /meetingRow\(m, editable, show\.id\)/.test(SRC['views-folder.js']) &&
+       /meetingRow\(m, canEdit\)/.test(SRC['views-dashboard.js']));
+    ok('SHOW TAB · …opening one opens the SAME reader, with the digest rendered as a document — ' +
+       'headings, bold action leads, bullets and the quoted receipt under the decision',
+       /class="mtg-body"/.test(demoTab.meetingDetailHTML(mbSlc[0])) &&
+       /<h4 class="md-h2">Where the leg stands<\/h4>/.test(demoTab.meetingDetailHTML(mbSlc[0])) &&
+       /<b>Accounting — the job is still on <code>TEMP-26-014<\/code>\.<\/b>/
+         .test(demoTab.meetingDetailHTML(mbSlc[0])) &&
+       /<blockquote>Tom: &quot;The work does not wait on the number/
+         .test(demoTab.meetingDetailHTML(mbSlc[0])));
+    ok('SHOW TAB · …and the row\'s one-line preview says something the title does not, with the ' +
+       'markdown furniture stripped off it',
+       /<span class="mtg-prev">Where the leg stands<\/span>/.test(tabSlc), tabSlc.indexOf('mtg-prev'));
+    ok('SHOW TAB · …and the show chip is DROPPED on the show\'s own tab — it would print the ' +
+       'name of the page you are standing on',
+       tabSlc.indexOf('mtg-chip') < 0 && tabMad.indexOf('mtg-chip') < 0);
+
+    // ── the tab itself, on the real show header ───────────────────────────
+    const hdrSlc = demoTab.viewShow(showSlc);
+    const hdrAtl = demoTab.viewShow(showAtl);
+    ok('SHOW HEADER · the tab strip grows a Meetings tab, badged with THIS show\'s count',
+       /<button data-t="meetings">Meetings <span class="n">1<\/span><\/button>/.test(hdrSlc), 'slc');
+    ok('SHOW HEADER · …and it renders with no rows too, because the Add door lives inside it — ' +
+       'the P3 rule: a tab that hides until its first row hides the only way to make one',
+       /<button data-t="meetings">Meetings<\/button>/.test(hdrAtl) &&
+       !/Meetings <span class="n">/.test(hdrAtl));
+    ok('SHOW HEADER · the tab is wired into drawShowTab and into the router\'s tab whitelist, so ' +
+       'a refresh and a copied link both come back to it',
+       /t === 'meetings' \? tabMeetings\(show\)/.test(SRC['views-folder.js']) &&
+       /meetings: 1/.test(SRC['router.js']));
+
+    // ── THE EMPTY STATE, and the way out of it ────────────────────────────
+    const tabAtl = demoTab.tabMeetings(showAtl);
+    ok('EMPTY · a show with nothing pinned says so plainly, and says where the season\'s ' +
+       'meetings actually are — one sentence read down the page, said once',
+       /No meetings pinned to this show/.test(tabAtl) &&
+       /The season’s meetings live on the <b>folder dashboard<\/b>/.test(tabAtl) &&
+       (tabAtl.match(/No meetings pinned to this show/g) || []).length === 1,
+       tabAtl.slice(0, 160));
+    ok('EMPTY · …and that is a WORKING LINK to the folder dashboard, not a sentence about one',
+       tabAtl.indexOf('data-act="openFolder" data-id="' + showAtl.project_id + '"') >= 0);
+    ok('EMPTY · …with the Add door on it as well, so the empty state is where the first ' +
+       'pinned call gets made',
+       /data-act="addMeeting" data-id="3" data-k="4"/.test(tabAtl));
+
+    // ── THE PRE-PINNED ADD DIALOG ─────────────────────────────────────────
+    ok('ADD · the door on the show page carries the SHOW in the action\'s k slot — the same way ' +
+       'editBooking and roomEdit carry theirs',
+       /data-act="addMeeting" data-id="3" data-k="6"/.test(tabSlc));
+    ok('ADD · …and ACTIONS hands that k to openMeeting as the show to preselect',
+       /addMeeting:\s+function \(t, id, k\) \{ return openMeeting\(id, null, k\); \}/.test(APP_JS));
+    // The preselect rule, EXECUTED rather than grepped: the exact source of the
+    // dialog's <select> builder, lifted out of app.js and run against the real
+    // season's shows.
+    //
+    // The anchor is asserted FIRST and the extractor falls back to a function
+    // that returns nothing. A scan that quietly misses its anchor and takes the
+    // rest of the file with it does not fail — it ABORTS, and an aborted walk
+    // proves nothing about the three assertions underneath it. (Found the hard
+    // way: the first version anchored on the whole `= m ? m.show_id : from;`
+    // line, so the very mutation it existed to catch moved the anchor and the
+    // run died instead of going red. The anchor now pins only the part no
+    // mutation of this rule can move.)
+    const mbAnchor = APP_JS.indexOf('var preselect =');
+    const mbEnd = APP_JS.indexOf("}).join('');", mbAnchor);
+    ok('ADD · the dialog\'s show-picker builder is where this scan expects it — the scan says so ' +
+       'out loud, because a scan that misses its anchor silently pins nothing at all',
+       mbAnchor > 0 && mbEnd > mbAnchor, [mbAnchor, mbEnd]);
+    const mbSel = (mbAnchor > 0 && mbEnd > mbAnchor)
+      ? new vm.Script('(function (m, from, project, esc) { ' +
+          APP_JS.slice(mbAnchor, mbEnd + "}).join('');".length) + ' return showOpts; })',
+          { filename: 'app.js:openMeeting showOpts' }).runInThisContext()
+      : function () { return ''; };
+    const mbShows = (await demoTab.api.getProject(3)).shows;
+    const selectedIn = (html) => {
+      const m = /<option value="(\d+)" selected>/.exec(html);
+      return m ? Number(m[1]) : null;
+    };
+    ok('ADD · opened from Salt Lake\'s tab, the dialog opens with SALT LAKE already chosen',
+       selectedIn(mbSel(null, 6, { shows: mbShows }, demoTab.esc)) === 6);
+    ok('ADD · opened from the season dashboard, it opens on "the whole season" — the answer that ' +
+       'is right for most planning calls, and still the default where it always was',
+       selectedIn(mbSel(null, null, { shows: mbShows }, demoTab.esc)) === null &&
+       /the whole season/.test(mbSel(null, null, { shows: mbShows }, demoTab.esc)));
+    ok('ADD · …and EDITING a call shows where it is actually pinned, not where you are standing ' +
+       '— opening Madison\'s call from Salt Lake\'s tab must not silently re-home it',
+       selectedIn(mbSel({ show_id: 3 }, 6, { shows: mbShows }, demoTab.esc)) === 3);
+    ok('ADD · the picker stays a SELECT, so a mis-pinned call can be moved — including back to ' +
+       'the whole season',
+       /id="mtShow"/.test(APP_JS) && /— the whole season —/.test(APP_JS));
+    ok('ADD · and the commit comes back to the tab it was opened from rather than dumping the ' +
+       'person on the season dashboard they were deliberately not looking at — with the tab\'s ' +
+       'COUNT repainted, because refreshShowTab redraws the body only and a badge still reading ' +
+       '"none" after you just filed one is a lie on the one number this surface exists to show',
+       (APP_JS.match(/if \(!from\) return render\('folder', projectId\);/g) || []).length === 2 &&
+       (APP_JS.match(/refreshMeetingsTabBadge\(fresh[MD]\);/g) || []).length === 2 &&
+       /function refreshMeetingsTabBadge\(show\)/.test(SRC['views-folder.js']));
+    ok('ADD · the show view WARMS the folder\'s meetings, so the tab and its badge have something ' +
+       'to read — a surface that renders empty because nothing fetched is the worst kind of empty',
+       /await api\.listMeetings\(show\.project_id\);/.test(APP_JS));
+
+    // ── reads stay open; writes keep the pm+ floor, on BOTH surfaces ───────
+    const mbWas = demoTab.CURRENT_USER;
+    demoTab.CURRENT_USER = demoTab.ROSTER.dvargas;            // Devin, role 'tech'
+    const tabSlcTech = demoTab.tabMeetings(await demoTab.api.getShow(6));
+    ok('GATE · a TECH opens the show\'s Meetings tab and reads the call — which is the whole ' +
+       'reason a digest gets filed where the venue is',
+       tabSlcTech.indexOf('data-act="openMeeting" data-id="' + mbSlc[0].id + '"') >= 0);
+    ok('GATE · …and is offered no Add, no Edit and no Delete here either, matching the pm+ floor ' +
+       'on the routes',
+       !/data-act="addMeeting"/.test(tabSlcTech) && !/data-act="editMeeting"/.test(tabSlcTech) &&
+       !/data-act="deleteMeeting"/.test(tabSlcTech));
+    const tabAtlTech = demoTab.tabMeetings(await demoTab.api.getShow(4));
+    ok('GATE · …and the empty state still hands a tech the way to the season\'s list, because ' +
+       'reading is not the thing being gated',
+       tabAtlTech.indexOf('data-act="openFolder" data-id="3"') >= 0 &&
+       !/data-act="addMeeting"/.test(tabAtlTech));
+    demoTab.CURRENT_USER = mbWas;
+
+    // ── the roll-up's chip is the way IN to all of this ───────────────────
+    const mbSeasonHtml = demoTab.viewSeason(await demoTab.api.getProject(3));
+    ok('ROLL-UP · a pinned row\'s show chip is a control, not a label — it opens that show\'s ' +
+       'Meetings tab',
+       mbSeasonHtml.indexOf('data-act="showMeetings" data-id="6"') >= 0 &&
+       mbSeasonHtml.indexOf('data-act="showMeetings" data-id="3"') >= 0);
+    ok('ROLL-UP · …and the season-wide call wears no chip at all, because it is about no one venue',
+       (mbSeasonHtml.match(/mtg-chip/g) || []).length === 2);
+    ok('ROLL-UP · the jump is openShow + setFolderTab, the same two-step the viewer uses to land ' +
+       'on the photos tab — never a parallel navigation path',
+       /async function openShowMeetings\(showId\) \{[\s\S]{0,120}await openShow\(showId\);[\s\S]{0,80}setFolderTab\('meetings'\)/.test(APP_JS));
+
+    // ── the single-show folder: the roll-up it is told about must EXIST ───
+    // openFolder() collapses a one-show folder straight into the show view, so
+    // viewSeason never renders for it. Pointing somebody there would be a dead
+    // link dressed as a way out — so that branch lists the FOLDER's meetings
+    // and offers no season link at all.
+    const mbOne = await demoTab.api.createEvent({
+      name: 'WALK52b single-show folder', type: 'led', venue: 'Demo Hall', event_date: plus(45) });
+    const mbOneShow = await demoTab.api.getShow(mbOne.show.id);
+    ok('SINGLE · a one-show folder really does collapse — viewSeason is unreachable for it',
+       mbOneShow.project.single === true, mbOneShow.project.single);
+    await demoTab.api.addMeeting(mbOneShow.project_id,
+      { title: 'WALK52b kickoff on a one-off', held_at: plus(-1), summary_md: 'Decided things.' });
+    const tabOne = demoTab.tabMeetings(await demoTab.api.getShow(mbOne.show.id));
+    ok('SINGLE · so its Meetings tab lists the FOLDER\'S calls — the show and the season are the ' +
+       'same thing here, and this is the only surface either of them has',
+       /WALK52b kickoff on a one-off/.test(tabOne) && />Meetings · 1</.test(tabOne));
+    ok('SINGLE · …and offers NO "the season\'s meetings live on the folder dashboard" link, ' +
+       'because that link would bounce straight back to this page',
+       !/data-act="openFolder"/.test(tabOne) && !/folder dashboard/.test(tabOne));
+    ok('SINGLE · …while the Add door is there, which it was not anywhere before this tab: a ' +
+       'one-off folder could not file a meeting at all',
+       tabOne.indexOf('data-act="addMeeting" data-id="' + mbOneShow.project_id + '" data-k="' +
+         mbOneShow.id + '"') >= 0);
   }
 
   // ══════════════════════════════════════════════════════════════════════════

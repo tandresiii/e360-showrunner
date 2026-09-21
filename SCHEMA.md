@@ -510,7 +510,14 @@ agent-authored note is **immutable to humans**.
 > `project_id` is required because the folder is the unit a season's browsable
 > list is built on; `show_id` is the optional narrowing for the call that
 > really was about one venue, and a **show delete NULLS it** rather than taking
-> the meeting (the folder still happened). `held_at` is an ISO text date like
+> the meeting (the folder still happened). **`show_id` is also a SURFACE**
+> (Tom, 2026-09-21: *"That was a Salt Lake–specific meeting, and it's filed
+> under the whole season. We'll have like 9 more of those. Shouldn't it be
+> attached to Salt Lake specifically?"*) — the show's own **Meetings tab**
+> lists the calls pinned to it and no sibling's, while the folder dashboard
+> keeps the whole-season roll-up. No schema change was needed for that: the
+> column was right from the first commit and nothing read it.
+> `held_at` is an ISO text date like
 > `bookings.booked_date`, with `held_time` as the optional `HH:MM` beside it —
 > most digests carry a day and no clock, and an invented `00:00` prints as a
 > real start time. `attendees` is **free text**, the `room_assignments.person`
