@@ -1422,6 +1422,22 @@ async function main() {
      && /No pipeline on this show yet/.test(demoTab.tabPipeline(dEmptyShow))
      && (demoTab.tabPipeline(dEmptyShow).match(/seedPipeline/g) || []).length === 1);
 
+  // THE THIN PROJECT — the absorb layer deliberately keeps a project embedded
+  // without its shows list (live case: an ARCHIVED folder riding a finance
+  // exception — boot loads active folders only). showLabel must answer a
+  // name for that shape, never a TypeError: on 2026-09-21 it threw and took
+  // the whole Projects view down in production while every suite sat green.
+  {
+    const thinId = 987654;
+    demoTab.PROJECTS_BY_ID[thinId] = { id: thinId, name: 'WALK thin folder' }; // no .shows, on purpose
+    let thinLabel = null, thinThrew = null;
+    try { thinLabel = demoTab.showLabel({ id: 1, project_id: thinId, name: 'WALK thin show' }); }
+    catch (e) { thinThrew = String(e); }
+    ok('DEMO RENDER · showLabel answers a NAME for a THIN project (no shows list), never a TypeError',
+       thinThrew === null && thinLabel === 'WALK thin show', thinThrew || thinLabel);
+    delete demoTab.PROJECTS_BY_ID[thinId];
+  }
+
   // ══════════════════════════════════════════════════════════════════════════
   section('23 · a note taken back, a key minted once');
   // ══════════════════════════════════════════════════════════════════════════

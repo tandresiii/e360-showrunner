@@ -80,7 +80,9 @@ function viewProjects(projects, exceptions) {
     var s = it.pair.step, show = it.pair.show;
     var why = normStatus(s.status) === 'blocked' ? '<span class="pill crit"><span class="dot"></span>Blocked</span>'
       : (s.risk ? '<span class="pill warn"><span class="dot"></span>At risk</span>' : '<span class="pill crit"><span class="dot"></span>Overdue</span>');
-    var where = show ? (it.p.shows.length > 1 ? show.name : it.p.name) : it.p.name;
+    /* it.p can be THIN (absorbed without .shows — see showLabel); unknown
+       count reads as the show's own name */
+    var where = show ? ((it.p.shows || []).length > 1 ? show.name : (it.p.shows ? it.p.name : show.name)) : it.p.name;
     return '<div class="next-item" ' + act('openShow', show ? show.id : null) + ' style="cursor:pointer"><div class="txt">' + esc(s.title) +
       '<span>' + esc(where) + ' · ' + esc(it.pair.lane.label) + ' · due ' + esc(fmtDate(s.due_date)) + '</span></div>' + why + ownerChip(s.owner) + '</div>';
   }).join('') || '<div class="empty">Nothing flagged — every lane is on track.</div>';

@@ -666,8 +666,13 @@ function showLabel(s) {
      exception is anchored on a job, not a show. Answering '' beats throwing
      from inside a renderer and taking the whole view down with it. */
   if (!s) return '';
+  /* THIN projects exist too: the absorb layer keeps a project embedded
+     without its shows list (an archived folder riding a finance exception is
+     the live case — boot loads active folders only). Unknown show count
+     means the show's own name, never a TypeError (took down viewProjects
+     in prod, 9/21). */
   var p = PROJECTS_BY_ID[s.project_id];
-  return p && p.shows.length === 1 ? p.name : s.name;
+  return p && (p.shows || []).length === 1 ? p.name : s.name;
 }
 
 /* ---------------- files ---------------- */
