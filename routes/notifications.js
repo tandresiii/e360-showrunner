@@ -178,7 +178,10 @@ router.post('/admin/notifications/flush', requireRole('admin'), asyncH(async (re
   const out = await notify.flush({
     digest: !!pick(b, 'digest'),
     username: pick(b, 'username') || null,
-    limit: parseInt(pick(b, 'limit'), 10) || 200
+    limit: parseInt(pick(b, 'limit'), 10) || 200,
+    // the one flush a PERSON really did ask for — /api/health's
+    // lastImmediateFlush says so rather than lumping it in with the timers
+    trigger: 'admin'
   });
   res.json(out);
 }));
