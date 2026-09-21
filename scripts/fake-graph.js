@@ -9,8 +9,9 @@
 //   POST /{tenant}/oauth2/v2.0/token                     the client-credentials
 //        form-encoded, grant_type=client_credentials,    token endpoint
 //        scope=https://graph.microsoft.com/.default
-//   GET  /users/{id}/onlineMeetings/getAllTranscripts     the listing
-//        ?$filter=createdDateTime gt {iso}&$top=n
+//   GET  /users/{id}/onlineMeetings/getAllTranscripts(     the listing — an
+//          meetingOrganizerUserId='{id}',                  ODATA FUNCTION CALL
+//          startDateTime={iso})?$top=n
 //   GET  /users/{id}/onlineMeetings/{mid}/transcripts/{tid}/content
 //        ?$format=text/vtt                                the body
 //
@@ -18,9 +19,16 @@
 //   · EVERY call requires a Bearer token this server minted, exactly like the
 //     real one — which is what makes "the second sweep fetches no new token"
 //     a meaningful assertion rather than a counter nobody checks.
-//   · the $filter is HONOURED, not ignored: the listing really does drop
-//     transcripts created at or before the watermark, so the overlap-window
-//     logic is exercised instead of assumed.
+//   · THE LISTING TAKES ONLY THE FUNCTION-PARAMETER SPELLING. v1.0's
+//     getAllTranscripts is an OData function, and on 2026-09-21 the live tenant
+//     answered our old bare-path guess with a 400 saying so in as many words.
+//     That 400 is reproduced here VERBATIM for the old spelling, so the shape is
+//     PINNED by the suite rather than described in a comment nobody re-reads:
+//     revert lib/transcripts.js's listPath and section G goes red immediately.
+//   · the function parameters are HONOURED, not ignored: the organizer is what
+//     the lookup is keyed on (so a listing that forgets it cannot accidentally
+//     work), and startDateTime really does drop transcripts created at or before
+//     the watermark, so the overlap-window logic is exercised instead of assumed.
 //   · error bodies are Graph's OWN SHAPES, both dialects:
 //       - the v1.0 envelope { error: { code, message } } for the 403 a tenant
 //         with transcription switched off returns;
@@ -48,6 +56,35 @@ function transcriptsDisabledBody() {
       message: 'Transcription is disabled for this organization, or the meeting policy ' +
                'does not permit access to the transcript.',
       innerError: { code: 'transcriptAccessDisabled', date: new Date().toISOString() }
+    }
+  };
+}
+// VERBATIM from the live tenant, 2026-09-21 14:23 UTC — this is the exact text
+// six mailboxes returned against the bare `getAllTranscripts?$filter=…` spelling
+// we shipped on 0788468. Kept word for word so the suite's red line and the
+// production audit row read the same, and nobody has to wonder whether the fake
+// is testing the fault we actually met.
+function organizerParamMissingBody() {
+  return {
+    error: {
+      code: 'BadRequest',
+      message: "meetingOrganizerUserId='{userId}' expected as a function parameter",
+      innerError: { code: 'BadRequest', date: new Date().toISOString() }
+    }
+  };
+}
+// DOC-DERIVED, not observed — said plainly so it is never mistaken for the one
+// above. The v1.0 reference lists `$top` as the ONLY OData query option this
+// method supports and puts the date window in the function parentheses, so a
+// `$filter` riding along is a client bug this fake refuses rather than ignores.
+function filterNotSupportedBody() {
+  return {
+    error: {
+      code: 'BadRequest',
+      message: 'The query option $filter is not supported on getAllTranscripts. Pass the ' +
+               'startDateTime and endDateTime function parameters; $top is the only ' +
+               'supported OData query option.',
+      innerError: { code: 'BadRequest', date: new Date().toISOString() }
     }
   };
 }
@@ -142,16 +179,33 @@ function startFakeGraph({ tenant = 'fake-tenant', clientId = 'fake-client',
   };
 
   // ── the listing ───────────────────────────────────────────────────────────
-  app.get('/users/:uid/onlineMeetings/getAllTranscripts', requireToken, maybeFail, (req, res) => {
+  // THE FUNCTION-CALL FORM, AND ONLY IT. A RegExp route, because the segment
+  // ends in `getAllTranscripts(...)` and express's string patterns treat
+  // parentheses as syntax of their own. Group 1 is the mailbox, group 2 is the
+  // raw parameter list — both percent-decoded by express, exactly as Graph
+  // decodes a path before the OData parser ever sees the literals inside it.
+  const LIST_FN = /^\/users\/([^/]+)\/onlineMeetings\/getAllTranscripts\((.*)\)$/;
+  app.get(LIST_FN, requireToken, maybeFail, (req, res) => {
+    const args = String(req.params[1] || '');
+    // The organizer is REQUIRED and is what the lookup is keyed on. A listing
+    // that omits it cannot quietly return the right answer by falling back to
+    // the path segment — it gets Microsoft's own 400, which is the whole point.
+    const mOrg = /(?:^|,)\s*meetingOrganizerUserId\s*=\s*'((?:[^']|'')*)'\s*(?:,|$)/.exec(args);
+    if (!mOrg) return res.status(400).json(organizerParamMissingBody());
+    // $top is the only query option v1.0 documents here; a $filter is the old
+    // spelling leaking back in and is refused rather than silently honoured.
+    if (req.query.$filter !== undefined) return res.status(400).json(filterNotSupportedBody());
     state.listHits += 1;
-    const uid = req.params.uid;
+    const uid = mOrg[1].replace(/''/g, "'");
     const all = state.byUser[uid] || [];
-    // Honour $filter=createdDateTime gt {iso} — the watermark really bites.
-    const f = String(req.query.$filter || '');
-    const m = /createdDateTime\s+gt\s+(\S+)/i.exec(f);
-    const since = m ? new Date(m[1]) : null;
+    // Honour startDateTime / endDateTime — the watermark really bites.
+    const mStart = /(?:^|,)\s*startDateTime\s*=\s*([^,)]+)/.exec(args);
+    const mEnd = /(?:^|,)\s*endDateTime\s*=\s*([^,)]+)/.exec(args);
+    const since = mStart ? new Date(mStart[1].trim()) : null;
+    const until = mEnd ? new Date(mEnd[1].trim()) : null;
     const top = Math.max(1, parseInt(req.query.$top, 10) || 50);
     const value = all
+      .filter((t) => !until || new Date(t.createdDateTime) <= until)
       .filter((t) => !since || new Date(t.createdDateTime) > since)
       .slice(0, top)
       .map((t) => ({
@@ -166,6 +220,15 @@ function startFakeGraph({ tenant = 'fake-tenant', clientId = 'fake-client',
       }));
     res.json({ '@odata.context': 'https://graph.microsoft.com/v1.0/$metadata#transcripts', value });
   });
+
+  // THE OLD SPELLING, REFUSED. Registered AFTER the function form so it only
+  // ever catches the bare path — `getAllTranscripts` with no parentheses, which
+  // is what shipped on 0788468 and what the tenant rejected six times on
+  // 2026-09-21. It answers that same 400 rather than a 404, because a 404 would
+  // read like "no such mailbox" and send the next person down the wrong road.
+  // This route exists to be HIT BY A REGRESSION and by nothing else.
+  app.get('/users/:uid/onlineMeetings/getAllTranscripts', requireToken, maybeFail, (req, res) =>
+    res.status(400).json(organizerParamMissingBody()));
 
   // ── the body ──────────────────────────────────────────────────────────────
   app.get('/users/:uid/onlineMeetings/:mid/transcripts/:tid/content',
@@ -245,8 +308,9 @@ function startFakeGraph({ tenant = 'fake-tenant', clientId = 'fake-client',
       });
       return 'WEBVTT\n\n' + cues.join('\n\n') + '\n';
     },
-    // the two refusals, ready to arm
-    transcriptsDisabledBody, meteredLicenseBody
+    // the two refusals, ready to arm — plus the two 400s the listing enforces
+    transcriptsDisabledBody, meteredLicenseBody,
+    organizerParamMissingBody, filterNotSupportedBody
   };
 
   return new Promise((resolve) => {
@@ -289,4 +353,5 @@ function startFakeGraph({ tenant = 'fake-tenant', clientId = 'fake-client',
   });
 }
 
-module.exports = { startFakeGraph, transcriptsDisabledBody, meteredLicenseBody };
+module.exports = { startFakeGraph, transcriptsDisabledBody, meteredLicenseBody,
+                   organizerParamMissingBody, filterNotSupportedBody };

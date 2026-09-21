@@ -7566,10 +7566,34 @@ const DEL = (p, o) => call('DELETE', p, o);
        tLib.transcriptDocName({ id: 'AAAA1111', createdDateTime: '2026-05-01T09:00:00Z' }, 'Daily standup') !==
        tLib.transcriptDocName({ id: 'BBBB2222', createdDateTime: '2026-05-01T16:00:00Z' }, 'Daily standup'),
        tLib.transcriptDocName({ id: 'AAAA1111', createdDateTime: '2026-05-01T09:00:00Z' }, 'Daily standup'));
-    ok('the listing path carries the createdDateTime watermark and no credential',
-       /getAllTranscripts\?\$filter=/.test(tLib.listPath('a@b.com', '2026-09-18T00:00:00.000Z')) &&
-       tLib.listPath('a@b.com', '2026-09-18T00:00:00.000Z').indexOf('secret') < 0,
-       tLib.listPath('a@b.com', '2026-09-18T00:00:00.000Z'));
+    // ── THE LISTING SHAPE, PINNED BY THE FAKE ──────────────────────────────
+    // This is the one assertion in section G that the LIVE TENANT has already
+    // graded. The bare `getAllTranscripts?$filter=createdDateTime gt …` spelling
+    // shipped on 0788468, and the first real sweep (2026-09-21 14:23 UTC) came
+    // back six times over with
+    //   400 BadRequest — meetingOrganizerUserId='{userId}' expected as a function parameter
+    // v1.0's getAllTranscripts is an ODATA FUNCTION: the organizer and the date
+    // window are parameters inside the parentheses, and `$top` is the only query
+    // option the method documents. scripts/fake-graph.js now answers that same
+    // 400 for the old spelling, so this is a MUTATION GATE — revert listPath and
+    // every sweep assertion below it goes red in Microsoft's own words.
+    const gListPath = tLib.listPath('a@b.com', '2026-09-18T00:00:00.000Z');
+    ok('THE LISTING IS AN ODATA FUNCTION CALL — the organizer is a function PARAMETER, not a ' +
+       '$filter (revert listPath to the bare path and the fake Graph returns the tenant\'s own 400)',
+       gListPath.split('?')[0] ===
+       "/users/a%40b.com/onlineMeetings/getAllTranscripts(meetingOrganizerUserId='a%40b.com'," +
+       "startDateTime=2026-09-18T00:00:00.000Z)", gListPath);
+    ok('...the watermark rides as `startDateTime`, the documented parameter — no $filter goes ' +
+       'anywhere near this endpoint, and $top is the only query option left',
+       gListPath.indexOf('$filter') < 0 && /\?\$top=\d+$/.test(gListPath) &&
+       gListPath.indexOf('secret') < 0, gListPath);
+    // The quoted literal is an OData string: an apostrophe in a UPN must double,
+    // not terminate the parameter and turn the rest of it into garbage.
+    ok('...and the quoted organizer is escaped as OData requires, so an apostrophe in a UPN ' +
+       'cannot break out of the literal',
+       tLib.listPath("o'neil@b.com", '2026-09-18T00:00:00.000Z')
+         .indexOf("meetingOrganizerUserId='o''neil%40b.com'") > 0,
+       tLib.listPath("o'neil@b.com", '2026-09-18T00:00:00.000Z'));
     ok('the content path asks for vtt — bytes we cannot read are bytes we cannot match',
        /\$format=text%2Fvtt|\$format=text\/vtt/.test(
          tLib.contentPath('a@b.com', { id: 't1', meetingId: 'm1' })),
@@ -7845,6 +7869,32 @@ const DEL = (p, o) => call('DELETE', p, o);
        (gNone.created_rows.files || []).includes(gNoneFile.id), gNoneFile && gNoneFile.nas_path);
     ok('...assigned to the person whose meeting it was — with no folder there is no owner to defer to',
        gNone.assigned_to === gMate, gNone.assigned_to);
+
+    // ── THE OLD SPELLING IS REFUSED, OUT LOUD ──────────────────────────────
+    // The pin demonstrated rather than implied, and driven through the REAL
+    // client so the refusal lands in the real ledger: ask the fake tenant for
+    // the bare `getAllTranscripts?$filter=…` path that shipped on 0788468 and it
+    // answers the 400 the LIVE tenant answered on 2026-09-21, word for word.
+    // This is what makes reverting listPath impossible to do quietly.
+    const gOldUser = gOwner + '@e360sport.com';
+    const gOld = await gLib.graphGet(
+      `/users/${encodeURIComponent(gOldUser)}/onlineMeetings/getAllTranscripts` +
+      `?$filter=${encodeURIComponent('createdDateTime gt 2026-09-18T00:00:00.000Z')}&$top=25`,
+      { action: 'list', targetUser: gOldUser, sweepId: 'sw-' + TAG + '-oldshape' });
+    ok('THE OLD SPELLING IS REFUSED: the bare getAllTranscripts path gets Microsoft\'s own 400 — ' +
+       'meetingOrganizerUserId=\'{userId}\' expected as a function parameter — so a revert to the ' +
+       'shape the live tenant rejected six times cannot pass this suite',
+       gOld.ok === false && gOld.status === 400 &&
+       /meetingOrganizerUserId='\{userId\}' expected as a function parameter/.test(gOld.error || ''),
+       { status: gOld.status, error: gOld.error });
+    const gNewShape = await gLib.graphGet(
+      tLib.listPath(gOldUser, '2020-01-01T00:00:00.000Z'),
+      { action: 'list', targetUser: gOldUser, sweepId: 'sw-' + TAG + '-newshape' });
+    ok('...while the function-parameter form answers 200 with that organizer\'s transcripts — the ' +
+       'fake keys its lookup on the PARAMETER, so a listing that omits it cannot work by accident',
+       gNewShape.ok === true && Array.isArray(gNewShape.body.value) &&
+       gNewShape.body.value.length > 0,
+       { status: gNewShape.status, n: gNewShape.body && (gNewShape.body.value || []).length });
 
     // ── health, live ───────────────────────────────────────────────────────
     const hLive = (await GET('/api/health')).body.graph;
