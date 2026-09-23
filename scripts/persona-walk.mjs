@@ -1371,7 +1371,8 @@ async function main() {
     };
     ctx.window = ctx;
     vm.createContext(ctx);
-    for (const f of ['data.js', 'api.js', 'components.js', 'views-notes.js', 'views-folder.js']) {
+    /* views-global.js rides along for the stub-render gates (9/23) */
+    for (const f of ['data.js', 'api.js', 'components.js', 'views-notes.js', 'views-folder.js', 'views-global.js']) {
       new vm.Script(SRC[f], { filename: 'public/' + f }).runInContext(ctx);
     }
     return ctx;
@@ -1436,6 +1437,24 @@ async function main() {
     ok('DEMO RENDER · showLabel answers a NAME for a THIN project (no shows list), never a TypeError',
        thinThrew === null && thinLabel === 'WALK thin show', thinThrew || thinLabel);
     delete demoTab.PROJECTS_BY_ID[thinId];
+  }
+  {
+    /* 9/23 sibling of the thin-project crash: /api/my-steps rows fall back to
+       a bare show STUB when the show isn't absorbed yet (api.js myOpenSteps:
+       SHOWS_BY_ID[stub.id] || stub) — no .project on it at all. viewMyTasks
+       must render the stub row by the show's own name, never TypeError on an
+       inline .project read (took down My Tasks in prod, 9/23). */
+    let mtHtml = null, mtThrew = null;
+    try {
+      mtHtml = demoTab.viewMyTasks(
+        [{ show: { id: 424242, project_id: 313131, name: 'WALK stub show' },
+           step: { id: 1, title: 'WALK stub task', lane: 'client', status: 'todo', owner: demoTab.ME } }],
+        []);
+    } catch (e) { mtThrew = String(e); }
+    ok('DEMO RENDER · viewMyTasks renders a bare show STUB (no .project) — never a TypeError',
+       mtThrew === null && typeof mtHtml === 'string'
+         && mtHtml.indexOf('WALK stub show') >= 0 && mtHtml.indexOf('WALK stub task') >= 0,
+       mtThrew || 'rendered');
   }
 
   // ══════════════════════════════════════════════════════════════════════════

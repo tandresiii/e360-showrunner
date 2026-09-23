@@ -43,7 +43,11 @@ function viewMyTasks(mine, owedReports) {
   var list = mine.slice().sort(function (a, b) {
     return (a.step.due_date || '9999').localeCompare(b.step.due_date || '9999');
   }).map(function (m) {
-    var where = m.show.project.single ? m.show.project.name : m.show.name;
+    /* my-steps rows can carry a bare server stub (show not in SHOWS_BY_ID
+       yet) — no .project on it. showLabel owns this decision and survives
+       thin/missing projects; an inline .project read here took the view
+       down in prod, 9/23. */
+    var where = showLabel(m.show);
     return '<tr class="rowlink" ' + act('openShow', m.show.id) + '><td><b style="font-weight:600">' + esc(m.step.title) + '</b></td>' +
       '<td style="color:var(--muted)">' + esc(where) + '</td><td><span class="tag">' + esc(laneOf(m).label) + '</span></td>' +
       '<td>' + (m.step.risk ? '<span class="pill warn"><span class="dot"></span>At risk</span>' : statusPill(m.step.status)) + '</td>' +
@@ -97,9 +101,10 @@ function viewCalendar(shows) {
     var rows = groups[key].map(function (it) {
       var d = parseISO(it.date);
       var mm = d ? MONTH_SHORT[d.getMonth()] : '', dd = d ? d.getDate() : '—';
-      var where = it.show.project.single ? it.show.project.name : it.show.name;
+      var where = showLabel(it.show);
+      var pj = it.show.project;
       return '<div class="cal-item" ' + act('openShow', it.show.id) + '><div class="cal-date">' + esc(mm) + '<b>' + esc(dd) + '</b></div>' +
-        '<div class="ci-b"><b>' + esc(it.label + ' · ' + where) + '</b><span>' + esc(it.show.project.client + ' · ' + it.show.venue) + '</span></div>' +
+        '<div class="ci-b"><b>' + esc(it.label + ' · ' + where) + '</b><span>' + esc((pj && pj.client ? pj.client + ' · ' : '') + it.show.venue) + '</span></div>' +
         typeTag(it.show.type) + '</div>';
     }).join('');
     return '<div class="cal-group"><h4>' + esc(key) + '</h4>' + rows + '</div>';
@@ -132,7 +137,7 @@ function viewFiles(shows) {
   var mode = FILES_UI.mode === 'photos' || FILES_UI.mode === 'all' ? FILES_UI.mode : 'docs';
   var shown = mode === 'docs' ? docs : mode === 'photos' ? photos : docs.concat(photos);
   var cards = shown.map(function (x) {
-    var where = x.show.project.single ? x.show.project.name : x.show.name;
+    var where = showLabel(x.show);
     if (x.f.kind === 'photo') return filePhotoCard(x.f, where);
     /* the same cell + chip the folder's Files tab uses, so the Download
        affordance is in both grids and not just the one somebody walked */
@@ -1425,7 +1430,7 @@ function viewViewer(show) {
     return '<button class="vfile ' + (f.id === VIEWER.fileId ? 'on' : '') + '" ' + act('vSet', f.id) + '>' + th +
       '<div class="vt"><b>' + esc(label) + '</b><span>.' + esc(f.ext) + ' · ' + esc(fmtSize(f.size)) + '</span></div></button>';
   }).join('');
-  var title = show.project.single ? show.project.name : show.name;
+  var title = showLabel(show);
   /* THE HEADER IS CHROME AND THE DOCUMENT IS THE POINT.
      This used to be a full page-h: a 26px title over a two-line paragraph
      explaining the viewer to somebody already standing in it, costing ~95px of
@@ -1522,7 +1527,7 @@ function drawViewer(show) {
   if (live) drawPreview(f, prevKind);
   else if (specNode) drawSpecRender(show, f, sheet);
 
-  var title = show.project.single ? show.project.name : show.name;
+  var title = showLabel(show);
   if (isPhoto) { drawPhotoMeta(show, f, title, hasBytes); return; }
   /* financial docs carry money metadata + (for proposals) the review actions */
   var isFin = !!FIN_KINDS[f.kind];
