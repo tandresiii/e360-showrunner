@@ -39,6 +39,7 @@ function viewMyTasks(mine, owedReports) {
   var dueSoon = mine.filter(function (m) { var d = daysUntil(m.step.due_date); return d != null && d <= 10; }).length;
   var over = mine.filter(function (m) { return isOverdue(m.step); }).length;
   var laneOf = function (m) { return LANES[m.step.lane] || { label: m.step.lane }; };
+  var canDone = CURRENT_USER.role !== 'viewer';
 
   var list = mine.slice().sort(function (a, b) {
     return (a.step.due_date || '9999').localeCompare(b.step.due_date || '9999');
@@ -51,8 +52,14 @@ function viewMyTasks(mine, owedReports) {
     return '<tr class="rowlink" ' + act('openShow', m.show.id) + '><td><b style="font-weight:600">' + esc(m.step.title) + '</b></td>' +
       '<td style="color:var(--muted)">' + esc(where) + '</td><td><span class="tag">' + esc(laneOf(m).label) + '</span></td>' +
       '<td>' + (m.step.risk ? '<span class="pill warn"><span class="dot"></span>At risk</span>' : statusPill(m.step.status)) + '</td>' +
-      '<td class="mono" style="color:' + (isOverdue(m.step) ? 'var(--crit)' : 'var(--text-2)') + '">' + esc(fmtDate(m.step.due_date)) + '</td></tr>';
-  }).join('') || '<tr><td colspan="5"><div class="empty">Nothing open assigned to you.</div></td></tr>';
+      '<td class="mono" style="color:' + (isOverdue(m.step) ? 'var(--crit)' : 'var(--text-2)') + '">' + esc(fmtDate(m.step.due_date)) + '</td>' +
+      /* 9/23 — finish it where you see it. The button sits inside the rowlink
+         the way "Write it" does in myReportsBlock: the click delegation takes
+         the innermost [data-act], so Done never also opens the show. Every row
+         here is the viewer's own step, and the server lets a step's owner at
+         tech rank or above set its status — a viewer gets no button. */
+      '<td style="text-align:right">' + (canDone ? '<button class="btn sm" title="Mark this task done" ' + act('myTaskDone', m.step.id) + '>' + icon('check') + 'Done</button>' : '') + '</td></tr>';
+  }).join('') || '<tr><td colspan="6"><div class="empty">Nothing open assigned to you.</div></td></tr>';
 
   var owed = owedReports || reportsOwedBy(ME);
   return '<div class="page-h"><div><h1>My Tasks</h1><div class="sub">Everything assigned to you, across every show and every lane set — plus anything you owe after a show.</div></div></div>' +
@@ -62,7 +69,7 @@ function viewMyTasks(mine, owedReports) {
     '<div class="stat"><div class="rail-c" style="background:var(--crit)"></div><div class="k">Overdue</div><div class="v" style="color:var(--crit)">' + over + '</div></div>' +
     '<div class="stat"><div class="rail-c" style="background:' + (owed.length ? 'var(--crit)' : 'var(--go)') + '"></div><div class="k">Show reports owed</div><div class="v" style="color:' + (owed.length ? 'var(--crit)' : 'var(--go)') + '">' + owed.length + '</div></div></div>' +
     myReportsBlock(owed) +
-    '<div class="card"><div class="card-h"><h3>Open tasks — ' + esc(CURRENT_USER.name) + '</h3></div><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Task</th><th>Show</th><th>Lane</th><th>Status</th><th>Due</th></tr></thead><tbody>' + list + '</tbody></table></div></div>';
+    '<div class="card"><div class="card-h"><h3>Open tasks — ' + esc(CURRENT_USER.name) + '</h3></div><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Task</th><th>Show</th><th>Lane</th><th>Status</th><th>Due</th><th></th></tr></thead><tbody>' + list + '</tbody></table></div></div>';
 }
 
 /* ============================================================================

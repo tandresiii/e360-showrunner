@@ -5426,6 +5426,25 @@ async function stepStatusAct(stepId, status) {
       : ' → ' + (STATUS[status] ? STATUS[status].label : status)));
   updateMineCount();
 }
+/* 9/23 — "Done" on a My Tasks row: the same status flip the Pipeline checkbox
+   makes (toggleStep), without the trip to the show. evidence_type is metadata
+   on a step — neither the Pipeline nor PUT /steps/:id/status gates completion
+   on it — so there is no evidence fallback to take here. What the toast says
+   comes from the step the server hands back, never from what we asked for:
+   a refusal (or a status that did not land) is said plainly and the row stays. */
+async function myTaskDoneAct(stepId) {
+  var saved;
+  try { saved = await api.setStepStatus(stepId, 'done'); }
+  catch (e) { toast('Not marked done', String(e && e.message || e), 'err'); return; }
+  if (!saved || normStatus(saved.status) !== 'done') {
+    toast('Not marked done', (saved && saved.title ? saved.title + ' — ' : '') +
+      'the server kept it ' + (saved ? (STATUS[normStatus(saved.status)] || {}).label || saved.status : 'unchanged'), 'err');
+    return;
+  }
+  toast('Task complete', saved.title);
+  updateMineCount();
+  if (CUR.view === 'mytasks') await render('mytasks');
+}
 
 /* ── C1/C2/C3 · THE MONEY INPUTS ─────────────────────────────────────────────
    Budget-vs-actual is the CONFIRMED accounting requirement, and every burn bar
@@ -8274,6 +8293,7 @@ var ACTIONS = {
   tkCommit:      function () { return tkCommit(); },
   tkDelete:      function (t, id) { return tkDeleteAct(id); },
   stepStatus:    function (t, id, k) { return stepStatusAct(id, k); },
+  myTaskDone:    function (t, id) { return myTaskDoneAct(id); },
   /* C1/C2/C3 the money inputs */
   addBudget:     function (t, id) { return openBudget(id, null); },
   editBudget:    function (t, id, k) { return openBudget(Number(k), id); },

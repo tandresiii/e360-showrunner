@@ -1118,6 +1118,27 @@ async function main() {
   ok('D3 · …and a tech who does NOT own a step cannot change its status',
      (await PUT(`/api/steps/${TASK2}/status`, { status: 'blocked' }, { token: T.omar })).status === 403);
 
+  // 9/23 · My Tasks "Done". The owner branch of canUpdateStepStatus read
+  // role === 'tech', so a PM assigned work on a folder someone ELSE owns was
+  // refused on their own task. Pat is exactly that pm (owns nothing, cannot
+  // edit this folder — proven above); Omar is a tech who does not own it.
+  reach('Mark a task done from My Tasks', { seam: 'setStepStatus', action: 'myTaskDone' });
+  const patTask = await POST('/api/steps', {
+    show_id: SHOW, lane: 'venue', title: 'WALK pat finishes his own task', owner: 'pat', due_date: plus(20)
+  }, { token: T.brenden });
+  ok('…brenden assigns a task to pat, a pm who does not own the folder', patTask.status === 200, patTask.body);
+  const PATTASK = patTask.body.id;
+  const omarOnPat = await PUT(`/api/steps/${PATTASK}/status`, { status: 'done' }, { token: T.omar });
+  ok('MY TASKS · a tech who is NOT the assignee cannot mark it done', omarOnPat.status === 403, omarOnPat);
+  ok('MY TASKS · …nor can pat mark done a step he does not own',
+     (await PUT(`/api/steps/${TASK2}/status`, { status: 'done' }, { token: T.pat })).status === 403);
+  const patDone = await PUT(`/api/steps/${PATTASK}/status`, { status: 'done' }, { token: T.pat });
+  ok('MY TASKS · the ASSIGNEE (a pm, not the folder owner) marks his own task done',
+     patDone.status === 200 && patDone.body.status === 'done', patDone);
+  const patMine = await GET('/api/my-steps', { token: T.pat });
+  ok('MY TASKS · …and it leaves his open list',
+     patMine.status === 200 && !patMine.body.some((s) => s.id === PATTASK), patMine.body);
+
   // ══════════════════════════════════════════════════════════════════════════
   section('18 · the call sheet, filled in and reaching the crew  (B2)');
   // ══════════════════════════════════════════════════════════════════════════
@@ -1455,6 +1476,32 @@ async function main() {
        mtThrew === null && typeof mtHtml === 'string'
          && mtHtml.indexOf('WALK stub show') >= 0 && mtHtml.indexOf('WALK stub task') >= 0,
        mtThrew || 'rendered');
+  }
+  {
+    /* 9/23 · My Tasks "Done" — executed render, then the demo half of the
+       click: the button is drawn on the row (inside the rowlink, carrying the
+       step id), a viewer gets none, and the demo seam's flip takes the step
+       off myOpenSteps — the list the view re-renders from. */
+    const dMineStep = await demoTab.api.createStep({
+      show_id: dShowId, lane: 'logistics', title: 'WALK demo done-from-my-tasks', owner: demoTab.ME
+    });
+    const dMine = await demoTab.api.myOpenSteps();
+    const dRow = dMine.filter((m) => m.step.id === dMineStep.id);
+    const dHtml = demoTab.viewMyTasks(dRow, []);
+    const btnRe = new RegExp(`<tr class="rowlink" data-act="openShow"(?:(?!</tr>)[^])*?<button[^>]*data-act="myTaskDone" data-id="${dMineStep.id}"[^>]*>(?:(?!</tr>)[^])*?Done</button>`);
+    ok('DEMO RENDER · My Tasks draws a Done button on the row, inside the rowlink, for that step',
+       dRow.length === 1 && btnRe.test(dHtml), dHtml.slice(0, 400));
+    const cuWas = demoTab.CURRENT_USER;
+    demoTab.CURRENT_USER = Object.assign({}, cuWas, { role: 'viewer' });
+    const vHtml = demoTab.viewMyTasks(dRow, []);
+    demoTab.CURRENT_USER = cuWas;
+    ok('DEMO RENDER · …a viewer (read-only; the server refuses them) gets no Done button',
+       !/myTaskDone/.test(vHtml) && vHtml.indexOf('WALK demo done-from-my-tasks') >= 0);
+    const dSaved = await demoTab.api.setStepStatus(dMineStep.id, 'done');
+    const dAfter = await demoTab.api.myOpenSteps();
+    ok('DEMO · the seam flips it done and it leaves myOpenSteps (the row the view re-renders away)',
+       dSaved && dSaved.status === 'done' && !dAfter.some((m) => m.step.id === dMineStep.id),
+       { saved: dSaved && dSaved.status });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
