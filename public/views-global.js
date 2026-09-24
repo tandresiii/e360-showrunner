@@ -94,34 +94,62 @@ var CAL_UI = {
   anchor: null,                                /* ISO day the month/week is drawn around; null = today */
   range: null,                                 /* { from, to } ISO; null = the current view's window */
   hide: { kind: {}, folder: {}, type: {} },    /* what is switched OFF — empty = everything on */
+  justMine: false,                             /* wave 2: keep ONLY entries marked mine */
+  fq: '',                                      /* the folder dropdown's type-ahead text */
+  fddOpen: false,                              /* the folder dropdown is unfolded */
   filtersOpen: false
 };
 var CAL_MODES = [['month', 'Month'], ['week', 'Week'], ['range', 'Range'], ['list', 'List']];
 /* entry kinds, each tinted from the LANES catalog (never a new palette):
    load-in rides logistics, the show/install day rides crew, strike rides
-   return, and a free-standing milestone rides deliverables. */
+   return, a free-standing milestone rides deliverables, and a meeting rides
+   graphic design (the one lane colour nothing else on the calendar uses). */
 var CAL_KINDS = [
   ['load_in', 'Load-in', 'logistics'],
   ['event', 'Show / install day', 'crew'],
   ['strike', 'Strike', 'return'],
-  ['milestone', 'Milestone', 'deliverables']
+  ['milestone', 'Milestone', 'deliverables'],
+  ['meeting', 'Meeting', 'design']
+];
+/* wave 2 — the PERSONAL layer (Tom, 9/24: "user can show their tasks on their
+   calendars"). Kinds of their own, grouped under "Mine" in the filter panel:
+   the signed-in person's open task dues and the show reports they owe. The
+   shows they are CREWED on are not a kind — their date chips are marked mine
+   instead of being drawn twice. */
+var CAL_MINE_KINDS = [
+  ['task', 'My tasks due', 'client'],
+  ['report', 'My show reports due', 'production']
 ];
 var CAL_WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 var CAL_MAX_CHIPS = 3;
+var CAL_FOLDER_CHIPS_MAX = 6;                  /* above this the folder group becomes a searchable dropdown */
 
 function calKindColor(k) {
-  for (var i = 0; i < CAL_KINDS.length; i++) {
-    if (CAL_KINDS[i][0] === k) return (LANES[CAL_KINDS[i][2]] || {}).color || 'var(--muted)';
+  var all = CAL_KINDS.concat(CAL_MINE_KINDS);
+  for (var i = 0; i < all.length; i++) {
+    if (all[i][0] === k) return (LANES[all[i][2]] || {}).color || 'var(--muted)';
   }
   return 'var(--muted)';
 }
 
-/* THE FEED — unchanged in what it admits: every milestone, plus the show row's
-   load-in / event / strike dates. */
-function calendarItems(shows) {
+/* THE FEED — every milestone plus the show row's load-in / event / strike
+   dates (wave 1), and — wave 2 — whatever the optional `ctx` carries:
+     ctx.tasks    [{show, step}]  my open steps (api.myOpenSteps) — dated ones
+     ctx.reports  [report]        show reports I owe (api.myReports)
+     ctx.meetings [meeting]       the folders' meetings (api.listMeetings)
+     ctx.crew     {showId: 1}     shows I am crewed on (api.myCrewShows)
+   Every entry carries: kind · label · date · show (may be null: a season-level
+   meeting has none) · pid (its folder) · mine · open [action, id]. No ctx =
+   exactly wave 1's feed. */
+function calendarItems(shows, ctx) {
+  ctx = ctx || {};
+  var crew = ctx.crew || {};
   var items = [];
   (shows || []).forEach(function (s) {
     if (!s) return;
+    var mine = !!crew[s.id];
+    var pid = s.project_id != null ? s.project_id : null;
+    var n0 = items.length;
     var taken = {};
     /* which production date a day IS — classification only (for the kind
        tint), it never admits or drops a row */
@@ -144,6 +172,41 @@ function calendarItems(shows) {
         var d = s[pair[0]];
         if (d && !taken[d]) { taken[d] = 1; items.push({ show: s, label: pair[1], date: d, kind: pair[2] }); }
       });
+    for (var i = n0; i < items.length; i++) {
+      items[i].pid = pid; items[i].mine = mine; items[i].open = ['openShow', s.id];
+    }
+  });
+  /* MY TASKS — a step whose owner is me, open, with a due date. The show can
+     be a bare server stub (/my-steps' shape): only id / name / project_id are
+     trusted, and every label goes through showLabel. */
+  (ctx.tasks || []).forEach(function (m) {
+    var st = m && m.step;
+    if (!st || !st.due_date) return;
+    var s = m.show || (st.show_id != null ? SHOWS_BY_ID[st.show_id] : null) || null;
+    if (!s || s.id == null) return;
+    items.push({ show: s, label: st.title || 'Task', date: String(st.due_date).slice(0, 10), kind: 'task',
+                 pid: s.project_id != null ? s.project_id : (st.project_id != null ? st.project_id : null),
+                 mine: true, open: ['openShow', s.id], stepId: st.id });
+  });
+  /* SHOW REPORTS I OWE — the reportsOwedBy(ME) rows; they open the report */
+  (ctx.reports || []).forEach(function (r) {
+    if (!r || !r.due_date || r.show_id == null) return;
+    var s = SHOWS_BY_ID[r.show_id] || r.show || { id: r.show_id };
+    items.push({ show: s, label: 'Show report due', date: String(r.due_date).slice(0, 10), kind: 'report',
+                 pid: s.project_id != null ? s.project_id : (r.project_id != null ? r.project_id : null),
+                 mine: true, open: ['openReport', r.show_id] });
+  });
+  /* MEETINGS — pinned to a show they open the show; a season-level one opens
+     its folder. held_at is an ISO date (or null: undated calls stay off the
+     calendar — they live in the folder's Meetings tab). */
+  var seenMtg = {};
+  (ctx.meetings || []).forEach(function (m) {
+    if (!m || !m.held_at || seenMtg[m.id]) return;
+    seenMtg[m.id] = 1;
+    var s = m.show_id != null ? (SHOWS_BY_ID[m.show_id] || { id: m.show_id, project_id: m.project_id }) : null;
+    items.push({ show: s, label: m.title || 'Meeting', date: String(m.held_at).slice(0, 10), kind: 'meeting',
+                 pid: m.project_id != null ? m.project_id : (s ? s.project_id : null), mine: false,
+                 open: s ? ['openShow', s.id] : ['openFolder', m.project_id] });
   });
   items.sort(function (a, b) { return (a.date || '9999').localeCompare(b.date || '9999'); });
   return items;
@@ -152,21 +215,39 @@ function calendarItems(shows) {
 /* ---- filter keys: a folder is a client's season, so folder IS "by client" -- */
 function calFolderKey(s) { return s && s.project_id != null ? String(s.project_id) : 'none'; }
 function calTypeKey(s) { return s && EVENT_TYPES[s.type] ? s.type : 'led'; }
+/* item-level keys — an entry's folder is its pid (a season meeting has no
+   show); its type is its show's, else its folder's, else LED */
+function calItemFolder(it) {
+  if (it.pid != null) return String(it.pid);
+  return calFolderKey(it.show);
+}
+function calItemType(it) {
+  if (it.show && EVENT_TYPES[it.show.type]) return it.show.type;
+  var p = it.pid != null ? PROJECTS_BY_ID[it.pid] : null;
+  return p && EVENT_TYPES[p.type] ? p.type : 'led';
+}
 function calFolderLabel(it) {
-  var p = PROJECTS_BY_ID[it.show.project_id];
+  var p = it.pid != null ? PROJECTS_BY_ID[it.pid] : null;
   if (p && p.name) return p.name + (p.client && p.client !== p.name ? ' · ' + p.client : '');
-  return showLabel(it.show) || 'No folder';
+  return (it.show ? showLabel(it.show) : '') || 'No folder';
+}
+/* where an entry is, in words: its show, else its folder */
+function calWhere(it) {
+  if (it.show) return showLabel(it.show) || '';
+  var p = it.pid != null ? PROJECTS_BY_ID[it.pid] : null;
+  return (p && p.name) || 'Season';
 }
 function calVisible(items) {
   var h = CAL_UI.hide;
   return items.filter(function (it) {
-    return !h.kind[it.kind] && !h.folder[calFolderKey(it.show)] && !h.type[calTypeKey(it.show)];
+    return !h.kind[it.kind] && !h.folder[calItemFolder(it)] && !h.type[calItemType(it)] &&
+      (!CAL_UI.justMine || it.mine === true);
   });
 }
 function calHiddenCount() {
   var h = CAL_UI.hide, n = 0;
   ['kind', 'folder', 'type'].forEach(function (g) { for (var k in h[g]) if (h[g][k]) n++; });
-  return n;
+  return n + (CAL_UI.justMine ? 1 : 0);
 }
 
 /* ---- date math: local midnights through the app's own helpers (data.js
@@ -243,7 +324,15 @@ function calToggle(key) {
   if (i < 1 || !CAL_UI.hide[g]) return;
   if (CAL_UI.hide[g][k]) delete CAL_UI.hide[g][k]; else CAL_UI.hide[g][k] = 1;
 }
-function calFilterReset() { CAL_UI.hide = { kind: {}, folder: {}, type: {} }; }
+/* RESET — everything back on: every kind, folder and type, "Just mine" off,
+   the folder search cleared. (Tom, 9/24, looked for "Show everything" and
+   could not find it — it is a Reset button now, in the toolbar AND the panel.) */
+function calFilterReset() { CAL_UI.hide = { kind: {}, folder: {}, type: {} }; CAL_UI.justMine = false; CAL_UI.fq = ''; }
+function calSetJustMine(on) { CAL_UI.justMine = on == null ? !CAL_UI.justMine : !!on; }
+/* "All" / "None" over the folders the search currently matches */
+function calFolderBulk(keys, on) {
+  (keys || []).forEach(function (k) { if (on) delete CAL_UI.hide.folder[k]; else CAL_UI.hide.folder[k] = 1; });
+}
 
 /* ---- renderers ------------------------------------------------------------ */
 function calByDay(items) {
@@ -253,12 +342,22 @@ function calByDay(items) {
 }
 /* one entry as a chip: tinted by the show's TYPE (the .tag triad), railed by
    the entry's KIND (the LANES colour), and it opens its show */
+/* where a click goes — a show, a folder, or the report I owe. Pre-wave-2
+   items (a bare planted feed) carry no .open and default to their show. */
+function calOpen(it) { return it.open || ['openShow', it.show && it.show.id]; }
+/* "mine" — a task/report due, or a date of a show I am crewed on. The mark is
+   a class + a CSS dot, never markup inside the chip, so the chip reads the
+   same to everything that reads a chip. */
+var CAL_KIND_WORD = { task: 'your task', report: 'your show report', meeting: 'meeting' };
 function calChip(it, full) {
-  var where = showLabel(it.show);
-  var venue = it.show.venue || '';
-  var tip = it.label + ' · ' + where + (venue ? ' · ' + venue : '');
-  return '<button class="cal-chip t-' + esc(typeDef(it.show.type).tag) + '" style="--k:' + esc(calKindColor(it.kind)) + '" title="' +
-    esc(tip) + '" ' + act('openShow', it.show.id) + '><b>' + esc(it.label) + '</b> <span class="cc-w">' + esc(where) + '</span>' +
+  var where = calWhere(it);
+  var venue = (it.show && it.show.venue) || '';
+  var o = calOpen(it);
+  var tip = it.label + ' · ' + where + (venue ? ' · ' + venue : '') +
+    (CAL_KIND_WORD[it.kind] ? ' · ' + CAL_KIND_WORD[it.kind] : it.mine ? ' · you are on the crew' : '');
+  return '<button class="cal-chip t-' + esc(typeDef(calItemType(it)).tag) + ' k-' + esc(it.kind) + (it.mine ? ' mine' : '') +
+    '" style="--k:' + esc(calKindColor(it.kind)) + '" title="' +
+    esc(tip) + '" ' + act(o[0], o[1]) + '><b>' + esc(it.label) + '</b> <span class="cc-w">' + esc(where) + '</span>' +
     (full && venue ? '<span class="cc-v">' + esc(venue) + '</span>' : '') + '</button>';
 }
 /* the original list row — the List mode, the Range mode and the day modal
@@ -266,11 +365,15 @@ function calChip(it, full) {
 function calRow(it, inModal) {
   var d = parseISO(it.date);
   var mm = d ? MONTH_SHORT[d.getMonth()] : '', dd = d ? d.getDate() : '—';
-  var where = showLabel(it.show);
-  var pj = it.show.project;
-  return '<div class="cal-item" style="--k:' + esc(calKindColor(it.kind)) + '" ' + (inModal ? act('calOpenShow', it.show.id) : act('openShow', it.show.id)) + '><div class="cal-date">' + esc(mm) + '<b>' + esc(dd) + '</b></div>' +
-    '<div class="ci-b"><b>' + esc(it.label + ' · ' + where) + '</b><span>' + esc((pj && pj.client ? pj.client + ' · ' : '') + (it.show.venue || '')) + '</span></div>' +
-    typeTag(it.show.type) + '</div>';
+  var where = calWhere(it);
+  var pj = (it.pid != null ? PROJECTS_BY_ID[it.pid] : null) || (it.show && it.show.project) || null;
+  var o = calOpen(it);
+  var go = !inModal ? act(o[0], o[1]) : o[0] === 'openShow' ? act('calOpenShow', o[1]) : act('calOpen', o[1], o[0]);
+  return '<div class="cal-item' + (it.mine ? ' mine' : '') + '" style="--k:' + esc(calKindColor(it.kind)) + '" ' + go + '><div class="cal-date">' + esc(mm) + '<b>' + esc(dd) + '</b></div>' +
+    '<div class="ci-b"><b>' + esc(it.label + ' · ' + where) + '</b><span>' + esc((pj && pj.client ? pj.client + ' · ' : '') + ((it.show && it.show.venue) || '') +
+      (CAL_KIND_WORD[it.kind] ? ((pj && pj.client) || (it.show && it.show.venue) ? ' · ' : '') + CAL_KIND_WORD[it.kind] : '')) + '</span></div>' +
+    (it.mine ? '<span class="ci-mk">mine</span>' : '') +
+    typeTag(calItemType(it)) + '</div>';
 }
 function calListView(items) {
   var groups = {}, order = [];
@@ -290,13 +393,15 @@ function calMonthGrid(items, anchorISO, printing) {
   var dim = new Date(y, m + 1, 0).getDate();
   var weeks = Math.ceil((lead + dim) / 7);
   var by = calByDay(items);
+  var canAdd = !printing && calCanAdd();
   var cells = [];
   for (var i = 0; i < weeks * 7; i++) {
     var day = new Date(y, m, 1 - lead + i), iso = isoDate(day);
     var list = by[iso] || [];
     var out = day.getMonth() !== m;
     var dayName = CAL_WD[day.getDay()] + ' ' + fmtDateFull(iso);
-    cells.push('<div class="cal-cell' + (out ? ' out' : '') + (iso === TODAY_ISO ? ' today' : '') + '" data-date="' + iso + '">' +
+    cells.push('<div class="cal-cell' + (out ? ' out' : '') + (iso === TODAY_ISO ? ' today' : '') + '" data-date="' + iso + '"' +
+      (canAdd ? ' ' + calAddCtx(iso) : '') + '>' + (canAdd ? calAddBtn(iso, dayName) : '') +
       (list.length
         ? '<button class="cal-dn" title="' + esc(dayName) + '" ' + act('calDay', null, iso) + '>' + day.getDate() + '</button>' +
           '<div class="cal-chips">' + list.slice(0, cap).map(function (it) { return calChip(it); }).join('') +
@@ -312,12 +417,15 @@ function calMonthGrid(items, anchorISO, printing) {
   return '<div class="cal-month"><div class="cal-wds">' + CAL_WD.map(function (w) { return '<div>' + w + '</div>'; }).join('') +
     '</div><div class="cal-grid">' + cells.join('') + '</div></div>';
 }
-function calWeekGrid(items, anchorISO) {
+function calWeekGrid(items, anchorISO, printing) {
   var ws = calWeekStart(anchorISO), by = calByDay(items), cols = [];
+  var canAdd = !printing && calCanAdd();
   for (var i = 0; i < 7; i++) {
     var iso = calShift(ws, i), d = parseISO(iso), list = by[iso] || [];
-    cols.push('<div class="cal-wcol' + (iso === TODAY_ISO ? ' today' : '') + '" data-date="' + iso + '" data-wd="' + i + '">' +
-      '<div class="cal-wh"><span>' + CAL_WD[i] + '</span><b>' + d.getDate() + '</b><span class="mono">' + esc(MONTH_SHORT[d.getMonth()]) + '</span></div>' +
+    cols.push('<div class="cal-wcol' + (iso === TODAY_ISO ? ' today' : '') + '" data-date="' + iso + '" data-wd="' + i + '"' +
+      (canAdd ? ' ' + calAddCtx(iso) : '') + '>' +
+      '<div class="cal-wh"><span>' + CAL_WD[i] + '</span><b>' + d.getDate() + '</b><span class="mono">' + esc(MONTH_SHORT[d.getMonth()]) + '</span>' +
+      (canAdd ? calAddBtn(iso, CAL_WD[i] + ' ' + fmtDateFull(iso)) : '') + '</div>' +
       '<div class="cal-wbody">' + (list.map(function (it) { return calChip(it, true); }).join('') || '<div class="cal-none">—</div>') + '</div></div>');
   }
   return '<div class="cal-week">' + cols.join('') + '</div>';
@@ -344,13 +452,43 @@ function calBody(vis, printing) {
   var m = CAL_UI.mode;
   if (m === 'list') return calListView(vis);
   var w = calWindow();
-  var body = m === 'week' ? calWeekGrid(vis, calAnchor())
+  var body = m === 'week' ? calWeekGrid(vis, calAnchor(), printing)
     : m === 'range' ? calRangeList(vis, w)
     : calMonthGrid(vis, calAnchor(), printing);
   return body;
 }
+/* the folder rows the dropdown last drew — the type-ahead redraws the list
+   from these without redrawing the page (the input keeps its focus) */
+var CAL_FDD = [];
+function calFolderMatches(rows, q) {
+  var t = String(q || '').trim().toLowerCase();
+  return (rows || []).filter(function (r) { return !t || String(r.label).toLowerCase().indexOf(t) >= 0; });
+}
+/* the dropdown's checkbox list — one row per folder the query matches */
+function calFolderListHTML(rows, q) {
+  var h = CAL_UI.hide, hits = calFolderMatches(rows, q);
+  return '<div class="cal-fdd-bulk"><span>' + hits.length + ' of ' + (rows || []).length + '</span>' +
+    '<button class="lnk-btn" ' + act('calFolderBulk', null, 'on') + '>All</button>' +
+    '<button class="lnk-btn" ' + act('calFolderBulk', null, 'off') + '>None</button></div>' +
+    (hits.map(function (r) {
+      var on = !h.folder[r.k];
+      return '<label class="cal-fdd-row" data-fk="' + esc(r.k) + '"><input type="checkbox"' + (on ? ' checked' : '') + ' ' +
+        actChange('calFilter', null, 'folder:' + r.k) + '><span class="fl">' + esc(r.label) + '</span><span class="sc">' + r.n + '</span></label>';
+    }).join('') || '<div class="cal-none">No folder or client matches “' + esc(q) + '”.</div>');
+}
+function calFolderDropdown(rows) {
+  var h = CAL_UI.hide, on = rows.filter(function (r) { return !h.folder[r.k]; }).length;
+  return '<div class="cal-fdd' + (CAL_UI.fddOpen ? ' open' : '') + '">' +
+    '<button class="btn sm cal-fdd-btn" aria-expanded="' + !!CAL_UI.fddOpen + '" ' + act('calFdd') + '>' +
+    (on === rows.length ? 'All ' + rows.length + ' folders' : on + ' of ' + rows.length + ' folders') + ' ' + icon('chevD') + '</button>' +
+    (CAL_UI.fddOpen
+      ? '<div class="cal-fdd-pop"><input id="calFq" class="cell-in" type="search" autocomplete="off" placeholder="Find a folder or client…" value="' +
+        esc(CAL_UI.fq) + '" data-act-input="calFolderQ">' +
+        '<div class="cal-fdd-list" id="calFddList">' + calFolderListHTML(rows, CAL_UI.fq) + '</div></div>'
+      : '') + '</div>';
+}
 function calFilterPanel(all) {
-  var h = CAL_UI.hide;
+  var h = CAL_UI.hide, hid = calHiddenCount();
   function chip(g, k, label, n, sw) {
     var on = !h[g][k];
     return '<button class="cal-f' + (on ? ' on' : '') + '" aria-pressed="' + on + '" ' + act('calFilter', null, g + ':' + k) + '>' +
@@ -358,22 +496,149 @@ function calFilterPanel(all) {
   }
   function count(fn) { var c = {}; all.forEach(function (it) { var k = fn(it); c[k] = (c[k] || 0) + 1; }); return c; }
   var kc = count(function (it) { return it.kind; });
-  var tc = count(function (it) { return calTypeKey(it.show); });
-  var fc = count(function (it) { return calFolderKey(it.show); });
+  var tc = count(function (it) { return calItemType(it); });
+  var fc = count(function (it) { return calItemFolder(it); });
   var fLabel = {};
-  all.forEach(function (it) { var k = calFolderKey(it.show); if (!fLabel[k]) fLabel[k] = calFolderLabel(it); });
+  all.forEach(function (it) { var k = calItemFolder(it); if (!fLabel[k]) fLabel[k] = calFolderLabel(it); });
   var folders = Object.keys(fc).sort(function (a, b) { return fLabel[a].localeCompare(fLabel[b]); });
   var types = Object.keys(EVENT_TYPES).filter(function (t) { return tc[t]; });
+  var mineN = all.filter(function (it) { return it.mine === true; }).length;
+  CAL_FDD = folders.map(function (k) { return { k: k, label: fLabel[k], n: fc[k] }; });
+  var folderCtl = folders.length > CAL_FOLDER_CHIPS_MAX ? calFolderDropdown(CAL_FDD)
+    : folders.map(function (k) { return chip('folder', k, fLabel[k], fc[k]); }).join('');
   return '<div class="cal-filters">' +
+    '<div class="cal-fh"><b>Show on the calendar</b>' +
+    '<button class="btn sm primary cal-reset" ' + (hid ? '' : 'disabled ') + act('calFilterReset') + '>' + icon('refresh') +
+    'Reset · show everything</button></div>' +
+    '<div class="cal-fg"><h5>Mine</h5><div>' +
+    CAL_MINE_KINDS.map(function (k) { return chip('kind', k[0], k[1], kc[k[0]] || 0, calKindColor(k[0])); }).join('') +
+    '<button class="cal-f cal-jm' + (CAL_UI.justMine ? ' on' : '') + '" aria-pressed="' + !!CAL_UI.justMine + '" title="Hide everything except your task dues, your report dues and the dates of shows you are crewed on" ' +
+    act('calJustMine') + '><i class="mine-dot"></i>Just mine <span class="sc">' + mineN + '</span></button></div></div>' +
     '<div class="cal-fg"><h5>What</h5><div>' + CAL_KINDS.map(function (k) { return chip('kind', k[0], k[1], kc[k[0]] || 0, calKindColor(k[0])); }).join('') + '</div></div>' +
     (types.length > 1 ? '<div class="cal-fg"><h5>Type</h5><div>' + types.map(function (t) { return chip('type', t, typeLabel(t), tc[t]); }).join('') + '</div></div>' : '') +
-    (folders.length ? '<div class="cal-fg"><h5>Folder / client</h5><div>' + folders.map(function (k) { return chip('folder', k, fLabel[k], fc[k]); }).join('') + '</div></div>' : '') +
-    (calHiddenCount() ? '<button class="btn sm" ' + act('calFilterReset') + '>Show everything</button>' : '') +
+    (folders.length ? '<div class="cal-fg"><h5>Folder / client</h5><div>' + folderCtl + '</div></div>' : '') +
     '</div>';
 }
 
-function viewCalendar(shows) {
-  var all = calendarItems(shows);
+/* ---- DAY-ADD (wave 2 · Tom: "right click on a date and put a global or
+   local note or element") -------------------------------------------------
+   Two doors on one dialog: TEAM adds a milestone to a show (POST
+   /shows/:id/milestones), PERSONAL adds a task owned by me, due that day
+   (POST /steps). Both routes are requireRole('pm') + canEditProject on the
+   folder, so the affordance is drawn only for pm rank and up (canEditFolder
+   with no folder = rank alone), and the folder list offers only folders this
+   person can edit (a pm: the ones they own; manager+: all). The server stays
+   the gate; this only decides which doors are drawn. */
+function calCanAdd() { return typeof canEditFolder === 'function' && canEditFolder(null); }
+function calAddCtx(iso) { return 'data-act-ctx="calAdd" data-k="' + esc(iso) + '"'; }
+function calAddBtn(iso, dayName) {
+  return '<button class="cal-add" title="Add on ' + esc(dayName) + '" aria-label="Add on ' + esc(dayName) + '" ' +
+    act('calAdd', null, iso) + '>' + icon('plus') + '</button>';
+}
+var CAL_ADD = null;                              /* { iso, door, fk, sid, label, title, lane } */
+function calAddStart(iso, door) {
+  CAL_ADD = { iso: iso, door: door === 'mine' ? 'mine' : 'team', fk: null, sid: null, label: '', title: '', lane: '' };
+  return CAL_ADD;
+}
+/* the folders this person may add to, each with its shows — from the loaded
+   list, stub-safe: a show whose folder is not in PROJECTS_BY_ID is offered on
+   rank alone (the server decides) and labelled by its own name */
+function calAddFolders(shows) {
+  var by = {}, order = [];
+  (shows || []).forEach(function (s) {
+    if (!s || s.id == null) return;
+    var k = calFolderKey(s), p = s.project_id != null ? PROJECTS_BY_ID[s.project_id] : null;
+    if (!canEditFolder(p || null)) return;
+    if (!by[k]) { by[k] = { k: k, label: p && p.name ? p.name + (p.client && p.client !== p.name ? ' · ' + p.client : '') : (showLabel(s) || 'No folder'), shows: [] }; order.push(k); }
+    by[k].shows.push(s);
+  });
+  return order.map(function (k) { return by[k]; }).sort(function (a, b) { return a.label.localeCompare(b.label); });
+}
+function calAddLanes(show) {
+  var lanes = (show && show.lanes) || typeDef(show && show.type).lanes || [];
+  return lanes.map(function (l) { return { key: l.key || l, label: l.label || l.key || l }; });
+}
+function calAddHTML(shows) {
+  var st = CAL_ADD;
+  if (!st) return '';
+  var folders = calAddFolders(shows);
+  if (!folders.length) {
+    return '<div class="empty">No folder here you can add to. A PM adds dates on the folders they own; a manager or admin can add anywhere.</div>';
+  }
+  var f = folders.filter(function (x) { return x.k === st.fk; })[0] || folders[0];
+  st.fk = f.k;
+  var s = f.shows.filter(function (x) { return x.id === st.sid; })[0] || f.shows[0];
+  st.sid = s.id;
+  var lanes = calAddLanes(s);
+  if (!lanes.some(function (l) { return l.key === st.lane; })) st.lane = lanes.length ? lanes[0].key : '';
+  function lab(t, inner) { return '<label class="cal-addf"><span>' + esc(t) + '</span>' + inner + '</label>'; }
+  var team = st.door === 'team';
+  return '<div class="seg cal-doors">' +
+    '<button class="' + (team ? 'on' : '') + '" ' + act('calAddDoor', null, 'team') + '>Team · milestone</button>' +
+    '<button class="' + (!team ? 'on' : '') + '" ' + act('calAddDoor', null, 'mine') + '>Personal · task for me</button></div>' +
+    '<div class="hint" style="margin:10px 0 12px">' + icon(team ? 'cal' : 'check') + '<span>' +
+    (team ? 'A milestone on the show — it shows in the show’s header strip and on everyone’s calendar.'
+          : 'A task you own, due ' + esc(fmtDateFull(st.iso)) + ' — it lands on your My Tasks and on this calendar.') +
+    '</span></div>' +
+    '<div class="cal-addgrid">' +
+    lab('Folder', '<select id="caFolder" class="cell-in" ' + actChange('calAddPick', null, 'folder') + '>' +
+      folders.map(function (x) { return '<option value="' + esc(x.k) + '"' + (x.k === f.k ? ' selected' : '') + '>' + esc(x.label) + '</option>'; }).join('') + '</select>') +
+    lab('Show', '<select id="caShow" class="cell-in" ' + actChange('calAddPick', null, 'show') + '>' +
+      f.shows.map(function (x) { return '<option value="' + Number(x.id) + '"' + (x.id === s.id ? ' selected' : '') + '>' + esc(showLabel(x) || 'show ' + x.id) + '</option>'; }).join('') + '</select>') +
+    '</div>' +
+    (team
+      ? '<div class="cal-addgrid one">' + lab('Label', '<input id="caLabel" class="cell-in" placeholder="Content due · Freight · Target" value="' + esc(st.label) + '">') + '</div>'
+      : '<div class="cal-addgrid">' +
+        lab('Task', '<input id="caTitle" class="cell-in" placeholder="call the venue about power" value="' + esc(st.title) + '">') +
+        lab('Lane', '<select id="caLane" class="cell-in">' + lanes.map(function (l) {
+          return '<option value="' + esc(l.key) + '"' + (l.key === st.lane ? ' selected' : '') + '>' + esc(l.label) + '</option>';
+        }).join('') + '</select>') + '</div>') +
+    '<div class="cal-addfoot"><button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+    '<button class="btn primary" ' + act('calAddCommit') + '>' + icon('plus') + (team ? 'Add milestone' : 'Add my task') + '</button></div>';
+}
+/* the write — through the seam, so the demo twin and the live route are the
+   same call. Throws the seam's/server's own refusal text. */
+async function calAddSubmit(door, f) {
+  f = f || {};
+  if (!calValidISO(f.date)) throw new Error('that is not a date the calendar knows');
+  if (!f.show_id) throw new Error('pick a show');
+  if (door === 'team') return api.addMilestone(f.show_id, { label: String(f.label || '').trim(), date: f.date });
+  if (door === 'mine') {
+    return api.createStep({ show_id: Number(f.show_id), lane: f.lane || undefined, title: String(f.title || '').trim(),
+                            due_date: f.date, owner: ME });
+  }
+  throw new Error('unknown door ' + door);
+}
+
+/* ---- the data behind the page — both modes, through the seam ------------
+   The shows (wave 1) plus the personal layer and the meetings. Each extra
+   source fails on its own: a refused meetings read never costs you the
+   calendar, and the page says what it could not load. */
+async function calLoad() {
+  var shows = await api.listShows();
+  var ctx = { tasks: [], reports: [], meetings: [], crew: {}, errors: [] };
+  function soft(p, name) { return Promise.resolve().then(function () { return p(); }).catch(function () { ctx.errors.push(name); return null; }); }
+  var pids = {};
+  (shows || []).forEach(function (s) { if (s && s.project_id != null) pids[s.project_id] = 1; });
+  var got = await Promise.all([
+    soft(function () { return api.myOpenSteps(); }, 'your tasks'),
+    soft(function () { return api.myReports(); }, 'your show reports'),
+    soft(function () { return api.myCrewShows(); }, 'your crew list'),
+    Promise.all(Object.keys(pids).map(function (pid) {
+      return api.listMeetings(pid).catch(function () { return null; });
+    }))
+  ]);
+  ctx.tasks = got[0] || [];
+  ctx.reports = got[1] || [];
+  (got[2] || []).forEach(function (c) { if (c && c.show_id != null) ctx.crew[c.show_id] = 1; });
+  var failed = 0;
+  (got[3] || []).forEach(function (rows) { if (rows == null) failed++; else ctx.meetings = ctx.meetings.concat(rows); });
+  if (failed) ctx.errors.push('meetings for ' + failed + ' folder' + (failed === 1 ? '' : 's'));
+  return { shows: shows, ctx: ctx };
+}
+
+function viewCalendar(shows, ctx) {
+  var all = calendarItems(shows, ctx);
   var vis = calVisible(all);
   var m = CAL_UI.mode, hid = calHiddenCount();
 
@@ -386,15 +651,18 @@ function viewCalendar(shows) {
     '<button class="iconbtn" title="Next" ' + act('calNav', null, 'next') + '>' + icon('chevR') + '</button>';
   var bar = '<div class="cal-bar"><div class="cal-nav">' + nav + '<h2 class="cal-title">' + esc(calTitle()) + '</h2></div>' +
     '<div class="cal-tools">' + seg +
+    '<button class="btn sm' + (CAL_UI.justMine ? ' on' : '') + '" aria-pressed="' + !!CAL_UI.justMine + '" title="Only your task dues, report dues and the shows you crew" ' + act('calJustMine') + '><i class="mine-dot"></i>Just mine</button>' +
     '<button class="btn sm' + (CAL_UI.filtersOpen || hid ? ' on' : '') + '" ' + act('calFilters') + '>Filters' + (hid ? ' · ' + hid + ' off' : '') + '</button>' +
+    (hid ? '<button class="btn sm primary cal-reset" title="Turn every filter back on" ' + act('calFilterReset') + '>' + icon('refresh') + 'Reset</button>' : '') +
     '<button class="btn sm" title="Print this view" ' + act('calPrint') + '>' + icon('print') + 'Print</button></div></div>';
   var w = calWindow();
   var rangeRow = m !== 'range' ? '' :
     '<div class="cal-range"><label>From <input type="date" class="cell-in" value="' + esc(w.from) + '" ' + actChange('calRange', null, 'from') + '></label>' +
     '<label>To <input type="date" class="cell-in" value="' + esc(w.to) + '" ' + actChange('calRange', null, 'to') + '></label></div>';
-  var legend = '<div class="cal-legend">' + CAL_KINDS.map(function (k) {
+  var legend = '<div class="cal-legend">' + CAL_KINDS.concat(CAL_MINE_KINDS).map(function (k) {
     return '<span><i style="background:' + esc(calKindColor(k[0])) + '"></i>' + esc(k[1]) + '</span>';
-  }).join('') + Object.keys(EVENT_TYPES).map(function (t) { return typeTag(t); }).join('') + '</div>';
+  }).join('') + '<span><i class="mine-dot"></i>Yours</span>' +
+    Object.keys(EVENT_TYPES).map(function (t) { return typeTag(t); }).join('') + '</div>';
 
   /* the honest footnotes: what the filters hid, what has no date, and — on
      an empty window — where the next dated thing is */
@@ -408,25 +676,27 @@ function viewCalendar(shows) {
     var nextIt = inWin ? null : vis.filter(function (it) { return it.date && it.date.slice(0, 10) > w.to; })[0];
     if (!inWin) notes.push('Nothing in this ' + (m === 'range' ? 'range' : m) + (hid ? ' with these filters' : ''));
     if (nextIt) jump = '<button class="btn sm" ' + act('calGo', null, nextIt.date.slice(0, 10)) + '>Next: ' +
-      esc(fmtDate(nextIt.date) + ' · ' + nextIt.label + ' · ' + showLabel(nextIt.show)) + '</button>';
+      esc(fmtDate(nextIt.date) + ' · ' + nextIt.label + ' · ' + calWhere(nextIt)) + '</button>';
   }
+  if (ctx && ctx.errors && ctx.errors.length) notes.push('Could not load ' + ctx.errors.join(', ') + ' — showing the rest');
   var foot = notes.length || jump ? '<div class="cal-notes">' + esc(notes.join(' · ')) + jump + '</div>' : '';
 
-  return '<div class="page-h"><div><h1>Calendar</h1><div class="sub">Load-ins, shows, installs and strikes across every show. Pushes to the e360 scheduler on promote.</div></div></div>' +
+  return '<div class="page-h"><div><h1>Calendar</h1><div class="sub">Load-ins, shows, installs, strikes, milestones and meetings across every show — plus your own task and report dues. Pushes to the e360 scheduler on promote.' +
+    (calCanAdd() && m !== 'list' && m !== 'range' ? ' Right-click a day, or tap its +, to add a milestone or a task for yourself.' : '') + '</div></div></div>' +
     bar + rangeRow + (CAL_UI.filtersOpen ? calFilterPanel(all) : '') + legend + foot +
     '<div class="cal-body cal-m-' + esc(m) + '">' + calBody(vis) + '</div>';
 }
 /* the print sheet — the same body, titled, into #printArea */
-function calPrintHTML(shows) {
-  var vis = calVisible(calendarItems(shows));
+function calPrintHTML(shows, ctx) {
+  var vis = calVisible(calendarItems(shows, ctx));
   var hid = calHiddenCount();
   return '<div class="cal-print"><h2>Calendar — ' + esc(calTitle()) + '</h2>' +
     (hid ? '<div class="cal-notes">Filtered view: ' + hid + ' filter' + (hid === 1 ? '' : 's') + ' off</div>' : '') +
     '<div class="cal-body cal-m-' + esc(CAL_UI.mode) + '">' + calBody(vis, true) + '</div></div>';
 }
 /* the day's full list — the "+N more" / phone-dot modal body */
-function calDayHTML(shows, iso) {
-  var list = calVisible(calendarItems(shows)).filter(function (it) { return it.date && it.date.slice(0, 10) === iso; });
+function calDayHTML(shows, iso, ctx) {
+  var list = calVisible(calendarItems(shows, ctx)).filter(function (it) { return it.date && it.date.slice(0, 10) === iso; });
   return list.length ? '<div class="cal-daylist">' + list.map(function (it) { return calRow(it, true); }).join('') + '</div>'
     : '<div class="empty">Nothing on this day.</div>';
 }

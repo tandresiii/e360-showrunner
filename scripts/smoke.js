@@ -1027,6 +1027,14 @@ const DEL = (p, o) => call('DELETE', p, o);
   const crew = await POST(`/api/shows/${S}/crew`, { username: techUser, role_on_site: 'LED tech',
     call_time: '07:30' }, { token: A });
   ok('POST /api/shows/:id/crew (punch 40)', crew.status === 200, crew.body);
+  // Calendar wave 2 (9/24): the crewed-on list the Calendar's "mine" mark reads.
+  const meCrewT = await GET('/api/me/crew', { token: TECHT });
+  ok('GET /api/me/crew lists the show the tech was just crewed on',
+     meCrewT.status === 200 && Array.isArray(meCrewT.body)
+     && meCrewT.body.some((x) => x.show_id === S && x.role_on_site === 'LED tech'), meCrewT.body);
+  const meCrewA = await GET('/api/me/crew?username=' + encodeURIComponent(techUser), { token: A });
+  ok('…always the SESSION’s own rows — a username param reads nobody else’s roster',
+     meCrewA.status === 200 && !meCrewA.body.some((x) => x.show_id === S), meCrewA.body);
   const callSheet = await PUT(`/api/shows/${S}/call-sheet`, { load_in_time: '07:00',
     doors_time: '17:00', event_time: '18:30', strike_time: '21:30',
     venue_address: '1450 Monroe St, Madison, WI', radio_channel: 'CH 1',

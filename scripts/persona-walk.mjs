@@ -1638,6 +1638,248 @@ async function main() {
     delete demoTab.PROJECTS_BY_ID[PA]; delete demoTab.PROJECTS_BY_ID[PB];
     Object.assign(demoTab.CAL_UI, JSON.parse(cu));
   }
+  {
+    /* 9/24 · CALENDAR WAVE 2 — the personal layer, meetings, day-add, the
+       folder dropdown and Reset, as EXECUTED renders over a planted feed in
+       May 2031 (May 1 is a Thursday). Show A is one I am crewed on; show B
+       is not; the STUB has no .project/type/venue/dates and a folder id
+       nothing knows. The ctx is the shape calLoad() hands viewCalendar. */
+    const cu2 = JSON.stringify(demoTab.CAL_UI);
+    const cuUser = demoTab.CURRENT_USER;
+    const PW = 777801, PW2 = 777802, PWS = 313199;
+    const wA = { id: 900101, project_id: PW, name: 'WALK w2 A', type: 'led', venue: 'Hall W',
+      event_date: '2031-05-14', milestones: [] };
+    const wB = { id: 900102, project_id: PW2, name: 'WALK w2 B', type: 'print', venue: 'Hall X',
+      event_date: '2031-05-20', milestones: [] };
+    const wStub = { id: 900103, project_id: PWS, name: 'WALK w2 stub' };
+    demoTab.PROJECTS_BY_ID[PW] = { id: PW, name: 'WALK w2 folder A', client: 'WALK w2 client A',
+      owner: 'lfarkos', type: 'led', shows: [wA] };
+    demoTab.PROJECTS_BY_ID[PW2] = { id: PW2, name: 'WALK w2 folder B', client: 'WALK w2 client B',
+      owner: 'jhawk', type: 'print', shows: [wB] };
+    const feed2 = [wA, wB, wStub];
+    const ctx2 = {
+      tasks: [
+        { show: wA, step: { id: 990001, show_id: wA.id, title: 'WALK my task', due_date: '2031-05-12', owner: demoTab.ME } },
+        { show: { id: wStub.id, name: 'WALK w2 stub', project_id: PWS },   // the /my-steps bare stub
+          step: { id: 990002, show_id: wStub.id, title: 'WALK stub task', due_date: '2031-05-13', owner: demoTab.ME } },
+        { show: wA, step: { id: 990003, show_id: wA.id, title: 'WALK undated task', due_date: '', owner: demoTab.ME } }
+      ],
+      reports: [{ id: 1, show_id: wStub.id, due_date: '2031-05-15', status: 'owed',
+                  show: { id: wStub.id, name: 'WALK w2 stub', project_id: PWS } }],
+      meetings: [
+        { id: 880001, project_id: PW, show_id: wA.id, title: 'WALK kickoff call', held_at: '2031-05-06' },
+        { id: 880002, project_id: PW2, show_id: null, title: 'WALK season sync', held_at: '2031-05-07' },
+        { id: 880003, project_id: PW2, show_id: null, title: 'WALK undated call', held_at: null }
+      ],
+      crew: { [wA.id]: 1 }
+    };
+    const cells2 = (h) => h.split('<div class="cal-cell').slice(1)
+      .map((seg) => ({ date: (seg.match(/data-date="([\d-]+)"/) || [])[1], html: seg }));
+    const at = (h, d) => (cells2(h).find((c) => c.date === d) || { html: '' }).html;
+    const chip2 = (actName, id, label, cls) => new RegExp(
+      `<button class="cal-chip[^"]*${cls ? '\\b' + cls + '\\b[^"]*' : ''}"[^>]*data-act="${actName}" data-id="${id}"[^>]*><b>${label}</b>`);
+    const draw = (setup, feed = feed2, ctx = ctx2) => {
+      demoTab.CAL_UI.mode = 'month'; demoTab.CAL_UI.anchor = null; demoTab.CAL_UI.range = null;
+      demoTab.calFilterReset(); demoTab.CAL_UI.filtersOpen = false; demoTab.CAL_UI.fddOpen = false;
+      demoTab.calGo('2031-05-14');
+      if (setup) setup();
+      let html = null, threw = null;
+      try { html = demoTab.viewCalendar(feed, ctx); } catch (e) { threw = String(e && e.stack || e); }
+      return { html: html || '', threw };
+    };
+
+    // (a) my task due lands on its date, mine-marked, and the Mine layer takes it off
+    const base = draw();
+    ok('W2 (a) · DEMO RENDER · my task due is a chip ON its date (May 12), mine-marked, opening its show',
+       base.threw === null && chip2('openShow', 900101, 'WALK my task', 'mine').test(at(base.html, '2031-05-12'))
+       && /class="cal-chip[^"]*\bk-task\b/.test(at(base.html, '2031-05-12')), base.threw);
+    ok('…and on no other day; an UNDATED task is not drawn at all',
+       cells2(base.html).filter((c) => /WALK my task/.test(c.html)).length === 1
+       && base.html.indexOf('WALK undated task') < 0);
+    const offTask = draw(() => demoTab.calToggle('kind:task'));
+    ok('W2 (a) · toggling the Mine layer (kind:task) OFF removes it — and only it',
+       offTask.threw === null && offTask.html.indexOf('WALK my task') < 0 && offTask.html.indexOf('WALK stub task') < 0
+       && chip2('openShow', 900101, 'Show day').test(at(offTask.html, '2031-05-14'))
+       && /WALK kickoff call/.test(offTask.html), offTask.threw);
+    ok('…the layer is ON by default and “Just mine” is OFF by default',
+       JSON.parse(cu2).justMine === false && !JSON.parse(cu2).hide.kind.task);
+
+    // (b) Just mine
+    const jm = draw(() => demoTab.calSetJustMine(true));
+    const jmChips = jm.html.match(/<button class="cal-chip[^"]*"/g) || [];
+    ok('W2 (b) · DEMO RENDER · “Just mine” leaves ONLY mine-marked chips: 2 task dues + 1 report due + the crewed show’s day',
+       jm.threw === null && jmChips.length === 4 && jmChips.every((c) => /\bmine\b/.test(c)),
+       jm.threw || jmChips);
+    ok('…show B (not crewed) and both meetings are gone; A’s show day stays, marked mine',
+       jm.html.indexOf('data-id="900102"') < 0 && jm.html.indexOf('WALK kickoff call') < 0
+       && jm.html.indexOf('WALK season sync') < 0
+       && chip2('openShow', 900101, 'Show day', 'mine').test(at(jm.html, '2031-05-14')));
+    ok('…without it, B’s chip carries NO mine mark (the mark is not decoration on everything)',
+       /<button class="cal-chip(?:(?!mine)[^"])*"[^>]*data-act="openShow" data-id="900102"/.test(base.html));
+
+    // (c) meetings on held_at
+    ok('W2 (c) · DEMO RENDER · a show-pinned meeting renders on held_at (May 6) and opens the SHOW',
+       chip2('openShow', 900101, 'WALK kickoff call', 'k-meeting').test(at(base.html, '2031-05-06')));
+    ok('…a season-level meeting renders on its day (May 7) and opens the FOLDER; an undated one is left off',
+       chip2('openFolder', PW2, 'WALK season sync', 'k-meeting').test(at(base.html, '2031-05-07'))
+       && base.html.indexOf('WALK undated call') < 0);
+    const noMtg = draw(() => demoTab.calToggle('kind:meeting'));
+    ok('…meetings filter like the rest (kind:meeting off drops both)',
+       noMtg.html.indexOf('WALK kickoff call') < 0 && noMtg.html.indexOf('WALK season sync') < 0
+       && /WALK my task/.test(noMtg.html));
+
+    // (g) the bare stub through every new path
+    ok('W2 (g) · DEMO RENDER · a bare STUB carries a task chip (May 13) and a report chip (May 15, opens the report) — no TypeError',
+       base.threw === null && chip2('openShow', 900103, 'WALK stub task', 'mine').test(at(base.html, '2031-05-13'))
+       && chip2('openReport', 900103, 'Show report due', 'k-report').test(at(base.html, '2031-05-15'))
+       && at(base.html, '2031-05-15').indexOf('WALK w2 stub') >= 0);
+    let stubDay = null, stubList = null, stubThrew = null;
+    try {
+      stubDay = demoTab.calDayHTML(feed2, '2031-05-15', ctx2);
+      demoTab.calSetMode('list'); stubList = demoTab.viewCalendar(feed2, ctx2);
+      demoTab.CAL_UI.filtersOpen = true; demoTab.viewCalendar(feed2, ctx2);
+      demoTab.calAddStart('2031-05-15', 'mine'); demoTab.calAddHTML(feed2);
+    } catch (e) { stubThrew = String(e && e.stack || e); }
+    ok('…and through the day modal (closes on its way to the report), List, the filter panel and the day-add dialog',
+       stubThrew === null && /data-act="calOpen" data-id="900103" data-k="openReport"/.test(stubDay)
+       && /WALK stub task/.test(stubList), stubThrew);
+
+    // (e) the folder dropdown — more than 6 folders
+    const names = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Golf', 'Hotel'];
+    const many = names.map((n, i) => {
+      const pid = 777900 + i;
+      const s = { id: 900200 + i, project_id: pid, name: 'WALK fdd ' + n + ' show', type: 'led', event_date: '2031-05-2' + (i % 8) };
+      demoTab.PROJECTS_BY_ID[pid] = { id: pid, name: 'WALK fdd ' + n, client: 'WALK fdd ' + n, shows: [s] };
+      return s;
+    });
+    const dd = draw(() => { demoTab.CAL_UI.filtersOpen = true; }, many, {});
+    ok('W2 (e) · DEMO RENDER · 8 folders → the folder group is a dropdown, not 8 chips',
+       dd.threw === null && /class="cal-fdd"/.test(dd.html) && !/data-act="calFilter" data-k="folder:/.test(dd.html)
+       && /All 8 folders/.test(dd.html), dd.threw);
+    const ddOpen = draw(() => { demoTab.CAL_UI.filtersOpen = true; demoTab.CAL_UI.fddOpen = true; demoTab.CAL_UI.fq = 'bra'; }, many, {});
+    const ddRows = [...ddOpen.html.matchAll(/<label class="cal-fdd-row" data-fk="(\d+)">/g)].map((m) => m[1]);
+    ok('W2 (e) · the type-ahead filters the checkbox list: “bra” leaves exactly Bravo',
+       ddOpen.threw === null && ddRows.length === 1 && ddRows[0] === '777901'
+       && /data-act-input="calFolderQ"/.test(ddOpen.html) && /value="bra"/.test(ddOpen.html), ddOpen.threw || ddRows);
+    const ddAll = demoTab.calFolderListHTML(demoTab.CAL_FDD, '');
+    const ddNone = demoTab.calFolderListHTML(demoTab.CAL_FDD, 'zzz-nothing');
+    ok('…an empty query lists all 8 (each a checked checkbox riding calFilter); a miss says so',
+       (ddAll.match(/class="cal-fdd-row"/g) || []).length === 8
+       && (ddAll.match(/<input type="checkbox" checked data-act-change="calFilter" data-k="folder:/g) || []).length === 8
+       && /No folder or client matches/.test(ddNone) && !/cal-fdd-row/.test(ddNone));
+    demoTab.calFolderBulk(demoTab.calFolderMatches(demoTab.CAL_FDD, 'bra').map((r) => r.k), false);
+    const ddBulk = demoTab.viewCalendar(many, {});
+    ok('…“None” over the match hides Bravo’s show and nothing else',
+       ddBulk.indexOf('data-id="900201"') < 0 && ddBulk.indexOf('data-id="900200"') >= 0 && /7 of 8 folders/.test(ddBulk));
+    const few = draw(() => { demoTab.CAL_UI.filtersOpen = true; });
+    ok('…and at 6 or fewer folders the chips stay chips',
+       !/class="cal-fdd/.test(few.html) && /data-act="calFilter" data-k="folder:777801"/.test(few.html));
+
+    // (f) Reset
+    const messy = draw(() => {
+      demoTab.calToggle('kind:task'); demoTab.calToggle('kind:meeting'); demoTab.calToggle('folder:' + PW);
+      demoTab.calToggle('type:print'); demoTab.calSetJustMine(true); demoTab.CAL_UI.fq = 'x';
+    });
+    ok('W2 (f) · with filters on, the TOOLBAR carries a Reset button (not only the closed panel)',
+       /<div class="cal-tools">(?:(?!<\/div><\/div>)[^])*data-act="calFilterReset"[^>]*>(?:<svg[^]*?<\/svg>)?Reset</.test(messy.html)
+       && /5 off/.test(messy.html));
+    demoTab.calFilterReset();
+    const clean = demoTab.viewCalendar(feed2, ctx2);
+    const nBase = (base.html.match(/<button class="cal-chip /g) || []).length;
+    ok('W2 (f) · Reset restores EVERYTHING — same chips as the untouched render, Just mine off, search cleared, no Reset drawn',
+       (clean.match(/<button class="cal-chip /g) || []).length === nBase && nBase === 7
+       && demoTab.calHiddenCount() === 0 && demoTab.CAL_UI.justMine === false && demoTab.CAL_UI.fq === ''
+       && !/<div class="cal-tools">(?:(?!<\/div><\/div>)[^])*calFilterReset/.test(clean), { nBase });
+    demoTab.CAL_UI.filtersOpen = true;
+    ok('…and the open panel always shows the Reset button (disabled when there is nothing to reset)',
+       /<button class="btn sm primary cal-reset" disabled data-act="calFilterReset"/.test(demoTab.viewCalendar(feed2, ctx2)));
+    demoTab.CAL_UI.filtersOpen = false;
+
+    // (d) day-add, both doors, through the DEMO seam, into a real demo show
+    const dShows = await demoTab.api.listShows();
+    const dShow = dShows.find((s) => s.id === dShowId);
+    demoTab.calAddStart('2031-06-10', 'team');
+    const dlgT = demoTab.calAddHTML(dShows);
+    ok('W2 (d) · the day-add dialog opens with both doors and folder → show selects from loaded data',
+       /data-act="calAddDoor" data-k="team"/.test(dlgT) && /data-act="calAddDoor" data-k="mine"/.test(dlgT)
+       && new RegExp(`<option value="${dShowId}"`).test(demoTab.calAddHTML(
+         (() => { demoTab.CAL_ADD.fk = demoTab.calFolderKey(dShow); return dShows; })()))
+       && /id="caLabel"/.test(dlgT));
+    const msRec = await demoTab.calAddSubmit('team', { show_id: dShowId, label: 'WALK dayadd milestone', date: '2031-06-10' });
+    const afterMs = draw(() => demoTab.calGo('2031-06-10'), await demoTab.api.listShows(), {});
+    ok('W2 (d) · TEAM door: the milestone is saved through api.addMilestone and renders IN the Jun 10 cell',
+       msRec && msRec.label === 'WALK dayadd milestone'
+       && chip2('openShow', dShowId, 'WALK dayadd milestone').test(at(afterMs.html, '2031-06-10'))
+       && cells2(afterMs.html).filter((c) => /WALK dayadd milestone/.test(c.html)).length === 1, afterMs.threw);
+    demoTab.calAddStart('2031-06-11', 'mine'); demoTab.CAL_ADD.fk = demoTab.calFolderKey(dShow); demoTab.CAL_ADD.sid = dShowId;
+    const dlgM = demoTab.calAddHTML(dShows);
+    const laneKey = (dlgM.match(/<select id="caLane"[^>]*><option value="([^"]+)"/) || [])[1];
+    ok('…the PERSONAL door offers the show type’s lanes', !!laneKey && /id="caTitle"/.test(dlgM), dlgM.slice(0, 300));
+    const tkRec = await demoTab.calAddSubmit('mine', { show_id: dShowId, title: 'WALK dayadd my task', lane: laneKey, date: '2031-06-11' });
+    const tkMine = await demoTab.api.myOpenSteps();
+    const afterTk = draw(() => demoTab.calGo('2031-06-11'), await demoTab.api.listShows(), { tasks: tkMine });
+    ok('W2 (d) · PERSONAL door: a task OWNED BY ME due that day (api.createStep) → a mine task chip in the Jun 11 cell',
+       tkRec && tkRec.owner === demoTab.ME && tkRec.due_date === '2031-06-11' && tkRec.lane === laneKey
+       && chip2('openShow', dShowId, 'WALK dayadd my task', 'mine').test(at(afterTk.html, '2031-06-11')), afterTk.threw);
+    let refused = null;
+    try { await demoTab.calAddSubmit('team', { show_id: dShowId, label: '   ', date: '2031-06-12' }); } catch (e) { refused = String(e.message || e); }
+    ok('…a refusal comes back as the seam’s own words (no label → “a milestone needs a label”)',
+       refused === 'a milestone needs a label', refused);
+
+    // day-add ROLE GATE — drawn only where the server would accept the write
+    const gate = (role, username) => {
+      demoTab.CURRENT_USER = Object.assign({}, cuUser, { role, username });
+      const h = draw(null).html;
+      demoTab.calSetMode('week'); const w = demoTab.viewCalendar(feed2, ctx2);
+      demoTab.calAddStart('2031-05-14', 'team'); const d = demoTab.calAddHTML(feed2);
+      demoTab.CURRENT_USER = cuUser;
+      return { month: h, week: w, dlg: d };
+    };
+    for (const role of ['viewer', 'tech']) {
+      const g = gate(role, 'dvargas');
+      ok(`W2 (d) · GATE · a ${role} gets no + and no right-click door (both routes are pm+)`,
+         !/data-act="calAdd"/.test(g.month) && !/data-act-ctx=/.test(g.month)
+         && !/data-act="calAdd"/.test(g.week) && !/data-act-ctx=/.test(g.week));
+    }
+    const gAdmin = gate('admin', demoTab.ME);
+    ok('W2 (d) · GATE · a manager+ gets the + on every month cell and week column, plus the right-click door',
+       (gAdmin.month.match(/class="cal-add" [^>]*data-act="calAdd"/g) || []).length === cells2(gAdmin.month).length
+       && (gAdmin.month.match(/data-act-ctx="calAdd"/g) || []).length === cells2(gAdmin.month).length
+       && (gAdmin.week.match(/data-act="calAdd"/g) || []).length === 7);
+    const gPm = gate('pm', 'lfarkos');
+    ok('W2 (d) · GATE · a pm gets the door, but the dialog offers ONLY the folders they own (+ the stub, on rank — the server decides)',
+       /data-act="calAdd"/.test(gPm.month) && /WALK w2 folder A/.test(gPm.dlg) && !/WALK w2 folder B/.test(gPm.dlg));
+    const gPmNone = gate('pm', 'nobody-owns-nothing');
+    ok('…a pm who owns none of them sees only the rank-alone stub folder, never somebody else’s',
+       !/WALK w2 folder A/.test(gPmNone.dlg) && !/WALK w2 folder B/.test(gPmNone.dlg));
+
+    // the demo twin of the new seam
+    const myCrew = await demoTab.api.myCrewShows();
+    const expectCrew = [];
+    demoTab.activeShows().forEach((s) => (s.crew_assignments || []).forEach((c) => {
+      if (c.username === demoTab.ME) expectCrew.push(s.id);
+    }));
+    ok('DEMO · api.myCrewShows() is ME’s crew lines on the working set, as {show_id, role_on_site}',
+       Array.isArray(myCrew) && expectCrew.length > 0 && myCrew.map((x) => x.show_id).join() === expectCrew.join()
+       && myCrew.every((x) => typeof x.role_on_site === 'string'), { got: myCrew, expectCrew });
+    let loaded = null, loadThrew = null;
+    try { loaded = await demoTab.calLoad(); } catch (e) { loadThrew = String(e && e.stack || e); }
+    ok('DEMO · calLoad() gathers shows + tasks + reports + crew + meetings with nothing refused',
+       loadThrew === null && loaded.shows.length > 0 && Array.isArray(loaded.ctx.tasks)
+       && loaded.ctx.errors.length === 0 && Array.isArray(loaded.ctx.meetings), loadThrew || (loaded && loaded.ctx.errors));
+
+    many.forEach((s) => { delete demoTab.PROJECTS_BY_ID[s.project_id]; });
+    delete demoTab.PROJECTS_BY_ID[PW]; delete demoTab.PROJECTS_BY_ID[PW2];
+    demoTab.CURRENT_USER = cuUser;
+    Object.assign(demoTab.CAL_UI, JSON.parse(cu2));
+  }
+  reach('Calendar wave 2 (Just mine · folder dropdown · day-add doors · open from the day list)',
+    { seam: ['myCrewShows', 'myOpenSteps', 'myReports', 'listMeetings', 'addMilestone', 'createStep'],
+      action: ['calJustMine', 'calFdd', 'calFolderBulk', 'calOpen', 'calAdd', 'calAddDoor', 'calAddCommit'] });
+  ok('…the type-ahead and the day-add selects ride the input / change delegation, and right-click has its own',
+     /data-act-input="calFolderQ"/.test(SRC['views-global.js']) && /\n\s{2}calFolderQ:\s*function/.test(APP_JS)
+     && /actChange\('calAddPick', null, 'folder'\)/.test(SRC['views-global.js']) && /\n\s{2}calAddPick:\s*function/.test(APP_JS)
+     && /addEventListener\('contextmenu'[^]*?data-act-ctx/.test(APP_JS) && /addEventListener\('input'[^]*?data-act-input/.test(APP_JS));
   reach('Calendar (month · week · range · list, filters, day list, print)',
     { action: ['calMode', 'calNav', 'calGo', 'calFilters', 'calFilter', 'calFilterReset',
                'calDay', 'calOpenShow', 'calPrint'] });

@@ -213,7 +213,10 @@ async function renderView(view, arg) {
     crumb([{ t: 'What changed' }]);
 
   } else if (view === 'calendar') {
-    s.innerHTML = viewCalendar(await api.listShows());
+    /* wave 2: the shows + my tasks / reports / crew list + the folders'
+       meetings, each extra source failing on its own (calLoad) */
+    var cal = await calLoad();
+    s.innerHTML = viewCalendar(cal.shows, cal.ctx);
     crumb([{ t: 'Calendar' }]);
 
   } else if (view === 'team') {
@@ -3452,14 +3455,86 @@ async function filesModeAct(mode) {
    like FILES_UI: the moves live beside the view (views-global.js, pure over
    CAL_UI) and every one of them just redraws the same listShows() feed. */
 async function calDayAct(iso) {
-  var shows = await api.listShows();
-  openModal(fmtDateFull(iso), calDayHTML(shows, iso));
+  var cal = await calLoad();
+  openModal(fmtDateFull(iso), calDayHTML(cal.shows, iso, cal.ctx));
 }
 async function calPrintAct() {
-  var shows = await api.listShows();
-  $('#printArea').innerHTML = calPrintHTML(shows) +
+  var cal = await calLoad();
+  $('#printArea').innerHTML = calPrintHTML(cal.shows, cal.ctx) +
     '<div class="pfoot"><span>e360 Showrunner — Calendar</span><span>printed ' + esc(fmtDateFull(TODAY_ISO)) + '</span></div>';
   window.print();
+}
+/* the folder dropdown's type-ahead: redraw ONLY the checkbox list, so the
+   input keeps its focus and caret while you type */
+function calFolderQAct(t) {
+  CAL_UI.fq = String(t.value || '');
+  var el = document.getElementById('calFddList');
+  if (el) el.innerHTML = calFolderListHTML(CAL_FDD, CAL_UI.fq);
+}
+function calFolderBulkAct(k) {
+  calFolderBulk(calFolderMatches(CAL_FDD, CAL_UI.fq).map(function (r) { return r.k; }), k === 'on');
+  return render('calendar');
+}
+/* close the day modal on the way to a folder / a report (calOpenShow's siblings) */
+function calOpenAct(id, k) {
+  closeM();
+  if (k === 'openFolder') return openFolder(id);
+  if (k === 'openReport') return openReportAct(id);
+  return openShow(id);
+}
+/* DAY-ADD (wave 2) — the dialog is drawn by calAddHTML (views-global.js);
+   these keep what was typed across a door / folder / show switch and commit
+   through calAddSubmit (the seam). The shows are the ones the dialog opened
+   with, so a redraw never refetches. */
+var CAL_ADD_SHOWS = [];
+function _vKeep(id, cur) { var el = document.getElementById(id); return el ? String(el.value || '') : cur; }
+function calAddCapture() {
+  if (!CAL_ADD) return;
+  CAL_ADD.label = _vKeep('caLabel', CAL_ADD.label);
+  CAL_ADD.title = _vKeep('caTitle', CAL_ADD.title);
+  CAL_ADD.lane = _vKeep('caLane', CAL_ADD.lane);
+}
+function calAddRedraw() {
+  var b = document.querySelector('#modal .modal-b');
+  if (b) b.innerHTML = calAddHTML(CAL_ADD_SHOWS);
+}
+async function calAddAct(iso) {
+  if (!calValidISO(iso) || !calCanAdd()) return;
+  CAL_ADD_SHOWS = await api.listShows();
+  calAddStart(iso, CAL_ADD && CAL_ADD.door);
+  openModal('Add on ' + fmtDateFull(iso), calAddHTML(CAL_ADD_SHOWS));
+}
+function calAddDoorAct(k) { calAddCapture(); CAL_ADD.door = k === 'mine' ? 'mine' : 'team'; calAddRedraw(); }
+function calAddPickAct(t, k) {
+  if (!CAL_ADD) return;
+  calAddCapture();
+  if (k === 'folder') { CAL_ADD.fk = String(t.value); CAL_ADD.sid = null; CAL_ADD.lane = ''; }
+  else if (k === 'show') { CAL_ADD.sid = Number(t.value); CAL_ADD.lane = ''; }
+  calAddRedraw();
+}
+async function calAddCommit() {
+  if (!CAL_ADD) return;
+  calAddCapture();
+  var p = CAL_ADD, team = p.door === 'team';
+  if (team && !p.label.trim()) { toast('A milestone needs a label', 'What is this date?'); return; }
+  if (!team && !p.title.trim()) { toast('A task needs a title', 'Say what has to happen'); return; }
+  var rec;
+  try {
+    rec = await calAddSubmit(p.door, { show_id: p.sid, label: p.label, title: p.title, lane: p.lane, date: p.iso });
+  } catch (e) { toast(team ? 'Milestone not added' : 'Task not added', String(e && e.message || e), 'err'); return; }
+  var s = SHOWS_BY_ID[p.sid] || CAL_ADD_SHOWS.filter(function (x) { return x.id === p.sid; })[0];
+  var where = s ? showLabel(s) : 'show ' + p.sid;
+  /* honest about the one way the new entry can be invisible: a filter */
+  var hiddenBy = (CAL_UI.hide.kind[team ? 'milestone' : 'task'] || (s && CAL_UI.hide.folder[calFolderKey(s)]) ||
+    (team && CAL_UI.justMine)) ? ' — your filters hide it; Reset to see it' : '';
+  CAL_ADD = null;
+  closeM();
+  if (team) toast('Milestone added', (rec.label || p.label) + ' · ' + fmtDate(rec.date || p.iso) + ' · ' + where + hiddenBy);
+  else {
+    toast('Task added — yours', (rec.title || p.title) + ' · due ' + fmtDate(rec.due_date || p.iso) + ' · ' + where + hiddenBy);
+    await updateMineCount();
+  }
+  return render('calendar');
 }
 
 /* ============================================================================
@@ -8263,6 +8338,16 @@ var ACTIONS = {
   calFilters:    function () { CAL_UI.filtersOpen = !CAL_UI.filtersOpen; return render('calendar'); },
   calFilter:     function (t, id, k) { calToggle(k); return render('calendar'); },
   calFilterReset: function () { calFilterReset(); return render('calendar'); },
+  /* calendar wave 2 (9/24) — the personal layer, the folder dropdown, day-add */
+  calJustMine:   function () { calSetJustMine(); return render('calendar'); },
+  calFdd:        function () { CAL_UI.fddOpen = !CAL_UI.fddOpen; return render('calendar'); },
+  calFolderQ:    function (t) { return calFolderQAct(t); },
+  calFolderBulk: function (t, id, k) { return calFolderBulkAct(k); },
+  calOpen:       function (t, id, k) { return calOpenAct(id, k); },
+  calAdd:        function (t, id, k) { return calAddAct(k); },
+  calAddDoor:    function (t, id, k) { return calAddDoorAct(k); },
+  calAddPick:    function (t, id, k) { return calAddPickAct(t, k); },
+  calAddCommit:  function () { return calAddCommit(); },
   calDay:        function (t, id, k) { return calDayAct(k); },
   calOpenShow:   function (t, id) { closeM(); return openShow(id); },
   calPrint:      function () { return calPrintAct(); },
@@ -8738,6 +8823,31 @@ document.addEventListener('change', function (ev) {
   var idAttr = t.getAttribute('data-id');
   var id = idAttr === null || idAttr === '' ? null : Number(idAttr);
   var r = fn(t, id, t.getAttribute('data-k'));
+  if (r && r.catch) r.catch(function (e) { console.error(e); toast('Something went wrong', String(e && e.message || e), 'err'); });
+});
+
+/* the INPUT half — a type-ahead that filters in place (the Calendar's folder
+   dropdown). Same ACTIONS table, same (target, id, k) call. */
+document.addEventListener('input', function (ev) {
+  var t = ev.target && ev.target.closest ? ev.target.closest('[data-act-input]') : null;
+  if (!t) return;
+  if (bootGate()) return;
+  var fn = ACTIONS[t.getAttribute('data-act-input')];
+  if (!fn) return;
+  var r = fn(t, null, t.getAttribute('data-k'));
+  if (r && r.catch) r.catch(function (e) { console.error(e); toast('Something went wrong', String(e && e.message || e), 'err'); });
+});
+/* the RIGHT-CLICK half — only where a view drew [data-act-ctx] (a Calendar
+   day). Everywhere else the browser's own menu is left alone; phones have no
+   right-click, so every [data-act-ctx] also carries a visible button. */
+document.addEventListener('contextmenu', function (ev) {
+  var t = ev.target && ev.target.closest ? ev.target.closest('[data-act-ctx]') : null;
+  if (!t) return;
+  var fn = ACTIONS[t.getAttribute('data-act-ctx')];
+  if (!fn) return;
+  ev.preventDefault();
+  if (bootGate()) return;
+  var r = fn(t, null, t.getAttribute('data-k'));
   if (r && r.catch) r.catch(function (e) { console.error(e); toast('Something went wrong', String(e && e.message || e), 'err'); });
 });
 

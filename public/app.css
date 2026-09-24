@@ -679,6 +679,42 @@ button.cal-dn:hover{background:var(--surface-2); color:var(--text)}
 .cal-none{color:var(--muted); font-size:12px; padding:2px 3px}
 .cal-group.today h4{color:var(--accent)}
 .cal-daylist .cal-item{margin-bottom:6px}
+/* wave 2 — mine mark · Just mine · Reset · folder dropdown · day-add */
+.mine-dot{display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--accent); flex:none; margin-right:5px; vertical-align:middle}
+.cal-legend i.mine-dot{width:7px; height:7px; border-radius:50%; margin-right:0}
+.cal-chip.mine{position:relative; padding-right:15px}
+.cal-chip.mine::after{content:''; position:absolute; right:5px; top:50%; width:6px; height:6px; margin-top:-3px; border-radius:50%; background:var(--accent)}
+.cal-item.mine .ci-mk{border-color:var(--accent); color:var(--accent)}
+.cal-f.cal-jm{text-decoration:none}
+.cal-f.cal-jm.on{border-color:var(--accent); color:var(--accent); background:var(--accent-ghost)}
+.cal-fh{display:flex; align-items:center; justify-content:space-between; gap:10px; width:100%; flex-wrap:wrap}
+.cal-fh b{font-size:12.5px}
+.cal-reset[disabled]{opacity:.45; cursor:default}
+.cal-fdd{min-width:0; max-width:100%}
+.cal-fdd-pop{margin-top:6px; background:var(--surface-2); border:1px solid var(--border-strong); border-radius:var(--r); padding:8px; width:360px; max-width:100%}
+.cal-fdd-pop input{width:100%}
+.cal-fdd-bulk{display:flex; align-items:center; gap:12px; margin:7px 2px 4px; font-family:var(--font-mono); font-size:10.5px; color:var(--muted)}
+.cal-fdd-list{max-height:260px; overflow:auto}
+.cal-fdd-row{display:flex; align-items:center; gap:8px; font-size:12.5px; padding:4px 6px; border-radius:5px; cursor:pointer; min-width:0}
+.cal-fdd-row:hover{background:var(--surface)}
+.cal-fdd-row .fl{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.cal-fdd-row .sc{font-family:var(--font-mono); font-size:10.5px; color:var(--muted)}
+.cal-cell{position:relative}
+.cal-add{display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; padding:0; border:1px solid var(--border-strong); border-radius:50%; background:var(--surface); color:var(--text-2); opacity:0; transition:opacity .12s}
+.cal-add svg{width:12px; height:12px}
+.cal-cell .cal-add{position:absolute; top:4px; right:4px}
+.cal-wh .cal-add{margin-left:auto}
+.cal-cell:hover .cal-add,.cal-wcol:hover .cal-add,.cal-add:focus-visible{opacity:1}
+.cal-add:hover{border-color:var(--accent); color:var(--accent)}
+@media (hover:none){ .cal-add{opacity:1} }
+.cal-doors{display:flex; width:100%}
+.cal-doors button{flex:1}
+.cal-addgrid{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:10px}
+.cal-addgrid.one{grid-template-columns:1fr}
+.cal-addf{display:flex; flex-direction:column; gap:5px; font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.07em; font-weight:600; min-width:0}
+.cal-addfoot{display:flex; justify-content:flex-end; gap:9px; margin-top:12px}
+@media(max-width:640px){ .cal-addgrid{grid-template-columns:1fr} .cal-cell .cal-add{width:18px; height:18px; top:2px; right:2px} }
+#printArea .cal-add{display:none!important}
 @media(max-width:1080px){ .cal-week{grid-template-columns:repeat(4,minmax(0,1fr))} }
 /* phones: month chips collapse to dots + a count (the day opens its list);
    week columns stack */

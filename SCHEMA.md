@@ -1174,6 +1174,7 @@ shape `api.js` returns, so each body becomes `return fetch(...).then(r => r.json
 | **F5** `confirmShow(sid)` | `POST /api/shows/:id/confirm` |
 | **F2** `markStruck(sid)` | `POST /api/shows/:id/struck` |
 | **F2** `listTechReports` / `getTechReport` / `myReports` | `GET /api/shows/:id/tech-reports` · `GET /api/tech-reports/:id` · `GET /api/me/reports` |
+| **Cal** `myCrewShows()` | `GET /api/me/crew` — the session's own crew lines `{show_id, role_on_site}` (Calendar "mine" mark) |
 | **F2** `fileTechReport` / `reviewTechReport` / `reopenTechReport` / `nagTechReports` | `POST /api/shows/:id/tech-report` · `POST /api/tech-reports/:id/{review,reopen}` · `POST /api/shows/:id/tech-reports/nag` |
 | **F3** `notificationPrefs` / `setNotificationPrefs` | `GET`/`PUT /api/me/notification-prefs` |
 | **F3** `myNotifications` / `mailStatus` / `flushNotifications` | `GET /api/me/notifications` · `GET /api/admin/mail-status` · `POST /api/admin/notifications/flush` |

@@ -4744,6 +4744,23 @@ var api = (function () {
         return rows || [];
       });
     },
+    /* Calendar wave 2 (9/24) — the shows I am CREWED on, as {show_id,
+       role_on_site} rows. A show listing never carries crew lines (only the
+       per-show read does), so the live half asks GET /api/me/crew — the
+       session's own rows, no username param. The demo twin walks the working
+       set's crew lines for ME, the same rows that route selects. */
+    myCrewShows: function () {
+      if (!API()) {
+        var out = [];
+        activeShows().forEach(function (s) {
+          (s.crew_assignments || []).forEach(function (c) {
+            if (c.username && c.username === ME) out.push({ show_id: s.id, role_on_site: c.role_on_site || '' });
+          });
+        });
+        return ok(out);
+      }
+      return SR.get('/api/me/crew').then(function (rows) { return rows || []; });
+    },
     /* file MINE. Two forms, one obligation: write it in-app, or point at the
        doc you already uploaded. Written text lands in the folder's Files too. */
     fileTechReport: function (showId, payload) {

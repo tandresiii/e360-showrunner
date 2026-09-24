@@ -616,6 +616,19 @@ router.get('/shows/:id/crew', asyncH(async (req, res) => {
   res.json((await crewRows(showId)).map((row) => hydrateCrew(row, roster)));
 }));
 
+// GET /api/me/crew — the shows the SIGNED-IN person is crewed on, across
+// every show (Calendar wave 2, 9/24: "shows I'm crewed on" get a mine mark
+// and are what "Just mine" keeps). A listing never carries crew lines — only
+// the per-show read does — so without this the live Calendar could only learn
+// it with one GET per show. Always the session's own rows: there is no
+// username parameter, so this cannot be used to read somebody else's roster.
+router.get('/me/crew', asyncH(async (req, res) => {
+  const r = await pool.query(
+    `SELECT show_id, role_on_site FROM crew_assignments
+      WHERE LOWER(username) = LOWER($1) ORDER BY show_id, id`, [String(req.session.username || '')]);
+  res.json(r.rows.map((x) => ({ show_id: x.show_id, role_on_site: x.role_on_site || '' })));
+}));
+
 // A crew line is either one of ours (username) or a local hire (name + phone).
 function crewLabel(row) {
   return row.username || row.name || 'crew';
