@@ -620,6 +620,91 @@ button.next-item>svg{width:16px; height:16px; flex:none; color:var(--muted)}
 .cal-item .ci-b b{font-weight:600; font-size:13.5px}
 .cal-item .ci-b span{display:block; color:var(--muted); font-size:11.5px; margin-top:1px}
 .cal-item .ci-mk{font-family:var(--font-mono); font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--text-2); border:1px solid var(--border-strong); padding:2px 8px; border-radius:20px; flex:none}
+/* 9/24 — the real calendar: month grid · week columns · range · list.
+   Chips are tinted by show TYPE (the .tag triad) and railed by entry KIND
+   (--k, a LANES colour set inline). */
+.cal-item{border-left:3px solid var(--k,var(--border))}
+.cal-bar{display:flex; align-items:center; justify-content:space-between; gap:10px 14px; flex-wrap:wrap; margin-bottom:12px}
+.cal-nav{display:flex; align-items:center; gap:6px; min-width:0}
+.cal-title{font-size:19px; font-weight:800; margin-left:6px; white-space:nowrap}
+.cal-tools{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+.cal-tools .btn.on{border-color:var(--accent); color:var(--accent)}
+.cal-range{display:flex; gap:12px; flex-wrap:wrap; margin-bottom:12px}
+.cal-range label{display:flex; align-items:center; gap:7px; font-size:12px; color:var(--muted); font-weight:600}
+.cal-range input{width:auto}
+.cal-filters{display:flex; flex-direction:column; gap:10px; background:var(--surface); border:1px solid var(--border); border-radius:var(--r); padding:12px 14px; margin-bottom:12px; align-items:flex-start}
+.cal-fg{display:flex; gap:10px; align-items:baseline; flex-wrap:wrap}
+.cal-fg h5{margin:0; font-family:var(--font-mono); font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); width:104px; flex:none}
+.cal-fg > div{display:flex; flex-wrap:wrap; gap:6px; min-width:0; flex:1}
+.cal-f{display:inline-flex; align-items:center; gap:6px; border:1px solid var(--border); background:none; color:var(--muted); font-size:12px; font-weight:600; padding:3px 10px; border-radius:20px; text-decoration:line-through; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.cal-f.on{background:var(--surface-2); border-color:var(--border-strong); color:var(--text); text-decoration:none}
+.cal-f i{width:8px; height:8px; border-radius:50%; flex:none; opacity:.45}
+.cal-f.on i{opacity:1}
+.cal-f .sc{font-family:var(--font-mono); font-size:10.5px; color:var(--muted)}
+.cal-legend{display:flex; flex-wrap:wrap; gap:6px 14px; align-items:center; font-size:11.5px; color:var(--text-2); margin-bottom:10px}
+.cal-legend > span{display:inline-flex; align-items:center; gap:6px}
+.cal-legend i{width:10px; height:3px; border-radius:2px; display:inline-block}
+.cal-notes{display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; font-size:12px; color:var(--muted); margin-bottom:10px}
+.cal-month{background:var(--surface); border:1px solid var(--border); border-radius:var(--r); overflow:hidden}
+.cal-wds,.cal-grid{display:grid; grid-template-columns:repeat(7,minmax(0,1fr))}
+.cal-wds div{font-family:var(--font-mono); font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); padding:7px 8px; border-bottom:1px solid var(--border)}
+.cal-cell{min-height:104px; padding:5px 5px 6px; border-right:1px solid var(--border); border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:3px; min-width:0}
+.cal-cell:nth-child(7n){border-right:0}
+.cal-cell.out{background:var(--surface-2)}
+.cal-cell.out .cal-dn{color:var(--muted); opacity:.7}
+.cal-dn{align-self:flex-start; font-family:var(--font-mono); font-size:11.5px; font-weight:600; color:var(--text-2); background:none; border:0; padding:1px 5px; border-radius:20px; line-height:1.5}
+button.cal-dn:hover{background:var(--surface-2); color:var(--text)}
+.cal-cell.today .cal-dn,.cal-wcol.today .cal-wh b{background:var(--accent); color:var(--on-accent)}
+.cal-cell.today{box-shadow:inset 0 0 0 1px var(--accent)}
+.cal-chips{display:flex; flex-direction:column; gap:3px; min-width:0}
+.cal-chip{display:block; width:100%; text-align:left; border:1px solid var(--border); border-left:3px solid var(--k,var(--border-strong)); background:var(--surface-2); color:var(--text); font-size:11.5px; line-height:1.35; padding:2px 6px; border-radius:5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0}
+.cal-chip b{font-weight:600}
+.cal-chip .cc-w{color:var(--text-2)}
+.cal-chip.t-led{background:var(--accent-ghost)}
+.cal-chip.t-print{background:var(--info-ghost)}
+.cal-chip.t-both{background:var(--warn-ghost)}
+.cal-chip:hover{border-color:var(--border-strong)}
+.cal-more{align-self:flex-start; background:none; border:0; color:var(--accent); font-size:11px; font-weight:600; padding:0 4px}
+.cal-mini{display:none; align-items:center; gap:3px; background:none; border:0; padding:2px 3px; color:var(--text-2); font-family:var(--font-mono); font-size:10.5px}
+.cal-mini i{width:6px; height:6px; border-radius:50%; flex:none}
+.cal-week{display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:8px}
+.cal-wcol{background:var(--surface); border:1px solid var(--border); border-radius:var(--r); min-height:220px; display:flex; flex-direction:column; min-width:0}
+.cal-wcol.today{border-color:var(--accent)}
+.cal-wh{display:flex; align-items:baseline; gap:6px; padding:8px 10px; border-bottom:1px solid var(--border); font-family:var(--font-mono); font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted)}
+.cal-wh b{font-family:var(--font-display); font-size:17px; color:var(--text); letter-spacing:-.02em; padding:0 6px; border-radius:20px}
+.cal-wbody{padding:7px; display:flex; flex-direction:column; gap:5px}
+.cal-wbody .cal-chip{white-space:normal; padding:5px 7px}
+.cal-wbody .cal-chip .cc-w,.cal-wbody .cal-chip .cc-v{display:block}
+.cal-chip .cc-v{color:var(--muted); font-size:10.5px}
+.cal-none{color:var(--muted); font-size:12px; padding:2px 3px}
+.cal-group.today h4{color:var(--accent)}
+.cal-daylist .cal-item{margin-bottom:6px}
+@media(max-width:1080px){ .cal-week{grid-template-columns:repeat(4,minmax(0,1fr))} }
+/* phones: month chips collapse to dots + a count (the day opens its list);
+   week columns stack */
+@media(max-width:560px){
+  .cal-cell{min-height:54px; padding:3px 2px}
+  .cal-cell .cal-chips{display:none}
+  .cal-cell .cal-mini{display:flex}
+  .cal-dn{font-size:11px; padding:0 4px}
+  .cal-wds div{padding:6px 2px; text-align:center; font-size:9px; letter-spacing:.02em}
+  .cal-week{grid-template-columns:1fr}
+  .cal-wcol{min-height:0}
+  .cal-title{font-size:16px}
+  .cal-fg h5{width:100%}
+}
+/* print: the calendar sheet carries its own LIGHT tokens (the screen may be
+   dark) and always prints chips, never the phone dots */
+#printArea .cal-print{--surface:#fff; --surface-2:#F4F6F5; --border:#CCD5D1; --border-strong:#9AA8A2; --text:#111; --text-2:#333; --muted:#666;
+  --accent:#0F9E68; --on-accent:#fff; --accent-ghost:rgba(15,158,104,.10); --info-ghost:rgba(42,121,201,.12); --warn-ghost:rgba(182,124,12,.12);
+  color:#111; -webkit-print-color-adjust:exact; print-color-adjust:exact}
+#printArea .cal-print h2{font-size:18px; margin-bottom:10px}
+#printArea .cal-cell .cal-chips{display:flex!important}
+#printArea .cal-mini,#printArea .cal-more{display:none!important}
+#printArea .cal-cell{min-height:90px}
+#printArea .cal-week{grid-template-columns:repeat(7,minmax(0,1fr))!important}
+#printArea .cal-chip{white-space:normal}
+@media print{ #printArea .cal-cell,#printArea .cal-wcol,#printArea .cal-group{page-break-inside:avoid} }
 
 /* ---------- settings ---------- */
 .set-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:14px}

@@ -3448,6 +3448,20 @@ async function filesModeAct(mode) {
   return render('files');
 }
 
+/* CALENDAR (9/24) — mode · nav · range · filters. CAL_UI is in-memory state
+   like FILES_UI: the moves live beside the view (views-global.js, pure over
+   CAL_UI) and every one of them just redraws the same listShows() feed. */
+async function calDayAct(iso) {
+  var shows = await api.listShows();
+  openModal(fmtDateFull(iso), calDayHTML(shows, iso));
+}
+async function calPrintAct() {
+  var shows = await api.listShows();
+  $('#printArea').innerHTML = calPrintHTML(shows) +
+    '<div class="pfoot"><span>e360 Showrunner — Calendar</span><span>printed ' + esc(fmtDateFull(TODAY_ISO)) + '</span></div>';
+  window.print();
+}
+
 /* ============================================================================
    CLIENT RECAP ACTIONS — generate · edit in place · approve · mark sent ·
    reopen · preview/print the client sheet  (recap pass)
@@ -8241,6 +8255,17 @@ var ACTIONS = {
   phCapSave:     function (t, id) { return phCapSaveAct(id); },
   phCapCancel:   function () { return phCapCancelAct(); },
   filesMode:     function (t, id, k) { return filesModeAct(k); },
+  /* calendar (9/24) */
+  calMode:       function (t, id, k) { calSetMode(k); return render('calendar'); },
+  calNav:        function (t, id, k) { calNav(k); return render('calendar'); },
+  calGo:         function (t, id, k) { calGo(k); return render('calendar'); },
+  calRange:      function (t, id, k) { calSetRange(k, t.value); return render('calendar'); },
+  calFilters:    function () { CAL_UI.filtersOpen = !CAL_UI.filtersOpen; return render('calendar'); },
+  calFilter:     function (t, id, k) { calToggle(k); return render('calendar'); },
+  calFilterReset: function () { calFilterReset(); return render('calendar'); },
+  calDay:        function (t, id, k) { return calDayAct(k); },
+  calOpenShow:   function (t, id) { closeM(); return openShow(id); },
+  calPrint:      function () { return calPrintAct(); },
   /* client recap (recap pass) */
   rcGenerate:    function (t, id) { return rcGenerateAct(id); },
   rcEdit:        function (t, id, k) { return rcEditAct(id, k); },

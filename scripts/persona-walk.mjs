@@ -1281,8 +1281,10 @@ async function main() {
   // the Calendar's other half: a show created through the product seeds no
   // milestone rows, so the view now folds the show's own three dates in —
   // asserted over the source, the way the toast/placeholder checks are.
-  const calSrc = SRC['views-global.js'].slice(SRC['views-global.js'].indexOf('function viewCalendar'));
-  ok('viewCalendar folds the show’s own load-in / event / strike dates',
+  // (9/24: the feed moved out of viewCalendar into calendarItems — the ONE
+  // place that decides what is a calendar entry; every mode renders over it)
+  const calSrc = SRC['views-global.js'].slice(SRC['views-global.js'].indexOf('function calendarItems'));
+  ok('calendarItems folds the show’s own load-in / event / strike dates',
      /load_in_date/.test(calSrc.slice(0, 2000)) && /strike_date/.test(calSrc.slice(0, 2000)));
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1503,6 +1505,145 @@ async function main() {
        dSaved && dSaved.status === 'done' && !dAfter.some((m) => m.step.id === dMineStep.id),
        { saved: dSaved && dSaved.status });
   }
+  {
+    /* 9/24 · THE REAL CALENDAR — executed renders over a planted feed, two
+       months apart (March + April 2031, far from any seeded date). March 1
+       2031 is a Saturday, so the 11th sits at grid ordinal 16 (row 2, Tue)
+       of a 6-week grid; the stub's day, the 13th, at ordinal 18 (Thu).
+       Folder A holds show A + show C; the STUB has no .project, no type, no
+       venue, no milestones, and a folder id nothing knows (9/23 crash shape). */
+    const cu = JSON.stringify(demoTab.CAL_UI);
+    const PA = 777701, PB = 777702, PSTUB = 313131;
+    const cA = { id: 900001, project_id: PA, name: 'WALK cal A', type: 'led', venue: 'Hall A',
+      load_in_date: '2031-03-10', event_date: '2031-03-11', strike_date: '2031-03-12',
+      milestones: [{ label: 'Freight', date: '2031-03-03' }] };
+    const cC = { id: 900004, project_id: PA, name: 'WALK cal C', type: 'led', venue: 'Hall C',
+      milestones: [{ label: 'M1', date: '2031-03-11' }, { label: 'M2', date: '2031-03-11' },
+                   { label: 'M3', date: '2031-03-11' }] };
+    const cB = { id: 900002, project_id: PB, name: 'WALK cal B', type: 'print', venue: 'Hall B',
+      event_date: '2031-04-15', milestones: [] };
+    const cStub = { id: 900003, project_id: PSTUB, name: 'WALK cal stub', event_date: '2031-03-13' };
+    demoTab.PROJECTS_BY_ID[PA] = { id: PA, name: 'WALK cal folder A', client: 'WALK client A', shows: [cA, cC] };
+    demoTab.PROJECTS_BY_ID[PB] = { id: PB, name: 'WALK cal folder B', client: 'WALK client B', shows: [cB] };
+    const feed = [cA, cB, cC, cStub];
+    const cells = (h) => h.split('<div class="cal-cell').slice(1)
+      .map((seg) => ({ date: (seg.match(/data-date="([\d-]+)"/) || [])[1], html: seg }));
+    const wcols = (h) => h.split('<div class="cal-wcol').slice(1)
+      .map((seg) => ({ date: (seg.match(/data-date="([\d-]+)"/) || [])[1],
+                       wd: Number((seg.match(/data-wd="(\d)"/) || [])[1]), html: seg }));
+    const chipOf = (id, label) => new RegExp(
+      `<button class="cal-chip[^"]*"[^>]*data-act="openShow" data-id="${id}"[^>]*><b>${label}</b>`);
+    const render = (setup) => {
+      demoTab.CAL_UI.mode = 'month'; demoTab.CAL_UI.anchor = null; demoTab.CAL_UI.range = null;
+      demoTab.calFilterReset(); setup();
+      let html = null, threw = null;
+      try { html = demoTab.viewCalendar(feed); } catch (e) { threw = String(e && e.stack || e); }
+      return { html, threw };
+    };
+
+    const mar = render(() => { demoTab.calGo('2031-03-11'); });
+    const mc = mar.html ? cells(mar.html) : [];
+    const i11 = mc.findIndex((c) => c.date === '2031-03-11');
+    ok('DEMO RENDER · Calendar month grid: Mar 11 2031 is grid cell 16 (row 2, Tuesday) of a 6-week March',
+       mar.threw === null && i11 === 16 && mc.length === 42 && mc[0].date === '2031-02-23',
+       mar.threw || { i11, n: mc.length, first: mc[0] && mc[0].date });
+    ok('…show A’s event-day chip lands IN that cell, carrying its show’s openShow target',
+       i11 >= 0 && chipOf(900001, 'Show day').test(mc[i11].html), mc[i11] && mc[i11].html.slice(0, 300));
+    ok('…and in no other cell (load-in on the 10th, strike on the 12th, freight on the 3rd)',
+       mc.filter((c) => chipOf(900001, 'Show day').test(c.html)).length === 1
+       && chipOf(900001, 'Load-in').test(mc[i11 - 1].html)
+       && chipOf(900001, 'Strike').test(mc[i11 + 1].html)
+       && chipOf(900001, 'Freight').test((mc.find((c) => c.date === '2031-03-03') || {}).html || ''));
+    ok('DEMO RENDER · a bare STUB show (no .project, type, venue) renders its chip by name — no TypeError',
+       mar.threw === null && chipOf(900003, 'Show day').test(mc[i11 + 2].html)
+       && mc[i11 + 2].date === '2031-03-13' && mc[i11 + 2].html.indexOf('WALK cal stub') >= 0);
+    ok('…a crowded day shows 3 chips and “+1 more” opening the day (4 entries on the 11th)',
+       (mc[i11].html.match(/class="cal-chip /g) || []).length === 3
+       && /data-act="calDay" data-k="2031-03-11">\+1 more</.test(mc[i11].html));
+    ok('…and the phone dots carry the full count for the same day',
+       /class="cal-mini"[^>]*data-act="calDay" data-k="2031-03-11">(?:<i[^>]*><\/i>){3}<span>4<\/span>/.test(mc[i11].html));
+    ok('…March does not draw April’s show', mar.html && mar.html.indexOf('data-id="900002"') < 0);
+
+    demoTab.calNav('next');
+    const aprHtml = demoTab.viewCalendar(feed);
+    const ac = cells(aprHtml);
+    const i15 = ac.findIndex((c) => c.date === '2031-04-15');
+    ok('DEMO RENDER · Next → April 2031: B’s event lands on the 15th (grid cell 16, Tue), March’s shows gone',
+       /April 2031/.test(aprHtml) && i15 === 16 && chipOf(900002, 'Install day').test(ac[i15].html)
+       && aprHtml.indexOf('data-id="900001"') < 0, { i15 });
+    ok('…today is highlighted only when it is on the grid (never in 2031)', !/cal-cell[^"]*today/.test(aprHtml));
+
+    const wk = render(() => { demoTab.calGo('2031-03-11'); demoTab.calSetMode('week'); });
+    const wc = wk.html ? wcols(wk.html) : [];
+    ok('DEMO RENDER · Week view: 7 columns Sun Mar 9 → Sat Mar 15, the 11th in column 2 (Tue)',
+       wk.threw === null && wc.length === 7 && wc[0].date === '2031-03-09' && wc[6].date === '2031-03-15'
+       && wc[2].date === '2031-03-11' && wc[2].wd === 2, wk.threw || wc.map((c) => c.date));
+    ok('…A’s event chip is in the Tuesday column, its load-in in Monday’s, the stub in Thursday’s',
+       wc.length === 7 && chipOf(900001, 'Show day').test(wc[2].html) && chipOf(900001, 'Load-in').test(wc[1].html)
+       && !chipOf(900001, 'Show day').test(wc[1].html) && chipOf(900003, 'Show day').test(wc[4].html));
+    demoTab.calNav('next');
+    const wc2 = wcols(demoTab.viewCalendar(feed));
+    ok('…Next steps exactly one week (Mar 16 → 22)', wc2[0].date === '2031-03-16' && wc2[6].date === '2031-03-22');
+
+    const flt = render(() => { demoTab.calGo('2031-03-11'); demoTab.calToggle('folder:' + PSTUB); });
+    const fc = cells(flt.html);
+    const f11 = fc.find((c) => c.date === '2031-03-11');
+    ok('DEMO RENDER · Filter: switching the stub’s folder OFF removes its chip from the grid…',
+       flt.threw === null && flt.html.indexOf('data-id="900003"') < 0, flt.threw);
+    ok('…and leaves everything else: A’s four chips still where they were',
+       chipOf(900001, 'Show day').test(f11.html) && chipOf(900001, 'Load-in').test(fc[15].html)
+       && chipOf(900001, 'Strike').test(fc[17].html)
+       && chipOf(900001, 'Freight').test(fc.find((c) => c.date === '2031-03-03').html));
+    ok('…the grid says so (1 of 9 entries hidden) and the stub’s day is left empty',
+       /1 of 9 entries hidden by filters/.test(flt.html) && !/cal-chip/.test(fc[18].html) && fc[18].date === '2031-03-13');
+    demoTab.calToggle('kind:load_in');
+    const f2 = demoTab.viewCalendar(feed);
+    ok('…a KIND filter drops the load-in and nothing else',
+       !chipOf(900001, 'Load-in').test(f2) && chipOf(900001, 'Strike').test(f2) && chipOf(900001, 'Freight').test(f2));
+    demoTab.calToggle('folder:' + PA);
+    const f3 = demoTab.viewCalendar(feed);
+    ok('…a FOLDER (= client) filter drops every show in that folder, both A and C',
+       f3.indexOf('data-id="900001"') < 0 && f3.indexOf('data-id="900004"') < 0);
+    demoTab.calFilterReset();
+    ok('…and Show everything brings them all back',
+       /data-id="900003"/.test(demoTab.viewCalendar(feed)) && /data-id="900004"/.test(demoTab.viewCalendar(feed)));
+    demoTab.CAL_UI.filtersOpen = true;
+    const fp = demoTab.viewCalendar(feed);
+    demoTab.CAL_UI.filtersOpen = false;
+    ok('…the filter panel offers the planted folders by name, the stub’s by its show name',
+       /data-k="folder:777701"[^>]*>WALK cal folder A · WALK client A/.test(fp)
+       && /data-k="folder:313131"[^>]*>WALK cal stub/.test(fp));
+
+    const rg = render(() => { demoTab.calSetMode('range'); demoTab.calSetRange('from', '2031-03-10');
+      demoTab.calSetRange('to', '2031-03-13'); });
+    const rDays = rg.html ? [...rg.html.matchAll(/<div class="cal-group[^"]*" data-date="([\d-]+)"/g)].map((m) => m[1]) : [];
+    ok('DEMO RENDER · Range Mar 10 → 13 lists exactly the four dated days in it, freight (Mar 3) outside it',
+       rg.threw === null && rDays.join(',') === '2031-03-10,2031-03-11,2031-03-12,2031-03-13'
+       && rg.html.indexOf('Freight') < 0 && rg.html.indexOf('WALK cal stub') >= 0, rg.threw || rDays);
+
+    const ls = render(() => { demoTab.calSetMode('list'); });
+    ok('DEMO RENDER · the original List survives behind the toggle, stub row included',
+       ls.threw === null && /class="cal-group"><h4>March 2031<\/h4>/.test(ls.html)
+       && ls.html.indexOf('WALK cal stub') >= 0 && (ls.html.match(/class="cal-item"/g) || []).length === 9,
+       ls.threw || (ls.html.match(/class="cal-item"/g) || []).length);
+
+    demoTab.CAL_UI.mode = 'month'; demoTab.calGo('2031-03-11');
+    let pr = null, dy = null, pdThrew = null;
+    try { pr = demoTab.calPrintHTML(feed); dy = demoTab.calDayHTML(feed, '2031-03-11'); }
+    catch (e) { pdThrew = String(e); }
+    ok('DEMO RENDER · print draws EVERY chip (no “+N more”), the day modal lists all 4 and closes on open',
+       pdThrew === null && (cells(pr).find((c) => c.date === '2031-03-11').html.match(/class="cal-chip /g) || []).length === 4
+       && (dy.match(/data-act="calOpenShow"/g) || []).length === 4, pdThrew);
+
+    delete demoTab.PROJECTS_BY_ID[PA]; delete demoTab.PROJECTS_BY_ID[PB];
+    Object.assign(demoTab.CAL_UI, JSON.parse(cu));
+  }
+  reach('Calendar (month · week · range · list, filters, day list, print)',
+    { action: ['calMode', 'calNav', 'calGo', 'calFilters', 'calFilter', 'calFilterReset',
+               'calDay', 'calOpenShow', 'calPrint'] });
+  ok('…the range pickers ride the change delegation',
+     /actChange\('calRange', null, 'from'\)/.test(SRC['views-global.js'])
+     && /\n\s{2}calRange:\s*function/.test(APP_JS));
 
   // ══════════════════════════════════════════════════════════════════════════
   section('23 · a note taken back, a key minted once');

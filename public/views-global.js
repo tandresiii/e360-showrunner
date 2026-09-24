@@ -73,15 +73,65 @@ function viewMyTasks(mine, owedReports) {
 }
 
 /* ============================================================================
-   CALENDAR — milestones across every show; lane-agnostic
+   CALENDAR — milestones + each show's own production dates, across every show
+   ----------------------------------------------------------------------------
+   Jim via Tom, 9/24: "a real calendar on the Calendar tab to help visualize
+   the sequencing" — then Tom: "make it dynamic. week view, month, date range,
+   etc. allow for showing hiding stuff, by client, by whatever."
+
+   ONE feed: calendarItems() decides what qualifies as an entry, and nothing
+   else does. Month grid · week columns · date range · the original list are
+   all PRESENTATION over that one array, and the filters only ever hide rows of
+   it. Both modes (file:// demo and live) hand the same listShows() shape in.
+
+   STUB-SAFE: a show reaching a global view can be a bare stub with no
+   .project (9/23 prod crash). Labels go through showLabel(); the one
+   project.client read is guarded; folder names come from PROJECTS_BY_ID with
+   a fallback, never from an inline show.project read.
    ========================================================================== */
-function viewCalendar(shows) {
+var CAL_UI = {
+  mode: 'month',                               /* month | week | range | list */
+  anchor: null,                                /* ISO day the month/week is drawn around; null = today */
+  range: null,                                 /* { from, to } ISO; null = the current view's window */
+  hide: { kind: {}, folder: {}, type: {} },    /* what is switched OFF — empty = everything on */
+  filtersOpen: false
+};
+var CAL_MODES = [['month', 'Month'], ['week', 'Week'], ['range', 'Range'], ['list', 'List']];
+/* entry kinds, each tinted from the LANES catalog (never a new palette):
+   load-in rides logistics, the show/install day rides crew, strike rides
+   return, and a free-standing milestone rides deliverables. */
+var CAL_KINDS = [
+  ['load_in', 'Load-in', 'logistics'],
+  ['event', 'Show / install day', 'crew'],
+  ['strike', 'Strike', 'return'],
+  ['milestone', 'Milestone', 'deliverables']
+];
+var CAL_WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+var CAL_MAX_CHIPS = 3;
+
+function calKindColor(k) {
+  for (var i = 0; i < CAL_KINDS.length; i++) {
+    if (CAL_KINDS[i][0] === k) return (LANES[CAL_KINDS[i][2]] || {}).color || 'var(--muted)';
+  }
+  return 'var(--muted)';
+}
+
+/* THE FEED — unchanged in what it admits: every milestone, plus the show row's
+   load-in / event / strike dates. */
+function calendarItems(shows) {
   var items = [];
-  shows.forEach(function (s) {
+  (shows || []).forEach(function (s) {
+    if (!s) return;
     var taken = {};
+    /* which production date a day IS — classification only (for the kind
+       tint), it never admits or drops a row */
+    var dayKind = {};
+    [['load_in_date', 'load_in'], ['event_date', 'event'], ['strike_date', 'strike']].forEach(function (p) {
+      if (s[p[0]] && !dayKind[s[p[0]]]) dayKind[s[p[0]]] = p[1];
+    });
     (s.milestones || []).forEach(function (m) {
       if (m.date) taken[m.date] = 1;
-      items.push({ show: s, label: m.label, date: m.date });
+      items.push({ show: s, label: m.label, date: m.date, kind: (m.date && dayKind[m.date]) || 'milestone' });
     });
     /* The production dates live ON the show row, not in milestones — so a show
        created through the product (which seeds no milestone rows) left the
@@ -89,35 +139,296 @@ function viewCalendar(shows) {
        already marking the same day wins: it is the richer row, and the demo
        seeds "Load-in"/"Show" milestones on those exact dates. */
     var anchor = typeDef(s.type).anchor || 'Event';
-    [['load_in_date', 'Load-in'], ['event_date', anchor], ['strike_date', 'Strike']]
+    [['load_in_date', 'Load-in', 'load_in'], ['event_date', anchor, 'event'], ['strike_date', 'Strike', 'strike']]
       .forEach(function (pair) {
         var d = s[pair[0]];
-        if (d && !taken[d]) { taken[d] = 1; items.push({ show: s, label: pair[1], date: d }); }
+        if (d && !taken[d]) { taken[d] = 1; items.push({ show: s, label: pair[1], date: d, kind: pair[2] }); }
       });
   });
   items.sort(function (a, b) { return (a.date || '9999').localeCompare(b.date || '9999'); });
+  return items;
+}
 
+/* ---- filter keys: a folder is a client's season, so folder IS "by client" -- */
+function calFolderKey(s) { return s && s.project_id != null ? String(s.project_id) : 'none'; }
+function calTypeKey(s) { return s && EVENT_TYPES[s.type] ? s.type : 'led'; }
+function calFolderLabel(it) {
+  var p = PROJECTS_BY_ID[it.show.project_id];
+  if (p && p.name) return p.name + (p.client && p.client !== p.name ? ' · ' + p.client : '');
+  return showLabel(it.show) || 'No folder';
+}
+function calVisible(items) {
+  var h = CAL_UI.hide;
+  return items.filter(function (it) {
+    return !h.kind[it.kind] && !h.folder[calFolderKey(it.show)] && !h.type[calTypeKey(it.show)];
+  });
+}
+function calHiddenCount() {
+  var h = CAL_UI.hide, n = 0;
+  ['kind', 'folder', 'type'].forEach(function (g) { for (var k in h[g]) if (h[g][k]) n++; });
+  return n;
+}
+
+/* ---- date math: local midnights through the app's own helpers (data.js
+   isoDate/addDays, components.js parseISO) — setDate() keeps DST honest ---- */
+function calValidISO(v) { return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !!parseISO(v); }
+function calShift(iso, n) { return isoDate(addDays(parseISO(iso), n)); }
+function calDaysBetween(a, b) { return Math.round((parseISO(b) - parseISO(a)) / 86400000); }
+function calAnchor() { return calValidISO(CAL_UI.anchor) ? CAL_UI.anchor : TODAY_ISO; }
+function calWeekStart(iso) { var d = parseISO(iso); return isoDate(addDays(d, -d.getDay())); }
+/* the window the current mode draws — month and week are derived from the
+   anchor; range is its own pair (defaulting to two weeks from the anchor) */
+function calWindow(mode) {
+  var a = calAnchor(), d = parseISO(a);
+  if ((mode || CAL_UI.mode) === 'week') { var ws = calWeekStart(a); return { from: ws, to: calShift(ws, 6) }; }
+  if ((mode || CAL_UI.mode) === 'range') {
+    var r = CAL_UI.range || {};
+    var from = calValidISO(r.from) ? r.from : a;
+    var to = calValidISO(r.to) ? r.to : calShift(from, 13);
+    return to < from ? { from: to, to: from } : { from: from, to: to };
+  }
+  return { from: isoDate(new Date(d.getFullYear(), d.getMonth(), 1)),
+           to: isoDate(new Date(d.getFullYear(), d.getMonth() + 1, 0)) };
+}
+
+/* ---- state moves (pure over CAL_UI; the ACTIONS in app.js redraw after) ---- */
+function calSetMode(k) {
+  var ok = CAL_MODES.some(function (m) { return m[0] === k; });
+  if (!ok) return;
+  /* entering Range starts from what you were looking at */
+  if (k === 'range' && !CAL_UI.range && CAL_UI.mode !== 'list') CAL_UI.range = calWindow(CAL_UI.mode);
+  CAL_UI.mode = k;
+}
+function calNav(k) {
+  var m = CAL_UI.mode;
+  if (k === 'today') {
+    if (m === 'range') {
+      var w0 = calWindow('range');
+      CAL_UI.range = { from: TODAY_ISO, to: calShift(TODAY_ISO, calDaysBetween(w0.from, w0.to)) };
+    }
+    CAL_UI.anchor = null;
+    return;
+  }
+  var dir = k === 'prev' ? -1 : 1;
+  if (m === 'month') {
+    var d = parseISO(calAnchor());
+    CAL_UI.anchor = isoDate(new Date(d.getFullYear(), d.getMonth() + dir, 1));
+  } else if (m === 'week') {
+    CAL_UI.anchor = calShift(calAnchor(), 7 * dir);
+  } else if (m === 'range') {
+    var w = calWindow('range'), len = calDaysBetween(w.from, w.to) + 1;
+    CAL_UI.range = { from: calShift(w.from, len * dir), to: calShift(w.to, len * dir) };
+  }
+}
+function calGo(iso) {
+  if (!calValidISO(iso)) return;
+  if (CAL_UI.mode === 'range') {
+    var w = calWindow('range');
+    CAL_UI.range = { from: iso, to: calShift(iso, calDaysBetween(w.from, w.to)) };
+  }
+  if (CAL_UI.mode === 'list') CAL_UI.mode = 'month';
+  CAL_UI.anchor = iso;
+}
+function calSetRange(which, v) {
+  if (!calValidISO(v) || (which !== 'from' && which !== 'to')) return;
+  /* moving one end past the other carries the other along, keeping the span */
+  var w = calWindow('range'), len = calDaysBetween(w.from, w.to);
+  if (which === 'from') { w.from = v; if (w.to < v) w.to = calShift(v, len); }
+  else { w.to = v; if (w.from > v) w.from = calShift(v, -len); }
+  CAL_UI.range = w;
+}
+function calToggle(key) {
+  var i = String(key || '').indexOf(':');
+  var g = String(key).slice(0, i), k = String(key).slice(i + 1);
+  if (i < 1 || !CAL_UI.hide[g]) return;
+  if (CAL_UI.hide[g][k]) delete CAL_UI.hide[g][k]; else CAL_UI.hide[g][k] = 1;
+}
+function calFilterReset() { CAL_UI.hide = { kind: {}, folder: {}, type: {} }; }
+
+/* ---- renderers ------------------------------------------------------------ */
+function calByDay(items) {
+  var by = {};
+  items.forEach(function (it) { if (it.date) (by[it.date.slice(0, 10)] = by[it.date.slice(0, 10)] || []).push(it); });
+  return by;
+}
+/* one entry as a chip: tinted by the show's TYPE (the .tag triad), railed by
+   the entry's KIND (the LANES colour), and it opens its show */
+function calChip(it, full) {
+  var where = showLabel(it.show);
+  var venue = it.show.venue || '';
+  var tip = it.label + ' · ' + where + (venue ? ' · ' + venue : '');
+  return '<button class="cal-chip t-' + esc(typeDef(it.show.type).tag) + '" style="--k:' + esc(calKindColor(it.kind)) + '" title="' +
+    esc(tip) + '" ' + act('openShow', it.show.id) + '><b>' + esc(it.label) + '</b> <span class="cc-w">' + esc(where) + '</span>' +
+    (full && venue ? '<span class="cc-v">' + esc(venue) + '</span>' : '') + '</button>';
+}
+/* the original list row — the List mode, the Range mode and the day modal
+   (in the modal the row closes the dialog on its way to the show) */
+function calRow(it, inModal) {
+  var d = parseISO(it.date);
+  var mm = d ? MONTH_SHORT[d.getMonth()] : '', dd = d ? d.getDate() : '—';
+  var where = showLabel(it.show);
+  var pj = it.show.project;
+  return '<div class="cal-item" style="--k:' + esc(calKindColor(it.kind)) + '" ' + (inModal ? act('calOpenShow', it.show.id) : act('openShow', it.show.id)) + '><div class="cal-date">' + esc(mm) + '<b>' + esc(dd) + '</b></div>' +
+    '<div class="ci-b"><b>' + esc(it.label + ' · ' + where) + '</b><span>' + esc((pj && pj.client ? pj.client + ' · ' : '') + (it.show.venue || '')) + '</span></div>' +
+    typeTag(it.show.type) + '</div>';
+}
+function calListView(items) {
   var groups = {}, order = [];
   items.forEach(function (it) {
     var key = fmtMonthYear(it.date);
     if (!groups[key]) { groups[key] = []; order.push(key); }
     groups[key].push(it);
   });
+  return order.map(function (key) {
+    return '<div class="cal-group"><h4>' + esc(key) + '</h4>' + groups[key].map(function (it) { return calRow(it); }).join('') + '</div>';
+  }).join('') || '<div class="empty">Nothing on the calendar' + (calHiddenCount() ? ' with these filters.' : ' yet.') + '</div>';
+}
+function calMonthGrid(items, anchorISO, printing) {
+  var cap = printing ? Infinity : CAL_MAX_CHIPS;
+  var a = parseISO(anchorISO), y = a.getFullYear(), m = a.getMonth();
+  var lead = new Date(y, m, 1).getDay();
+  var dim = new Date(y, m + 1, 0).getDate();
+  var weeks = Math.ceil((lead + dim) / 7);
+  var by = calByDay(items);
+  var cells = [];
+  for (var i = 0; i < weeks * 7; i++) {
+    var day = new Date(y, m, 1 - lead + i), iso = isoDate(day);
+    var list = by[iso] || [];
+    var out = day.getMonth() !== m;
+    var dayName = CAL_WD[day.getDay()] + ' ' + fmtDateFull(iso);
+    cells.push('<div class="cal-cell' + (out ? ' out' : '') + (iso === TODAY_ISO ? ' today' : '') + '" data-date="' + iso + '">' +
+      (list.length
+        ? '<button class="cal-dn" title="' + esc(dayName) + '" ' + act('calDay', null, iso) + '>' + day.getDate() + '</button>' +
+          '<div class="cal-chips">' + list.slice(0, cap).map(function (it) { return calChip(it); }).join('') +
+          (list.length > cap ? '<button class="cal-more" ' + act('calDay', null, iso) + '>+' + (list.length - cap) + ' more</button>' : '') +
+          '</div>' +
+          /* phones: the chips collapse to dots + a count; the whole row opens the day */
+          '<button class="cal-mini" title="' + esc(dayName) + '" ' + act('calDay', null, iso) + '>' +
+          list.slice(0, 3).map(function (it) { return '<i style="background:' + esc(calKindColor(it.kind)) + '"></i>'; }).join('') +
+          '<span>' + list.length + '</span></button>'
+        : '<span class="cal-dn">' + day.getDate() + '</span>') +
+      '</div>');
+  }
+  return '<div class="cal-month"><div class="cal-wds">' + CAL_WD.map(function (w) { return '<div>' + w + '</div>'; }).join('') +
+    '</div><div class="cal-grid">' + cells.join('') + '</div></div>';
+}
+function calWeekGrid(items, anchorISO) {
+  var ws = calWeekStart(anchorISO), by = calByDay(items), cols = [];
+  for (var i = 0; i < 7; i++) {
+    var iso = calShift(ws, i), d = parseISO(iso), list = by[iso] || [];
+    cols.push('<div class="cal-wcol' + (iso === TODAY_ISO ? ' today' : '') + '" data-date="' + iso + '" data-wd="' + i + '">' +
+      '<div class="cal-wh"><span>' + CAL_WD[i] + '</span><b>' + d.getDate() + '</b><span class="mono">' + esc(MONTH_SHORT[d.getMonth()]) + '</span></div>' +
+      '<div class="cal-wbody">' + (list.map(function (it) { return calChip(it, true); }).join('') || '<div class="cal-none">—</div>') + '</div></div>');
+  }
+  return '<div class="cal-week">' + cols.join('') + '</div>';
+}
+function calRangeList(items, w) {
+  var inside = items.filter(function (it) { return it.date && it.date.slice(0, 10) >= w.from && it.date.slice(0, 10) <= w.to; });
+  var by = calByDay(inside);
+  var days = Object.keys(by).sort();
+  return days.map(function (iso) {
+    var d = parseISO(iso);
+    return '<div class="cal-group' + (iso === TODAY_ISO ? ' today' : '') + '" data-date="' + iso + '"><h4>' + esc(CAL_WD[d.getDay()] + ' · ' + fmtDateFull(iso)) +
+      (iso === TODAY_ISO ? ' · today' : '') + '</h4>' + by[iso].map(function (it) { return calRow(it); }).join('') + '</div>';
+  }).join('') || '<div class="empty">Nothing dated between ' + esc(fmtDateFull(w.from)) + ' and ' + esc(fmtDateFull(w.to)) +
+    (calHiddenCount() ? ' with these filters.' : '.') + '</div>';
+}
+function calTitle() {
+  var m = CAL_UI.mode, w = calWindow();
+  if (m === 'list') return 'Everything dated';
+  if (m === 'month') return fmtMonthYear(calAnchor());
+  return fmtDate(w.from) + ' – ' + fmtDateFull(w.to);
+}
+/* the body of the current mode — shared by the page and the print sheet */
+function calBody(vis, printing) {
+  var m = CAL_UI.mode;
+  if (m === 'list') return calListView(vis);
+  var w = calWindow();
+  var body = m === 'week' ? calWeekGrid(vis, calAnchor())
+    : m === 'range' ? calRangeList(vis, w)
+    : calMonthGrid(vis, calAnchor(), printing);
+  return body;
+}
+function calFilterPanel(all) {
+  var h = CAL_UI.hide;
+  function chip(g, k, label, n, sw) {
+    var on = !h[g][k];
+    return '<button class="cal-f' + (on ? ' on' : '') + '" aria-pressed="' + on + '" ' + act('calFilter', null, g + ':' + k) + '>' +
+      (sw ? '<i style="background:' + esc(sw) + '"></i>' : '') + esc(label) + ' <span class="sc">' + n + '</span></button>';
+  }
+  function count(fn) { var c = {}; all.forEach(function (it) { var k = fn(it); c[k] = (c[k] || 0) + 1; }); return c; }
+  var kc = count(function (it) { return it.kind; });
+  var tc = count(function (it) { return calTypeKey(it.show); });
+  var fc = count(function (it) { return calFolderKey(it.show); });
+  var fLabel = {};
+  all.forEach(function (it) { var k = calFolderKey(it.show); if (!fLabel[k]) fLabel[k] = calFolderLabel(it); });
+  var folders = Object.keys(fc).sort(function (a, b) { return fLabel[a].localeCompare(fLabel[b]); });
+  var types = Object.keys(EVENT_TYPES).filter(function (t) { return tc[t]; });
+  return '<div class="cal-filters">' +
+    '<div class="cal-fg"><h5>What</h5><div>' + CAL_KINDS.map(function (k) { return chip('kind', k[0], k[1], kc[k[0]] || 0, calKindColor(k[0])); }).join('') + '</div></div>' +
+    (types.length > 1 ? '<div class="cal-fg"><h5>Type</h5><div>' + types.map(function (t) { return chip('type', t, typeLabel(t), tc[t]); }).join('') + '</div></div>' : '') +
+    (folders.length ? '<div class="cal-fg"><h5>Folder / client</h5><div>' + folders.map(function (k) { return chip('folder', k, fLabel[k], fc[k]); }).join('') + '</div></div>' : '') +
+    (calHiddenCount() ? '<button class="btn sm" ' + act('calFilterReset') + '>Show everything</button>' : '') +
+    '</div>';
+}
 
-  var html = order.map(function (key) {
-    var rows = groups[key].map(function (it) {
-      var d = parseISO(it.date);
-      var mm = d ? MONTH_SHORT[d.getMonth()] : '', dd = d ? d.getDate() : '—';
-      var where = showLabel(it.show);
-      var pj = it.show.project;
-      return '<div class="cal-item" ' + act('openShow', it.show.id) + '><div class="cal-date">' + esc(mm) + '<b>' + esc(dd) + '</b></div>' +
-        '<div class="ci-b"><b>' + esc(it.label + ' · ' + where) + '</b><span>' + esc((pj && pj.client ? pj.client + ' · ' : '') + it.show.venue) + '</span></div>' +
-        typeTag(it.show.type) + '</div>';
-    }).join('');
-    return '<div class="cal-group"><h4>' + esc(key) + '</h4>' + rows + '</div>';
-  }).join('');
+function viewCalendar(shows) {
+  var all = calendarItems(shows);
+  var vis = calVisible(all);
+  var m = CAL_UI.mode, hid = calHiddenCount();
 
-  return '<div class="page-h"><div><h1>Calendar</h1><div class="sub">Load-ins, shows, installs and strikes across every show. Pushes to the e360 scheduler on promote.</div></div></div>' + html;
+  var seg = '<div class="seg">' + CAL_MODES.map(function (x) {
+    return '<button class="' + (m === x[0] ? 'on' : '') + '" ' + act('calMode', null, x[0]) + '>' + esc(x[1]) + '</button>';
+  }).join('') + '</div>';
+  var nav = m === 'list' ? '' :
+    '<button class="iconbtn" title="Previous" ' + act('calNav', null, 'prev') + '>' + icon('chevL') + '</button>' +
+    '<button class="btn sm" ' + act('calNav', null, 'today') + '>Today</button>' +
+    '<button class="iconbtn" title="Next" ' + act('calNav', null, 'next') + '>' + icon('chevR') + '</button>';
+  var bar = '<div class="cal-bar"><div class="cal-nav">' + nav + '<h2 class="cal-title">' + esc(calTitle()) + '</h2></div>' +
+    '<div class="cal-tools">' + seg +
+    '<button class="btn sm' + (CAL_UI.filtersOpen || hid ? ' on' : '') + '" ' + act('calFilters') + '>Filters' + (hid ? ' · ' + hid + ' off' : '') + '</button>' +
+    '<button class="btn sm" title="Print this view" ' + act('calPrint') + '>' + icon('print') + 'Print</button></div></div>';
+  var w = calWindow();
+  var rangeRow = m !== 'range' ? '' :
+    '<div class="cal-range"><label>From <input type="date" class="cell-in" value="' + esc(w.from) + '" ' + actChange('calRange', null, 'from') + '></label>' +
+    '<label>To <input type="date" class="cell-in" value="' + esc(w.to) + '" ' + actChange('calRange', null, 'to') + '></label></div>';
+  var legend = '<div class="cal-legend">' + CAL_KINDS.map(function (k) {
+    return '<span><i style="background:' + esc(calKindColor(k[0])) + '"></i>' + esc(k[1]) + '</span>';
+  }).join('') + Object.keys(EVENT_TYPES).map(function (t) { return typeTag(t); }).join('') + '</div>';
+
+  /* the honest footnotes: what the filters hid, what has no date, and — on
+     an empty window — where the next dated thing is */
+  var notes = [];
+  if (hid) notes.push((all.length - vis.length) + ' of ' + all.length + ' entries hidden by filters');
+  var undated = vis.filter(function (it) { return !it.date; }).length;
+  if (undated && m !== 'list') notes.push(undated + ' undated — see List');
+  var jump = '';
+  if (m !== 'list') {
+    var inWin = vis.some(function (it) { return it.date && it.date.slice(0, 10) >= w.from && it.date.slice(0, 10) <= w.to; });
+    var nextIt = inWin ? null : vis.filter(function (it) { return it.date && it.date.slice(0, 10) > w.to; })[0];
+    if (!inWin) notes.push('Nothing in this ' + (m === 'range' ? 'range' : m) + (hid ? ' with these filters' : ''));
+    if (nextIt) jump = '<button class="btn sm" ' + act('calGo', null, nextIt.date.slice(0, 10)) + '>Next: ' +
+      esc(fmtDate(nextIt.date) + ' · ' + nextIt.label + ' · ' + showLabel(nextIt.show)) + '</button>';
+  }
+  var foot = notes.length || jump ? '<div class="cal-notes">' + esc(notes.join(' · ')) + jump + '</div>' : '';
+
+  return '<div class="page-h"><div><h1>Calendar</h1><div class="sub">Load-ins, shows, installs and strikes across every show. Pushes to the e360 scheduler on promote.</div></div></div>' +
+    bar + rangeRow + (CAL_UI.filtersOpen ? calFilterPanel(all) : '') + legend + foot +
+    '<div class="cal-body cal-m-' + esc(m) + '">' + calBody(vis) + '</div>';
+}
+/* the print sheet — the same body, titled, into #printArea */
+function calPrintHTML(shows) {
+  var vis = calVisible(calendarItems(shows));
+  var hid = calHiddenCount();
+  return '<div class="cal-print"><h2>Calendar — ' + esc(calTitle()) + '</h2>' +
+    (hid ? '<div class="cal-notes">Filtered view: ' + hid + ' filter' + (hid === 1 ? '' : 's') + ' off</div>' : '') +
+    '<div class="cal-body cal-m-' + esc(CAL_UI.mode) + '">' + calBody(vis, true) + '</div></div>';
+}
+/* the day's full list — the "+N more" / phone-dot modal body */
+function calDayHTML(shows, iso) {
+  var list = calVisible(calendarItems(shows)).filter(function (it) { return it.date && it.date.slice(0, 10) === iso; });
+  return list.length ? '<div class="cal-daylist">' + list.map(function (it) { return calRow(it, true); }).join('') + '</div>'
+    : '<div class="empty">Nothing on this day.</div>';
 }
 
 /* ============================================================================
