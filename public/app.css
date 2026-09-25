@@ -715,6 +715,23 @@ button.cal-dn:hover{background:var(--surface-2); color:var(--text)}
 .cal-addfoot{display:flex; justify-content:flex-end; gap:9px; margin-top:12px}
 @media(max-width:640px){ .cal-addgrid{grid-template-columns:1fr} .cal-cell .cal-add{width:18px; height:18px; top:2px; right:2px} }
 #printArea .cal-add{display:none!important}
+/* wave 3 — company life reads MUTED beside production dates: no show tint, a
+   dashed hairline, secondary text; a span's continuation days drop the rail */
+.cal-chip.entry{background:var(--surface); border-style:dashed; border-left-style:solid; color:var(--text-2)}
+.cal-chip.entry b{font-weight:500}
+.cal-chip.entry.cont{border-left-style:dashed; opacity:.85}
+.cal-chip .cc-g{display:inline-flex; vertical-align:-1px; margin-right:3px; color:var(--k)}
+.cal-chip .cc-g svg{width:11px; height:11px}
+.cal-item.entry{border-style:dashed}
+.cal-who{display:flex; width:100%; margin-bottom:10px}
+.cal-who button{flex:1; justify-content:center}
+.cal-ppl{max-height:220px; overflow:auto; border:1px solid var(--border); border-radius:var(--r-sm); padding:4px; background:var(--surface)}
+.cal-ppl-n{font-size:11px; color:var(--muted); margin:6px 2px 0}
+.cal-yr-in{display:flex; align-items:center; gap:7px; text-transform:none; letter-spacing:0; font-weight:500; font-size:13px; color:var(--text); min-height:34px}
+.cal-ev{display:flex; flex-direction:column; gap:8px; min-width:min(360px,80vw)}
+.cal-ev-r{display:flex; gap:12px; font-size:13px}
+.cal-ev-r span{width:92px; flex:none; color:var(--muted); font-size:10.5px; text-transform:uppercase; letter-spacing:.07em; font-weight:600; padding-top:2px}
+.cal-ev-r b{font-weight:500; min-width:0; overflow-wrap:anywhere}
 @media(max-width:1080px){ .cal-week{grid-template-columns:repeat(4,minmax(0,1fr))} }
 /* phones: month chips collapse to dots + a count (the day opens its list);
    week columns stack */

@@ -3480,7 +3480,37 @@ function calOpenAct(id, k) {
   closeM();
   if (k === 'openFolder') return openFolder(id);
   if (k === 'openReport') return openReportAct(id);
+  if (k === 'calEntry') return calEntryAct(id);
   return openShow(id);
+}
+/* COMPANY LIFE (wave 3) — an entry chip opens its own small view (there is no
+   show to open); Edit / Delete are drawn for the creator or an admin only,
+   and the server re-checks both. */
+async function calEntryFind(id) {
+  var rows = await api.listCalendarEntries();
+  return (rows || []).filter(function (e) { return Number(e.id) === Number(id); })[0] || null;
+}
+async function calEntryAct(id) {
+  var e = await calEntryFind(id);
+  if (!e) { toast('Not on your calendar', 'That entry was removed, or it is not one you can see', 'err'); return; }
+  openModal(e.label || 'Calendar note', calEntryHTML(e));
+}
+async function calEntryEditAct(id) {
+  var e = await calEntryFind(id);
+  if (!e) { toast('Not on your calendar', 'That entry was removed, or it is not one you can see', 'err'); return; }
+  calAddStartEdit(e);
+  CAL_ADD_SHOWS = [];
+  openModal('Edit · ' + (e.label || 'calendar note'), calAddHTML(CAL_ADD_SHOWS));
+}
+async function calEntryDelAct(id) {
+  var e = await calEntryFind(id);
+  if (!e) { closeM(); return render('calendar'); }
+  if (!askConfirm('Remove “' + e.label + '” from the calendar' + (e.scope === 'team' ? ' for everyone' : '') + '?')) return;
+  try { await api.deleteCalendarEntry(id); }
+  catch (err) { toast('Not removed', String(err && err.message || err), 'err'); return; }
+  closeM();
+  toast('Removed from the calendar', e.label);
+  return render('calendar');
 }
 /* DAY-ADD (wave 2) — the dialog is drawn by calAddHTML (views-global.js);
    these keep what was typed across a door / folder / show switch and commit
@@ -3493,6 +3523,13 @@ function calAddCapture() {
   CAL_ADD.label = _vKeep('caLabel', CAL_ADD.label);
   CAL_ADD.title = _vKeep('caTitle', CAL_ADD.title);
   CAL_ADD.lane = _vKeep('caLane', CAL_ADD.lane);
+  /* the note door (wave 3) */
+  CAL_ADD.nlabel = _vKeep('caNLabel', CAL_ADD.nlabel);
+  CAL_ADD.nkind = _vKeep('caKind', CAL_ADD.nkind);
+  CAL_ADD.end = _vKeep('caEnd', CAL_ADD.end);
+  if (CAL_ADD.editId) CAL_ADD.iso = _vKeep('caDate', CAL_ADD.iso);
+  var yr = document.getElementById('caYearly');
+  if (yr && !!yr.checked !== CAL_ADD.yearly) { CAL_ADD.yearly = !!yr.checked; CAL_ADD.yearlyTouched = true; }
 }
 function calAddRedraw() {
   var b = document.querySelector('#modal .modal-b');
@@ -3504,17 +3541,59 @@ async function calAddAct(iso) {
   calAddStart(iso, CAL_ADD && CAL_ADD.door);
   openModal('Add on ' + fmtDateFull(iso), calAddHTML(CAL_ADD_SHOWS));
 }
-function calAddDoorAct(k) { calAddCapture(); CAL_ADD.door = k === 'mine' ? 'mine' : 'team'; calAddRedraw(); }
+function calAddDoorAct(k) { calAddCapture(); CAL_ADD.door = k === 'mine' || k === 'note' ? k : 'team'; calAddRedraw(); }
 function calAddPickAct(t, k) {
   if (!CAL_ADD) return;
   calAddCapture();
   if (k === 'folder') { CAL_ADD.fk = String(t.value); CAL_ADD.sid = null; CAL_ADD.lane = ''; }
   else if (k === 'show') { CAL_ADD.sid = Number(t.value); CAL_ADD.lane = ''; }
+  /* a birthday comes back every year unless you said otherwise */
+  else if (k === 'kind' && !CAL_ADD.yearlyTouched) CAL_ADD.yearly = CAL_ADD.nkind === 'birthday';
   calAddRedraw();
+}
+function calAddWhoAct(k) {
+  if (!CAL_ADD) return;
+  calAddCapture();
+  CAL_ADD.who = k === 'personal' || k === 'directed' ? k : 'team';
+  calAddRedraw();
+}
+function calAddPersonAct(u) {
+  if (!CAL_ADD || !u) return;
+  calAddCapture();
+  var i = CAL_ADD.forUsers.indexOf(u);
+  if (i >= 0) CAL_ADD.forUsers.splice(i, 1); else CAL_ADD.forUsers.push(u);
+  calAddRedraw();
+}
+/* the note door's commit — create, or save an edit. The toast is built from
+   the SERVER's answer: `notified` is who actually had a notification queued
+   (a person whose setting is off gets none, and is not claimed). */
+async function calNoteCommit() {
+  var p = CAL_ADD;
+  if (!p.nlabel.trim()) { toast('A note needs a label', 'What is this date?'); return; }
+  if (p.who === 'directed' && !p.forUsers.length) { toast('Pick at least one person', 'Or choose Everyone / Just me'); return; }
+  var body = calNoteBody({ label: p.nlabel, date: p.iso, end_date: p.end, kind: p.nkind, scope: p.who,
+                           repeat: p.yearly ? 'yearly' : 'none', for_users: p.forUsers });
+  var rec, editing = !!p.editId;
+  try {
+    rec = editing ? await api.updateCalendarEntry(p.editId, body) : await calNoteSubmit(body);
+  } catch (e) { toast(editing ? 'Not saved' : 'Not added', String(e && e.message || e), 'err'); return; }
+  var told = (rec.notified || []).map(function (u) { return firstName(u) || u; });
+  var who = rec.scope === 'personal' ? 'only you see it' : rec.scope === 'directed'
+    ? (told.length ? 'a notification is queued for ' + told.join(', ') : 'nobody new was notified')
+    : 'everyone sees it';
+  var hiddenBy = (CAL_UI.hide.kind[rec.kind] || (CAL_UI.justMine && rec.scope === 'team') ||
+    (CAL_UI.justMine && rec.scope === 'directed' && (rec.for_users || []).indexOf(ME) < 0))
+    ? ' — your filters hide it; Reset to see it' : '';
+  CAL_ADD = null;
+  closeM();
+  toast(editing ? 'Saved' : calLifeWord(rec.kind) + ' added',
+    (rec.label || body.label) + ' · ' + fmtDate(rec.date || body.date) + (rec.end_date ? ' → ' + fmtDate(rec.end_date) : '') + ' · ' + who + hiddenBy);
+  return render('calendar');
 }
 async function calAddCommit() {
   if (!CAL_ADD) return;
   calAddCapture();
+  if (CAL_ADD.door === 'note' || CAL_ADD.editId) return calNoteCommit();
   var p = CAL_ADD, team = p.door === 'team';
   if (team && !p.label.trim()) { toast('A milestone needs a label', 'What is this date?'); return; }
   if (!team && !p.title.trim()) { toast('A task needs a title', 'Say what has to happen'); return; }
@@ -8348,6 +8427,12 @@ var ACTIONS = {
   calAddDoor:    function (t, id, k) { return calAddDoorAct(k); },
   calAddPick:    function (t, id, k) { return calAddPickAct(t, k); },
   calAddCommit:  function () { return calAddCommit(); },
+  /* calendar wave 3 (9/25) — company life: the note door, the entry view */
+  calAddWho:     function (t, id, k) { return calAddWhoAct(k); },
+  calAddPerson:  function (t, id, k) { return calAddPersonAct(k); },
+  calEntry:      function (t, id) { return calEntryAct(id); },
+  calEntryEdit:  function (t, id) { return calEntryEditAct(id); },
+  calEntryDel:   function (t, id) { return calEntryDelAct(id); },
   calDay:        function (t, id, k) { return calDayAct(k); },
   calOpenShow:   function (t, id) { closeM(); return openShow(id); },
   calPrint:      function () { return calPrintAct(); },

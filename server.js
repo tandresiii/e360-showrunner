@@ -312,6 +312,9 @@ app.use('/api', require('./routes/schedule'));
 // Session-only (router-level requireAuth, which 403s an x-agent-key), so it
 // belongs in this fourth group with everything else that needs a person.
 app.use('/api', require('./routes/meetings'));
+// Calendar wave 3 — company life (notes, OOO, birthdays; team / personal /
+// directed). Session-only like its neighbours, so it rides the fourth group.
+app.use('/api', require('./routes/calendar'));
 app.use('/api', require('./routes/deliverables'));
 // F2 tech show reports · F3 the notification outbox + F6 the admin sweep. Both
 // are session-only (router-level requireAuth, which 403s an x-agent-key), so

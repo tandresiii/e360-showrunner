@@ -1837,9 +1837,14 @@ async function main() {
     };
     for (const role of ['viewer', 'tech']) {
       const g = gate(role, 'dvargas');
-      ok(`W2 (d) · GATE · a ${role} gets no + and no right-click door (both routes are pm+)`,
-         !/data-act="calAdd"/.test(g.month) && !/data-act-ctx=/.test(g.month)
-         && !/data-act="calAdd"/.test(g.week) && !/data-act-ctx=/.test(g.week));
+      /* wave 3 changed this door on purpose: the + and right-click are now
+         EVERYBODY's (the Note / OOO door is any-role, like its route) — but
+         the two show doors, whose routes are pm+, must still not be drawn */
+      ok(`W2 (d) · GATE · a ${role} gets the + and right-click (wave 3's note door) — but NEITHER show door (both routes are pm+)`,
+         /data-act="calAdd"/.test(g.month) && /data-act-ctx="calAdd"/.test(g.month) && /data-act="calAdd"/.test(g.week)
+         && /data-act="calAddDoor" data-k="note"/.test(g.dlg)
+         && !/data-act="calAddDoor" data-k="team"/.test(g.dlg) && !/data-act="calAddDoor" data-k="mine"/.test(g.dlg)
+         && !/id="caFolder"/.test(g.dlg) && !/id="caLabel"/.test(g.dlg), g.dlg.slice(0, 300));
     }
     const gAdmin = gate('admin', demoTab.ME);
     ok('W2 (d) · GATE · a manager+ gets the + on every month cell and week column, plus the right-click door',
@@ -1872,6 +1877,205 @@ async function main() {
     delete demoTab.PROJECTS_BY_ID[PW]; delete demoTab.PROJECTS_BY_ID[PW2];
     demoTab.CURRENT_USER = cuUser;
     Object.assign(demoTab.CAL_UI, JSON.parse(cu2));
+  }
+  {
+    /* 9/25 · CALENDAR WAVE 3 — COMPANY LIFE. Tom: "someone's birthday? out
+       of office notes, etc?" + "post it notes on a date … on someone elses
+       calendar". Executed renders over planted entries in Aug 2031, then the
+       REAL server's rows, fetched as three different people and rendered as
+       each of them: the visibility rule is the server's, and what each person
+       SEES is the proof it held. */
+    const cu3 = JSON.stringify(demoTab.CAL_UI);
+    const cuUser3 = demoTab.CURRENT_USER, me3 = demoTab.ME;
+    const cells3 = (h) => h.split('<div class="cal-cell').slice(1)
+      .map((seg) => ({ date: (seg.match(/data-date="([\d-]+)"/) || [])[1], html: seg }));
+    const at3 = (h, d) => (cells3(h).find((c) => c.date === d) || { html: '' }).html;
+    const eChip = (id, kind) => new RegExp(`<button class="cal-chip entry k-${kind}[^"]*"[^>]*data-entry="${id}"[^>]*data-act="calEntry" data-id="${id}"`);
+    const ME3 = demoTab.ME;
+    const E = [
+      { id: 770001, label: 'WALK team note', date: '2031-08-12', end_date: null, scope: 'team', kind: 'note', repeat: 'none', for_users: [], created_by: 'jhawk' },
+      { id: 770002, label: 'WALK Devin out', date: '2031-08-18', end_date: '2031-08-21', scope: 'team', kind: 'ooo', repeat: 'none', for_users: [], created_by: 'dvargas' },
+      { id: 770003, label: 'WALK Aaron bday', date: '2030-08-26', end_date: null, scope: 'team', kind: 'birthday', repeat: 'yearly', for_users: [], created_by: 'aramos' },
+      { id: 770004, label: 'WALK my private note', date: '2031-08-13', end_date: null, scope: 'personal', kind: 'note', repeat: 'none', for_users: [], created_by: ME3 },
+      { id: 770005, label: 'WALK note for me', date: '2031-08-14', end_date: null, scope: 'directed', kind: 'note', repeat: 'none', for_users: [ME3], created_by: 'tvigon' }
+    ];
+    const draw3 = (anchor, setup, ctx = { entries: E }) => {
+      demoTab.CAL_UI.mode = 'month'; demoTab.CAL_UI.anchor = null; demoTab.CAL_UI.range = null;
+      demoTab.calFilterReset(); demoTab.CAL_UI.filtersOpen = false; demoTab.CAL_UI.fddOpen = false;
+      demoTab.calGo(anchor);
+      if (setup) setup();
+      let html = null, threw = null;
+      try { html = demoTab.viewCalendar([], ctx); } catch (e) { threw = String(e && e.stack || e); }
+      return { html: html || '', threw };
+    };
+    const aug = draw3('2031-08-12');
+    ok('W3 · DEMO RENDER · a team NOTE renders ON its date (Aug 12) — muted entry chip, opening its own view, not a show',
+       aug.threw === null && eChip(770001, 'note').test(at3(aug.html, '2031-08-12'))
+       && cells3(aug.html).filter((c) => /data-entry="770001"/.test(c.html)).length === 1
+       && !/data-act="openShow"/.test(at3(aug.html, '2031-08-12')), aug.threw);
+    const spanDays = ['2031-08-18', '2031-08-19', '2031-08-20', '2031-08-21'];
+    ok('W3 · DEMO RENDER · an OOO SPAN (Aug 18 → 21) draws a chip on EACH covered day…',
+       spanDays.every((d) => eChip(770002, 'ooo').test(at3(aug.html, d))), spanDays.map((d) => eChip(770002, 'ooo').test(at3(aug.html, d))));
+    ok('…and on no day outside it (17th and 22nd empty of it); the tip says which day of the span',
+       !/data-entry="770002"/.test(at3(aug.html, '2031-08-17')) && !/data-entry="770002"/.test(at3(aug.html, '2031-08-22'))
+       && /title="WALK Devin out · Out of office · Everyone · day 3 of 4"/.test(at3(aug.html, '2031-08-20')));
+    ok('W3 · DEMO RENDER · a YEARLY birthday anchored in 2030 materializes in the 2031 window (Aug 26), star glyph and all',
+       eChip(770003, 'birthday').test(at3(aug.html, '2031-08-26')) && /class="cc-g"/.test(at3(aug.html, '2031-08-26')));
+    const aug32 = draw3('2032-08-01');
+    ok('W3 · DEMO RENDER · …and in the NEXT year’s window too (Aug 26 2032) — while the one-off entries stay in 2031',
+       aug32.threw === null && eChip(770003, 'birthday').test(at3(aug32.html, '2032-08-26'))
+       && !/data-entry="770001"/.test(aug32.html) && !/data-entry="770002"/.test(aug32.html), aug32.threw);
+    const aug29 = draw3('2029-08-01');
+    ok('…but never BEFORE its anchor year (Aug 2029 has no birthday)', !/data-entry="770003"/.test(aug29.html));
+    let dayY = null;
+    try { demoTab.calGo('2031-08-12'); dayY = demoTab.calDayHTML([], '2033-08-26', { entries: E }); } catch (e) { dayY = String(e); }
+    ok('…the day modal materializes it for ITS day whatever the view shows (2033-08-26), and closes on its way to the entry',
+       /data-act="calOpen" data-id="770003" data-k="calEntry"/.test(dayY || ''), dayY);
+
+    // Just mine — my own personal note and a note left FOR me count; team life does not
+    const jm3 = draw3('2031-08-12', () => demoTab.calSetJustMine(true));
+    ok('W3 · DEMO RENDER · Just mine keeps MY personal note and the note left for me (mine-marked), drops team notes / OOO / birthdays',
+       eChip(770004, 'note').test(at3(jm3.html, '2031-08-13')) && /class="cal-chip entry k-note mine"[^>]*data-entry="770004"/.test(jm3.html)
+       && /class="cal-chip entry k-note mine"[^>]*data-entry="770005"/.test(jm3.html)
+       && !/data-entry="770001"/.test(jm3.html) && !/data-entry="770002"/.test(jm3.html) && !/data-entry="770003"/.test(jm3.html),
+       jm3.threw);
+    ok('…and the directed note says who it is FROM, from where I sit',
+       /title="WALK note for me · Note · From Tony/.test(aug.html));
+
+    // the filter chips
+    const noOoo = draw3('2031-08-12', () => demoTab.calToggle('kind:ooo'));
+    ok('W3 · DEMO RENDER · the OOO kind chip OFF hides every day of the span and nothing else',
+       !/data-entry="770002"/.test(noOoo.html) && /data-entry="770001"/.test(noOoo.html) && /data-entry="770003"/.test(noOoo.html));
+    demoTab.calToggle('kind:ooo');
+    ok('…back ON, it is back on all four days',
+       spanDays.every((d) => eChip(770002, 'ooo').test(at3(demoTab.viewCalendar([], { entries: E }), d))));
+    const fp3 = draw3('2031-08-12', () => { demoTab.CAL_UI.filtersOpen = true; });
+    ok('W3 · the filter panel carries a Company life group — note / out of office / birthday chips, counted',
+       /<h5>Company life<\/h5>/.test(fp3.html) && /data-k="kind:note"[^>]*>(?:<i[^>]*><\/i>)?Note <span class="sc">3<\/span>/.test(fp3.html)
+       && /data-k="kind:ooo"[^>]*>(?:<i[^>]*><\/i>)?Out of office <span class="sc">4<\/span>/.test(fp3.html)
+       && /data-k="kind:birthday"/.test(fp3.html) && !/data-k="folder:company/.test(fp3.html), fp3.html.slice(fp3.html.indexOf('Company life') - 50, fp3.html.indexOf('Company life') + 600));
+    ok('…and a folder/type filter never swallows company life (type:led off leaves every entry)',
+       /data-entry="770001"/.test(draw3('2031-08-12', () => demoTab.calToggle('type:led')).html));
+
+    // THE THIRD DOOR — every role; the show doors keep their gate
+    const door = (role, username) => {
+      demoTab.CURRENT_USER = Object.assign({}, cuUser3, { role, username }); demoTab.ME = username;
+      demoTab.calAddStart('2031-08-12', 'team');
+      const d = demoTab.calAddHTML([{ id: 1, project_id: null, name: 'WALK any', type: 'led' }]);
+      demoTab.CURRENT_USER = cuUser3; demoTab.ME = me3;
+      return d;
+    };
+    const dTech = door('tech', 'dvargas');
+    ok('W3 · THE THIRD DOOR renders for a TECH — the Note / OOO form (label, kind, end date, yearly, who sees it)…',
+       /data-act="calAddDoor" data-k="note"[^>]*>Note \/ OOO</.test(dTech) && /id="caNLabel"/.test(dTech) && /id="caKind"/.test(dTech)
+       && /id="caEnd"/.test(dTech) && /id="caYearly"/.test(dTech)
+       && /data-act="calAddWho" data-k="team"/.test(dTech) && /data-act="calAddWho" data-k="personal"/.test(dTech)
+       && /data-act="calAddWho" data-k="directed"/.test(dTech), dTech.slice(0, 400));
+    ok('…while the milestone and task doors stay HIDDEN for them (their routes are pm+)',
+       !/data-k="team">Team · milestone/.test(dTech) && !/data-k="mine">Personal · task for me/.test(dTech));
+    const dAdm = door('admin', 'tandres');
+    ok('…and an admin gets all three doors',
+       /data-k="team">Team · milestone/.test(dAdm) && /data-k="mine">Personal · task for me/.test(dAdm) && /data-k="note">Note \/ OOO/.test(dAdm));
+    demoTab.calAddStart('2031-08-12', 'note'); demoTab.CAL_ADD.who = 'directed'; demoTab.CAL_ADD.forUsers = ['dvargas'];
+    const dPick = demoTab.calAddHTML([]);
+    const pickOpts = (dPick.match(/data-act="calAddPerson" data-k="[^"]+"/g) || []);
+    ok('W3 · "Pick people" draws the ROSTER picker (rp-opt rows, multi-select) — every active teammate but me, the picked one on',
+       pickOpts.length === demoTab.activeUsers().length - 1 && !new RegExp(`data-act="calAddPerson" data-k="${me3}"`).test(dPick)
+       && /class="rp-opt on" aria-pressed="true" data-act="calAddPerson" data-k="dvargas"/.test(dPick) && /1 picked/.test(dPick),
+       { n: pickOpts.length, roster: demoTab.activeUsers().length });
+
+    // the entry view — Edit/Delete for the creator or an admin, nobody else
+    const ev = (role, username, e) => {
+      demoTab.CURRENT_USER = Object.assign({}, cuUser3, { role, username }); demoTab.ME = username;
+      const h = demoTab.calEntryHTML(e);
+      demoTab.CURRENT_USER = cuUser3; demoTab.ME = me3;
+      return h;
+    };
+    ok('W3 · the entry view shows its details; Edit/Delete for the CREATOR…',
+       /data-act="calEntryEdit" data-id="770002"/.test(ev('tech', 'dvargas', E[1])) && /data-act="calEntryDel" data-id="770002"/.test(ev('tech', 'dvargas', E[1]))
+       && /Out of office/.test(ev('tech', 'dvargas', E[1])));
+    ok('…for an ADMIN, and for NOBODY else (a manager who did not write it gets Close only)',
+       /calEntryDel/.test(ev('admin', 'tvigon', E[1])) && !/calEntryDel|calEntryEdit/.test(ev('manager', 'bsawyer', E[1]))
+       && /data-act="closeModal"/.test(ev('manager', 'bsawyer', E[1])));
+
+    // DEMO SEAM parity — the visibility rule and the ping, in the twin
+    /* the demo fixture has Devin's 'notify' preference OFF — so this is also
+       the honesty gate: he gets a SKIPPED row, and `notified` (what the toast
+       names) must not claim him */
+    const dNote = await demoTab.api.addCalendarEntry({ label: 'WALK demo directed', date: '2031-08-15', scope: 'directed', for_users: ['dvargas', 'bsawyer'] });
+    const dRows = demoTab.NOTIF_OUTBOX.filter((n) => /WALK demo directed/.test(n.subject) && n.kind === 'notify');
+    ok('DEMO · api.addCalendarEntry: a directed note pings each TARGET once, never the author…',
+       dNote && dNote.scope === 'directed' && dRows.map((n) => n.username).sort().join() === 'bsawyer,dvargas', dRows.map((n) => n.username));
+    ok('…and `notified` names only who was actually QUEUED (Devin’s notify setting is off: skipped, and not claimed)',
+       dNote.notified.join() === 'bsawyer' && dRows.find((n) => n.username === 'dvargas').status === 'skipped', dNote.notified);
+    const asWho = async (username) => { const keep = demoTab.ME; demoTab.ME = username; try { return await demoTab.api.listCalendarEntries(); } finally { demoTab.ME = keep; } };
+    ok('DEMO · the twin serves it to its target (dvargas) and NOT to a third party (jhawk)',
+       (await asWho('dvargas')).some((e) => e.id === dNote.id) && !(await asWho('jhawk')).some((e) => e.id === dNote.id));
+    ok('DEMO · …and jhawk’s seeded PERSONAL note is never served to me',
+       !(await demoTab.api.listCalendarEntries()).some((e) => e.label === 'Dentist')
+       && (await asWho('jhawk')).some((e) => e.label === 'Dentist'));
+    let dRef = null;
+    demoTab.ME = 'dvargas'; demoTab.CURRENT_USER = Object.assign({}, cuUser3, { role: 'tech', username: 'dvargas' });
+    try { await demoTab.api.deleteCalendarEntry(dNote.id); } catch (e) { dRef = String(e.message || e); }
+    demoTab.ME = me3; demoTab.CURRENT_USER = cuUser3;
+    ok('DEMO · a target (not the creator) cannot delete it — refused in the route’s own words',
+       dRef === 'only the person who added this calendar entry, or an admin, can change or remove it', dRef);
+    const dDel = await demoTab.api.deleteCalendarEntry(dNote.id);
+    ok('DEMO · the creator can', dDel && dDel.ok === true && !(await demoTab.api.listCalendarEntries()).some((e) => e.id === dNote.id));
+    let dBad = null;
+    try { await demoTab.api.addCalendarEntry({ label: 'x', date: '2031-02-30' }); } catch (e) { dBad = String(e.message || e); }
+    ok('DEMO · validation parity: Feb 30 is refused in the server’s words', /real date/.test(dBad || ''), dBad);
+
+    // ── THE REAL SERVER, rendered as three different people ────────────────
+    reach('Company life on the calendar (note / OOO / birthday · team / personal / directed)',
+      { seam: ['listCalendarEntries', 'addCalendarEntry', 'updateCalendarEntry', 'deleteCalendarEntry'],
+        action: ['calEntry', 'calEntryEdit', 'calEntryDel', 'calAddWho', 'calAddPerson', 'calAddDoor', 'calAddCommit'] });
+    const lOoo = await POST('/api/calendar-entries',
+      { label: 'WALK omar out', date: '2031-09-08', end_date: '2031-09-10', kind: 'ooo', scope: 'personal' }, { token: T.omar });
+    ok('LIVE · ANY ROLE: Omar (TECH) posts his own out-of-office — 200',
+       lOoo.status === 200 && lOoo.body.created_by === 'omar' && lOoo.body.scope === 'personal', lOoo.body);
+    const lTeam = await POST('/api/calendar-entries',
+      { label: 'WALK omar team note', date: '2031-09-12', scope: 'team' }, { token: T.omar });
+    const lDir = await POST('/api/calendar-entries',
+      { label: 'WALK chase the rigging plot', date: '2031-09-09', scope: 'directed', for_users: ['omar'] }, { token: T.brenden });
+    ok('LIVE · Brenden (pm) directs a note at Omar — notified names Omar', lDir.status === 200 && lDir.body.notified.join() === 'omar', lDir.body);
+    const oRows = (await outboxFor('omar', 'notify')).filter((r) => /WALK chase the rigging plot/.test(r.subject));
+    ok('LIVE · exactly one notify row queued for Omar, saying Brenden left it', oRows.length === 1
+       && /^Brenden Sawyer left a note on your calendar: WALK chase the rigging plot — 2031-09-09$/.test(oRows[0].subject), oRows.map((r) => r.subject));
+    ok('LIVE · …and none for Brenden, the author',
+       (await outboxFor('brenden', 'notify')).filter((r) => /WALK chase the rigging plot/.test(r.subject)).length === 0);
+    const liveCal = async (who, role) => {
+      const rows = (await GET('/api/calendar-entries', { token: T[who] })).body;
+      demoTab.CURRENT_USER = Object.assign({}, cuUser3, { role, username: who }); demoTab.ME = who;
+      const h = draw3('2031-09-09', null, { entries: rows }).html;
+      demoTab.CURRENT_USER = cuUser3; demoTab.ME = me3;
+      return { rows, h };
+    };
+    const vOmar = await liveCal('omar', 'tech');
+    const vPat = await liveCal('pat', 'pm');
+    const vBren = await liveCal('brenden', 'pm');
+    ok('LIVE → RENDER · Omar’s calendar draws HIS personal OOO on each of its three days and the note left for him (mine-marked)',
+       ['2031-09-08', '2031-09-09', '2031-09-10'].every((d) => eChip(lOoo.body.id, 'ooo').test(at3(vOmar.h, d)))
+       && new RegExp(`class="cal-chip entry k-note mine"[^>]*data-entry="${lDir.body.id}"`).test(at3(vOmar.h, '2031-09-09')));
+    ok('LIVE → RENDER · Pat (a third party) is SERVED neither and his calendar DRAWS neither — only Omar’s team note',
+       !vPat.rows.some((e) => e.id === lOoo.body.id || e.id === lDir.body.id)
+       && vPat.h.indexOf('WALK omar out') < 0 && vPat.h.indexOf('WALK chase the rigging plot') < 0
+       && new RegExp(`data-entry="${lTeam.body.id}"`).test(vPat.h), vPat.rows.map((e) => e.label));
+    ok('LIVE → RENDER · Brenden (the author) sees his directed note but NOT Omar’s personal OOO',
+       vBren.rows.some((e) => e.id === lDir.body.id) && vBren.h.indexOf('WALK omar out') < 0);
+    const lPatDel = await DEL(`/api/calendar-entries/${lTeam.body.id}`, { token: T.pat });
+    ok('LIVE · a stranger’s DELETE (Pat, on Omar’s team note) is 403', lPatDel.status === 403, lPatDel.body);
+    const lOmarDel = await DEL(`/api/calendar-entries/${lTeam.body.id}`, { token: T.omar });
+    ok('LIVE · the creator’s DELETE works (Omar) — and the note leaves everyone’s calendar',
+       lOmarDel.status === 200 && !(await GET('/api/calendar-entries', { token: T.pat })).body.some((e) => e.id === lTeam.body.id));
+
+    let loaded3 = null, lThrew3 = null;
+    try { loaded3 = await demoTab.calLoad(); } catch (e) { lThrew3 = String(e && e.stack || e); }
+    ok('DEMO · calLoad() now gathers the entries too, nothing refused',
+       lThrew3 === null && Array.isArray(loaded3.ctx.entries) && loaded3.ctx.entries.length > 0 && loaded3.ctx.errors.length === 0,
+       lThrew3 || (loaded3 && loaded3.ctx.errors));
+    demoTab.CURRENT_USER = cuUser3; demoTab.ME = me3;
+    Object.assign(demoTab.CAL_UI, JSON.parse(cu3));
   }
   reach('Calendar wave 2 (Just mine · folder dropdown · day-add doors · open from the day list)',
     { seam: ['myCrewShows', 'myOpenSteps', 'myReports', 'listMeetings', 'addMilestone', 'createStep'],

@@ -120,16 +120,91 @@ var CAL_MINE_KINDS = [
   ['task', 'My tasks due', 'client'],
   ['report', 'My show reports due', 'production']
 ];
+/* wave 3 — COMPANY LIFE (Tom, 9/25: "someone's birthday? out of office
+   notes, etc?"). Entries that belong to no show, from calendar_entries. They
+   are deliberately NOT tinted from the lanes: production dates carry the lane
+   colours, company life reads muted beside them (the 4th slot is the rail
+   colour itself, from the existing tokens). */
+var CAL_LIFE_KINDS = [
+  ['note', 'Note', null, 'var(--text-2)'],
+  ['ooo', 'Out of office', null, 'var(--muted)'],
+  ['birthday', 'Birthday', null, 'var(--warn)']
+];
 var CAL_WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 var CAL_MAX_CHIPS = 3;
 var CAL_FOLDER_CHIPS_MAX = 6;                  /* above this the folder group becomes a searchable dropdown */
+var CAL_SPAN_MAX = 366;                        /* the route's own span cap — a render bound too */
 
 function calKindColor(k) {
   var all = CAL_KINDS.concat(CAL_MINE_KINDS);
   for (var i = 0; i < all.length; i++) {
     if (all[i][0] === k) return (LANES[all[i][2]] || {}).color || 'var(--muted)';
   }
+  for (var j = 0; j < CAL_LIFE_KINDS.length; j++) {
+    if (CAL_LIFE_KINDS[j][0] === k) return CAL_LIFE_KINDS[j][3];
+  }
   return 'var(--muted)';
+}
+function calLifeWord(k) {
+  for (var j = 0; j < CAL_LIFE_KINDS.length; j++) if (CAL_LIFE_KINDS[j][0] === k) return CAL_LIFE_KINDS[j][1];
+  return 'Note';
+}
+
+/* ---- company-life entries → feed items --------------------------------
+   YEARLY EXPANSION. A 'yearly' row's stored date is its ANCHOR (the year it
+   was entered); the client materializes one occurrence per year inside the
+   window being drawn, from the anchor year on. A Feb 29 anchor lands on Feb 28
+   in a common year. A SPAN (end_date) keeps its length in every occurrence,
+   and becomes one item per covered day — so each day it covers draws a chip.
+   One-off rows are expanded regardless of the window (List shows everything). */
+function calExpandWindow() {
+  var m = CAL_UI.mode;
+  if (m === 'list') {
+    var y = parseISO(calAnchor()).getFullYear();
+    return { from: y + '-01-01', to: (y + 1) + '-12-31' };
+  }
+  var w = calWindow();
+  /* a week before (the month grid's leading cells) and a year after (the
+     "Next:" jump finds next year's birthday) */
+  return { from: calShift(w.from, -7), to: calShift(w.to, 366) };
+}
+function calYearlyOn(anchorISO, year) {
+  var md = anchorISO.slice(5);
+  if (md === '02-29' && !(year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0))) md = '02-28';
+  return year + '-' + md;
+}
+function calEntryMine(e) {
+  var me = String(ME || '').toLowerCase();
+  if (e.scope === 'personal') return String(e.created_by || '').toLowerCase() === me;
+  if (e.scope === 'directed') return (e.for_users || []).some(function (u) { return String(u).toLowerCase() === me; });
+  return false;
+}
+function calEntryItems(entries, win) {
+  var out = [];
+  var seen = {};
+  (entries || []).forEach(function (e) {
+    if (!e || e.id == null || seen[e.id] || !calValidISO(e.date)) return;
+    seen[e.id] = 1;
+    var len = calValidISO(e.end_date) && e.end_date > e.date ? Math.min(calDaysBetween(e.date, e.end_date), CAL_SPAN_MAX) : 0;
+    var starts = [];
+    if (e.repeat === 'yearly') {
+      var y0 = Math.max(Number(e.date.slice(0, 4)), Number(win.from.slice(0, 4)) - 1);
+      var y1 = Number(win.to.slice(0, 4));
+      for (var y = y0; y <= y1; y++) {
+        var st = calYearlyOn(e.date, y);
+        if (st <= win.to && calShift(st, len) >= win.from) starts.push(st);
+      }
+    } else starts.push(e.date);
+    var mine = calEntryMine(e);
+    starts.forEach(function (st) {
+      for (var i = 0; i <= len; i++) {
+        out.push({ show: null, pid: null, entry: e, kind: e.kind || 'note', label: e.label || 'Note',
+                   date: i ? calShift(st, i) : st, occ: st, spanDay: i + 1, spanLen: len + 1,
+                   mine: mine, open: ['calEntry', e.id] });
+      }
+    });
+  });
+  return out;
 }
 
 /* THE FEED — every milestone plus the show row's load-in / event / strike
@@ -138,6 +213,8 @@ function calKindColor(k) {
      ctx.reports  [report]        show reports I owe (api.myReports)
      ctx.meetings [meeting]       the folders' meetings (api.listMeetings)
      ctx.crew     {showId: 1}     shows I am crewed on (api.myCrewShows)
+     ctx.entries  [entry]         wave 3: company life (api.listCalendarEntries)
+     ctx.window   {from, to}      optional: the yearly-expansion window
    Every entry carries: kind · label · date · show (may be null: a season-level
    meeting has none) · pid (its folder) · mine · open [action, id]. No ctx =
    exactly wave 1's feed. */
@@ -208,6 +285,12 @@ function calendarItems(shows, ctx) {
                  pid: m.project_id != null ? m.project_id : (s ? s.project_id : null), mine: false,
                  open: s ? ['openShow', s.id] : ['openFolder', m.project_id] });
   });
+  /* COMPANY LIFE (wave 3) — notes, OOO, birthdays; no show, no folder. The
+     server already served only what this person may see; ctx.window pins the
+     yearly expansion (the day modal passes its one day), else the view's. */
+  if (ctx.entries && ctx.entries.length) {
+    items = items.concat(calEntryItems(ctx.entries, ctx.window || calExpandWindow()));
+  }
   items.sort(function (a, b) { return (a.date || '9999').localeCompare(b.date || '9999'); });
   return items;
 }
@@ -231,16 +314,32 @@ function calFolderLabel(it) {
   if (p && p.name) return p.name + (p.client && p.client !== p.name ? ' · ' + p.client : '');
   return (it.show ? showLabel(it.show) : '') || 'No folder';
 }
-/* where an entry is, in words: its show, else its folder */
+/* who a company-life entry is for, in words — from where the reader sits */
+function calEntryWho(e) {
+  if (!e) return '';
+  if (e.scope === 'personal') return 'Just you';
+  if (e.scope === 'directed') {
+    var me = String(ME || '').toLowerCase();
+    if (String(e.created_by || '').toLowerCase() !== me) return 'From ' + (firstName(e.created_by) || e.created_by || 'a teammate');
+    var names = (e.for_users || []).map(function (u) { return firstName(u) || u; });
+    return 'For ' + (names.length > 3 ? names.slice(0, 3).join(', ') + ' +' + (names.length - 3) : names.join(', '));
+  }
+  return 'Everyone';
+}
+/* where an entry is, in words: its show, else its folder — and for company
+   life, who it is for */
 function calWhere(it) {
+  if (it.entry) return calEntryWho(it.entry);
   if (it.show) return showLabel(it.show) || '';
   var p = it.pid != null ? PROJECTS_BY_ID[it.pid] : null;
   return (p && p.name) || 'Season';
 }
+/* company life has no folder and no show type, so the folder / type filters
+   do not reach it — only its KIND chips and "Just mine" do */
 function calVisible(items) {
   var h = CAL_UI.hide;
   return items.filter(function (it) {
-    return !h.kind[it.kind] && !h.folder[calItemFolder(it)] && !h.type[calItemType(it)] &&
+    return !h.kind[it.kind] && (it.entry || (!h.folder[calItemFolder(it)] && !h.type[calItemType(it)])) &&
       (!CAL_UI.justMine || it.mine === true);
   });
 }
@@ -349,7 +448,20 @@ function calOpen(it) { return it.open || ['openShow', it.show && it.show.id]; }
    a class + a CSS dot, never markup inside the chip, so the chip reads the
    same to everything that reads a chip. */
 var CAL_KIND_WORD = { task: 'your task', report: 'your show report', meeting: 'meeting' };
+/* company life: muted, no show tint, and it opens its own small view (there
+   is no show to open). A birthday earns the star glyph. */
+function calEntryChip(it, full) {
+  var e = it.entry, who = calWhere(it);
+  var span = it.spanLen > 1 ? ' · day ' + it.spanDay + ' of ' + it.spanLen : '';
+  var tip = it.label + ' · ' + calLifeWord(it.kind) + ' · ' + who + span + (e.repeat === 'yearly' ? ' · every year' : '');
+  return '<button class="cal-chip entry k-' + esc(it.kind) + (it.mine ? ' mine' : '') + (it.spanDay > 1 ? ' cont' : '') +
+    '" style="--k:' + esc(calKindColor(it.kind)) + '" title="' + esc(tip) + '" data-entry="' + Number(e.id) + '" ' +
+    act('calEntry', e.id) + '>' + (it.kind === 'birthday' ? '<span class="cc-g">' + icon('star') + '</span>' : '') +
+    '<b>' + esc(it.label) + '</b> <span class="cc-w">' + esc(who) + '</span>' +
+    (full && span ? '<span class="cc-v">' + esc(span.slice(3)) + '</span>' : '') + '</button>';
+}
 function calChip(it, full) {
+  if (it.entry) return calEntryChip(it, full);
   var where = calWhere(it);
   var venue = (it.show && it.show.venue) || '';
   var o = calOpen(it);
@@ -365,6 +477,14 @@ function calChip(it, full) {
 function calRow(it, inModal) {
   var d = parseISO(it.date);
   var mm = d ? MONTH_SHORT[d.getMonth()] : '', dd = d ? d.getDate() : '—';
+  if (it.entry) {
+    var go2 = !inModal ? act('calEntry', it.entry.id) : act('calOpen', it.entry.id, 'calEntry');
+    return '<div class="cal-item entry' + (it.mine ? ' mine' : '') + '" style="--k:' + esc(calKindColor(it.kind)) + '" data-entry="' + Number(it.entry.id) + '" ' + go2 + '>' +
+      '<div class="cal-date">' + esc(mm) + '<b>' + esc(dd) + '</b></div>' +
+      '<div class="ci-b"><b>' + esc(it.label) + '</b><span>' + esc(calLifeWord(it.kind) + ' · ' + calWhere(it) +
+        (it.spanLen > 1 ? ' · day ' + it.spanDay + ' of ' + it.spanLen : '') + (it.entry.repeat === 'yearly' ? ' · every year' : '')) + '</span></div>' +
+      (it.mine ? '<span class="ci-mk">mine</span>' : '') + '</div>';
+  }
   var where = calWhere(it);
   var pj = (it.pid != null ? PROJECTS_BY_ID[it.pid] : null) || (it.show && it.show.project) || null;
   var o = calOpen(it);
@@ -494,12 +614,14 @@ function calFilterPanel(all) {
     return '<button class="cal-f' + (on ? ' on' : '') + '" aria-pressed="' + on + '" ' + act('calFilter', null, g + ':' + k) + '>' +
       (sw ? '<i style="background:' + esc(sw) + '"></i>' : '') + esc(label) + ' <span class="sc">' + n + '</span></button>';
   }
-  function count(fn) { var c = {}; all.forEach(function (it) { var k = fn(it); c[k] = (c[k] || 0) + 1; }); return c; }
+  /* company life has no folder or type — it is counted under its kinds only */
+  var prod = all.filter(function (it) { return !it.entry; });
+  function count(fn, rows) { var c = {}; (rows || all).forEach(function (it) { var k = fn(it); c[k] = (c[k] || 0) + 1; }); return c; }
   var kc = count(function (it) { return it.kind; });
-  var tc = count(function (it) { return calItemType(it); });
-  var fc = count(function (it) { return calItemFolder(it); });
+  var tc = count(function (it) { return calItemType(it); }, prod);
+  var fc = count(function (it) { return calItemFolder(it); }, prod);
   var fLabel = {};
-  all.forEach(function (it) { var k = calItemFolder(it); if (!fLabel[k]) fLabel[k] = calFolderLabel(it); });
+  prod.forEach(function (it) { var k = calItemFolder(it); if (!fLabel[k]) fLabel[k] = calFolderLabel(it); });
   var folders = Object.keys(fc).sort(function (a, b) { return fLabel[a].localeCompare(fLabel[b]); });
   var types = Object.keys(EVENT_TYPES).filter(function (t) { return tc[t]; });
   var mineN = all.filter(function (it) { return it.mine === true; }).length;
@@ -512,9 +634,10 @@ function calFilterPanel(all) {
     'Reset · show everything</button></div>' +
     '<div class="cal-fg"><h5>Mine</h5><div>' +
     CAL_MINE_KINDS.map(function (k) { return chip('kind', k[0], k[1], kc[k[0]] || 0, calKindColor(k[0])); }).join('') +
-    '<button class="cal-f cal-jm' + (CAL_UI.justMine ? ' on' : '') + '" aria-pressed="' + !!CAL_UI.justMine + '" title="Hide everything except your task dues, your report dues and the dates of shows you are crewed on" ' +
+    '<button class="cal-f cal-jm' + (CAL_UI.justMine ? ' on' : '') + '" aria-pressed="' + !!CAL_UI.justMine + '" title="Hide everything except your task dues, your report dues, the dates of shows you are crewed on, your own notes and notes left for you" ' +
     act('calJustMine') + '><i class="mine-dot"></i>Just mine <span class="sc">' + mineN + '</span></button></div></div>' +
     '<div class="cal-fg"><h5>What</h5><div>' + CAL_KINDS.map(function (k) { return chip('kind', k[0], k[1], kc[k[0]] || 0, calKindColor(k[0])); }).join('') + '</div></div>' +
+    '<div class="cal-fg"><h5>Company life</h5><div>' + CAL_LIFE_KINDS.map(function (k) { return chip('kind', k[0], k[1], kc[k[0]] || 0, calKindColor(k[0])); }).join('') + '</div></div>' +
     (types.length > 1 ? '<div class="cal-fg"><h5>Type</h5><div>' + types.map(function (t) { return chip('type', t, typeLabel(t), tc[t]); }).join('') + '</div></div>' : '') +
     (folders.length ? '<div class="cal-fg"><h5>Folder / client</h5><div>' + folderCtl + '</div></div>' : '') +
     '</div>';
@@ -525,20 +648,76 @@ function calFilterPanel(all) {
    Two doors on one dialog: TEAM adds a milestone to a show (POST
    /shows/:id/milestones), PERSONAL adds a task owned by me, due that day
    (POST /steps). Both routes are requireRole('pm') + canEditProject on the
-   folder, so the affordance is drawn only for pm rank and up (canEditFolder
+   folder, so those two doors are drawn only for pm rank and up (canEditFolder
    with no folder = rank alone), and the folder list offers only folders this
    person can edit (a pm: the ones they own; manager+: all). The server stays
-   the gate; this only decides which doors are drawn. */
-function calCanAdd() { return typeof canEditFolder === 'function' && canEditFolder(null); }
+   the gate; this only decides which doors are drawn.
+
+   WAVE 3 adds a THIRD door — "Note / OOO" (POST /calendar-entries) — and that
+   route takes ANY signed-in role: an out-of-office is self-service. So the +
+   and the right-click are now drawn for everybody signed in (calCanAdd), and
+   the show doors keep their own, older gate (calCanAddShowDates). */
+function calCanAdd() { return !!(typeof CURRENT_USER !== 'undefined' && CURRENT_USER && CURRENT_USER.username); }
+function calCanAddShowDates() { return typeof canEditFolder === 'function' && canEditFolder(null); }
 function calAddCtx(iso) { return 'data-act-ctx="calAdd" data-k="' + esc(iso) + '"'; }
 function calAddBtn(iso, dayName) {
   return '<button class="cal-add" title="Add on ' + esc(dayName) + '" aria-label="Add on ' + esc(dayName) + '" ' +
     act('calAdd', null, iso) + '>' + icon('plus') + '</button>';
 }
-var CAL_ADD = null;                              /* { iso, door, fk, sid, label, title, lane } */
+var CAL_ADD = null;                              /* { iso, door, fk, sid, label, title, lane, + the note door's fields } */
 function calAddStart(iso, door) {
-  CAL_ADD = { iso: iso, door: door === 'mine' ? 'mine' : 'team', fk: null, sid: null, label: '', title: '', lane: '' };
+  CAL_ADD = { iso: iso, door: door === 'mine' || door === 'note' ? door : 'team', fk: null, sid: null, label: '', title: '', lane: '',
+              /* the note door (wave 3) */
+              editId: null, nlabel: '', nkind: 'note', who: 'team', forUsers: [], end: '', yearly: false, yearlyTouched: false };
   return CAL_ADD;
+}
+/* the edit form of the same door, prefilled from a stored entry */
+function calAddStartEdit(e) {
+  calAddStart(e.date, 'note');
+  CAL_ADD.editId = e.id; CAL_ADD.nlabel = e.label || ''; CAL_ADD.nkind = e.kind || 'note';
+  CAL_ADD.who = e.scope || 'team'; CAL_ADD.forUsers = (e.for_users || []).slice();
+  CAL_ADD.end = e.end_date || ''; CAL_ADD.yearly = e.repeat === 'yearly'; CAL_ADD.yearlyTouched = true;
+  return CAL_ADD;
+}
+var CAL_WHO = [['team', 'Everyone'], ['personal', 'Just me'], ['directed', 'Pick people']];
+/* THE THIRD DOOR — label, kind, who sees it, an optional end date, yearly.
+   "Pick people" is the roster picker's own row (rp-opt), multi-select: the
+   ROSTER (activeUsers), never the record, and never yourself (a note just for
+   you is "Just me"). */
+function calAddNoteHTML(st) {
+  function lab(t, inner) { return '<label class="cal-addf"><span>' + esc(t) + '</span>' + inner + '</label>'; }
+  var hint = st.who === 'personal' ? 'Only you see it — nobody else is ever sent it, admins included.'
+    : st.who === 'directed' ? 'You and the people you pick see it on their calendars. Each of them gets one notification — by email, on their own notification setting.'
+    : 'Everyone on the team sees it on their calendar. Nobody is notified.';
+  var ph = st.nkind === 'birthday' ? 'Aaron’s birthday' : st.nkind === 'ooo' ? 'Devin out — family trip' : 'Bring the spare processor to the shop';
+  var people = '';
+  if (st.who === 'directed') {
+    var me = String(ME || '').toLowerCase();
+    people = '<div class="cal-ppl" role="group" aria-label="Who this note shows up for">' + activeUsers().filter(function (u) {
+      return String(u.username).toLowerCase() !== me;
+    }).map(function (u) {
+      var on = st.forUsers.indexOf(u.username) >= 0;
+      return '<button class="rp-opt ' + (on ? 'on' : '') + '" aria-pressed="' + on + '" ' + act('calAddPerson', null, u.username) + '>' + av(u.username) +
+        '<span class="ri2"><span class="rn">' + esc(u.name) + '</span><span class="rr">' + esc(roleName(u.role) + (u.title ? ' · ' + u.title : '')) + '</span></span>' +
+        '<span class="chk">' + icon('check') + '</span></button>';
+    }).join('') + '</div>' +
+    '<div class="cal-ppl-n">' + (st.forUsers.length ? st.forUsers.length + ' picked' : 'Pick at least one person') + '</div>';
+  }
+  return '<div class="hint" style="margin:10px 0 12px">' + icon(st.who === 'directed' ? 'bell' : st.who === 'personal' ? 'lock' : 'users') + '<span>' + esc(hint) + '</span></div>' +
+    '<div class="cal-addgrid">' +
+    lab('Label', '<input id="caNLabel" class="cell-in" maxlength="120" placeholder="' + esc(ph) + '" value="' + esc(st.nlabel) + '">') +
+    lab('Kind', '<select id="caKind" class="cell-in" ' + actChange('calAddPick', null, 'kind') + '>' + CAL_LIFE_KINDS.map(function (k) {
+      return '<option value="' + esc(k[0]) + '"' + (k[0] === st.nkind ? ' selected' : '') + '>' + esc(k[1]) + '</option>';
+    }).join('') + '</select>') + '</div>' +
+    '<div class="cal-addgrid">' +
+    (st.editId ? lab('Date', '<input id="caDate" type="date" class="cell-in" value="' + esc(st.iso) + '">') : '') +
+    lab('Through (optional)', '<input id="caEnd" type="date" class="cell-in" min="' + esc(st.iso) + '" value="' + esc(st.end) + '">') +
+    '<label class="cal-addf cal-yr"><span>Repeat</span><span class="cal-yr-in"><input id="caYearly" type="checkbox"' + (st.yearly ? ' checked' : '') + '> Every year</span></label>' +
+    '</div>' +
+    '<div class="cal-addf" style="margin-bottom:8px"><span>Who sees this</span></div>' +
+    '<div class="seg cal-who">' + CAL_WHO.map(function (w) {
+      return '<button class="' + (st.who === w[0] ? 'on' : '') + '" aria-pressed="' + (st.who === w[0]) + '" ' + act('calAddWho', null, w[0]) + '>' + esc(w[1]) + '</button>';
+    }).join('') + '</div>' + people;
 }
 /* the folders this person may add to, each with its shows — from the loaded
    list, stub-safe: a show whose folder is not in PROJECTS_BY_ID is offered on
@@ -561,10 +740,24 @@ function calAddLanes(show) {
 function calAddHTML(shows) {
   var st = CAL_ADD;
   if (!st) return '';
-  var folders = calAddFolders(shows);
-  if (!folders.length) {
-    return '<div class="empty">No folder here you can add to. A PM adds dates on the folders they own; a manager or admin can add anywhere.</div>';
+  function foot(label) {
+    return '<div class="cal-addfoot"><button class="btn ghost" ' + act('closeModal') + '>Cancel</button>' +
+      '<button class="btn primary" ' + act('calAddCommit') + '>' + icon(st.editId ? 'check' : 'plus') + esc(label) + '</button></div>';
   }
+  /* editing a stored note: the note form alone, no doors */
+  if (st.editId) { st.door = 'note'; return calAddNoteHTML(st) + foot('Save changes'); }
+  /* the show doors keep their own gate — pm+ with a folder to add to; the
+     note door is everybody's */
+  var folders = calCanAddShowDates() ? calAddFolders(shows) : [];
+  var showDoors = folders.length > 0;
+  if (!showDoors) st.door = 'note';
+  var doorSeg = '<div class="seg cal-doors">' +
+    (showDoors
+      ? '<button class="' + (st.door === 'team' ? 'on' : '') + '" ' + act('calAddDoor', null, 'team') + '>Team · milestone</button>' +
+        '<button class="' + (st.door === 'mine' ? 'on' : '') + '" ' + act('calAddDoor', null, 'mine') + '>Personal · task for me</button>'
+      : '') +
+    '<button class="' + (st.door === 'note' ? 'on' : '') + '" ' + act('calAddDoor', null, 'note') + '>Note / OOO</button></div>';
+  if (st.door === 'note') return doorSeg + calAddNoteHTML(st) + foot('Add to the calendar');
   var f = folders.filter(function (x) { return x.k === st.fk; })[0] || folders[0];
   st.fk = f.k;
   var s = f.shows.filter(function (x) { return x.id === st.sid; })[0] || f.shows[0];
@@ -573,9 +766,7 @@ function calAddHTML(shows) {
   if (!lanes.some(function (l) { return l.key === st.lane; })) st.lane = lanes.length ? lanes[0].key : '';
   function lab(t, inner) { return '<label class="cal-addf"><span>' + esc(t) + '</span>' + inner + '</label>'; }
   var team = st.door === 'team';
-  return '<div class="seg cal-doors">' +
-    '<button class="' + (team ? 'on' : '') + '" ' + act('calAddDoor', null, 'team') + '>Team · milestone</button>' +
-    '<button class="' + (!team ? 'on' : '') + '" ' + act('calAddDoor', null, 'mine') + '>Personal · task for me</button></div>' +
+  return doorSeg +
     '<div class="hint" style="margin:10px 0 12px">' + icon(team ? 'cal' : 'check') + '<span>' +
     (team ? 'A milestone on the show — it shows in the show’s header strip and on everyone’s calendar.'
           : 'A task you own, due ' + esc(fmtDateFull(st.iso)) + ' — it lands on your My Tasks and on this calendar.') +
@@ -609,6 +800,48 @@ async function calAddSubmit(door, f) {
   }
   throw new Error('unknown door ' + door);
 }
+/* the note door's write (wave 3) — no show; the seam carries the refusal */
+function calNoteBody(f) {
+  var scope = f.scope === 'personal' || f.scope === 'directed' ? f.scope : 'team';
+  return { label: String(f.label || '').trim(), date: f.date, end_date: f.end_date || null,
+           kind: f.kind || 'note', scope: scope, repeat: f.repeat === 'yearly' ? 'yearly' : 'none',
+           for_users: scope === 'directed' ? (f.for_users || []).slice() : [] };
+}
+async function calNoteSubmit(f) {
+  f = f || {};
+  if (!calValidISO(f.date)) throw new Error('that is not a date the calendar knows');
+  return api.addCalendarEntry(calNoteBody(f));
+}
+/* who may edit / delete a stored entry — the route's own rule: its creator,
+   or an admin. The server is the gate; this decides which buttons draw. */
+function calEntryCanManage(e) {
+  if (!e || typeof CURRENT_USER === 'undefined' || !CURRENT_USER) return false;
+  return CURRENT_USER.role === 'admin' || String(e.created_by || '').toLowerCase() === String(ME || '').toLowerCase();
+}
+/* the small view an entry chip opens — details, and Edit/Delete only for the
+   creator or an admin */
+function calEntryHTML(e) {
+  if (!e) return '<div class="empty">That calendar entry is gone.</div>';
+  var when = fmtDateFull(e.date) + (e.end_date ? ' → ' + fmtDateFull(e.end_date) : '');
+  var who = e.scope === 'personal' ? 'Only ' + (userName(e.created_by) || e.created_by)
+    : e.scope === 'directed' ? (userName(e.created_by) || e.created_by) + ' and ' +
+        (e.for_users || []).map(function (u) { return userName(u) || u; }).join(', ')
+    : 'Everyone';
+  function row(k, v) { return '<div class="cal-ev-r"><span>' + esc(k) + '</span><b>' + esc(v) + '</b></div>'; }
+  return '<div class="cal-ev" data-entry="' + Number(e.id) + '">' +
+    row('Kind', calLifeWord(e.kind)) +
+    row(e.end_date ? 'Dates' : 'Date', when) +
+    (e.repeat === 'yearly' ? row('Repeats', 'Every year, since ' + String(e.date).slice(0, 4)) : '') +
+    row('Who sees it', who) +
+    row('Added by', userName(e.created_by) || e.created_by || '—') +
+    '</div>' +
+    '<div class="cal-addfoot">' +
+    (calEntryCanManage(e)
+      ? '<button class="btn ghost" ' + act('calEntryDel', e.id) + '>' + icon('trash') + 'Delete</button>' +
+        '<button class="btn" ' + act('calEntryEdit', e.id) + '>' + icon('pencil') + 'Edit</button>'
+      : '') +
+    '<button class="btn primary" ' + act('closeModal') + '>Close</button></div>';
+}
 
 /* ---- the data behind the page — both modes, through the seam ------------
    The shows (wave 1) plus the personal layer and the meetings. Each extra
@@ -616,7 +849,7 @@ async function calAddSubmit(door, f) {
    calendar, and the page says what it could not load. */
 async function calLoad() {
   var shows = await api.listShows();
-  var ctx = { tasks: [], reports: [], meetings: [], crew: {}, errors: [] };
+  var ctx = { tasks: [], reports: [], meetings: [], crew: {}, entries: [], errors: [] };
   function soft(p, name) { return Promise.resolve().then(function () { return p(); }).catch(function () { ctx.errors.push(name); return null; }); }
   var pids = {};
   (shows || []).forEach(function (s) { if (s && s.project_id != null) pids[s.project_id] = 1; });
@@ -626,8 +859,10 @@ async function calLoad() {
     soft(function () { return api.myCrewShows(); }, 'your crew list'),
     Promise.all(Object.keys(pids).map(function (pid) {
       return api.listMeetings(pid).catch(function () { return null; });
-    }))
+    })),
+    soft(function () { return api.listCalendarEntries(); }, 'notes, out-of-office and birthdays')
   ]);
+  ctx.entries = got[4] || [];
   ctx.tasks = got[0] || [];
   ctx.reports = got[1] || [];
   (got[2] || []).forEach(function (c) { if (c && c.show_id != null) ctx.crew[c.show_id] = 1; });
@@ -651,7 +886,7 @@ function viewCalendar(shows, ctx) {
     '<button class="iconbtn" title="Next" ' + act('calNav', null, 'next') + '>' + icon('chevR') + '</button>';
   var bar = '<div class="cal-bar"><div class="cal-nav">' + nav + '<h2 class="cal-title">' + esc(calTitle()) + '</h2></div>' +
     '<div class="cal-tools">' + seg +
-    '<button class="btn sm' + (CAL_UI.justMine ? ' on' : '') + '" aria-pressed="' + !!CAL_UI.justMine + '" title="Only your task dues, report dues and the shows you crew" ' + act('calJustMine') + '><i class="mine-dot"></i>Just mine</button>' +
+    '<button class="btn sm' + (CAL_UI.justMine ? ' on' : '') + '" aria-pressed="' + !!CAL_UI.justMine + '" title="Only your task dues, report dues, the shows you crew, your own notes and notes left for you"' + act('calJustMine') + '><i class="mine-dot"></i>Just mine</button>' +
     '<button class="btn sm' + (CAL_UI.filtersOpen || hid ? ' on' : '') + '" ' + act('calFilters') + '>Filters' + (hid ? ' · ' + hid + ' off' : '') + '</button>' +
     (hid ? '<button class="btn sm primary cal-reset" title="Turn every filter back on" ' + act('calFilterReset') + '>' + icon('refresh') + 'Reset</button>' : '') +
     '<button class="btn sm" title="Print this view" ' + act('calPrint') + '>' + icon('print') + 'Print</button></div></div>';
@@ -659,7 +894,7 @@ function viewCalendar(shows, ctx) {
   var rangeRow = m !== 'range' ? '' :
     '<div class="cal-range"><label>From <input type="date" class="cell-in" value="' + esc(w.from) + '" ' + actChange('calRange', null, 'from') + '></label>' +
     '<label>To <input type="date" class="cell-in" value="' + esc(w.to) + '" ' + actChange('calRange', null, 'to') + '></label></div>';
-  var legend = '<div class="cal-legend">' + CAL_KINDS.concat(CAL_MINE_KINDS).map(function (k) {
+  var legend = '<div class="cal-legend">' + CAL_KINDS.concat(CAL_MINE_KINDS, CAL_LIFE_KINDS).map(function (k) {
     return '<span><i style="background:' + esc(calKindColor(k[0])) + '"></i>' + esc(k[1]) + '</span>';
   }).join('') + '<span><i class="mine-dot"></i>Yours</span>' +
     Object.keys(EVENT_TYPES).map(function (t) { return typeTag(t); }).join('') + '</div>';
@@ -681,8 +916,9 @@ function viewCalendar(shows, ctx) {
   if (ctx && ctx.errors && ctx.errors.length) notes.push('Could not load ' + ctx.errors.join(', ') + ' — showing the rest');
   var foot = notes.length || jump ? '<div class="cal-notes">' + esc(notes.join(' · ')) + jump + '</div>' : '';
 
-  return '<div class="page-h"><div><h1>Calendar</h1><div class="sub">Load-ins, shows, installs, strikes, milestones and meetings across every show — plus your own task and report dues. Pushes to the e360 scheduler on promote.' +
-    (calCanAdd() && m !== 'list' && m !== 'range' ? ' Right-click a day, or tap its +, to add a milestone or a task for yourself.' : '') + '</div></div></div>' +
+  return '<div class="page-h"><div><h1>Calendar</h1><div class="sub">Load-ins, shows, installs, strikes, milestones and meetings across every show — plus your own task and report dues, and the team’s notes, out-of-office and birthdays. Pushes to the e360 scheduler on promote.' +
+    (calCanAdd() && m !== 'list' && m !== 'range'
+      ? ' Right-click a day, or tap its +, to add ' + (calCanAddShowDates() ? 'a milestone, a task for yourself, or ' : '') + 'a note, an out-of-office or a birthday.' : '') + '</div></div></div>' +
     bar + rangeRow + (CAL_UI.filtersOpen ? calFilterPanel(all) : '') + legend + foot +
     '<div class="cal-body cal-m-' + esc(m) + '">' + calBody(vis) + '</div>';
 }
@@ -696,7 +932,10 @@ function calPrintHTML(shows, ctx) {
 }
 /* the day's full list — the "+N more" / phone-dot modal body */
 function calDayHTML(shows, iso, ctx) {
-  var list = calVisible(calendarItems(shows, ctx)).filter(function (it) { return it.date && it.date.slice(0, 10) === iso; });
+  /* the yearly expansion is pinned to THIS day, whatever the view shows */
+  var c2 = {}; Object.keys(ctx || {}).forEach(function (k) { c2[k] = ctx[k]; });
+  if (calValidISO(iso)) c2.window = { from: iso, to: iso };
+  var list = calVisible(calendarItems(shows, c2)).filter(function (it) { return it.date && it.date.slice(0, 10) === iso; });
   return list.length ? '<div class="cal-daylist">' + list.map(function (it) { return calRow(it, true); }).join('') + '</div>'
     : '<div class="empty">Nothing on this day.</div>';
 }

@@ -3564,6 +3564,41 @@ function meetingsForProject(projectId) {
       return b.id - a.id;
     });
 }
+/* ============================================================================
+   CALENDAR ENTRIES — company life (calendar wave 3, 2026-09-25)
+   ----------------------------------------------------------------------------
+   The demo twin of the `calendar_entries` table: notes, out-of-office spans
+   and birthdays that belong to NO show. scope 'team' is everybody's,
+   'personal' is its creator's alone, 'directed' is its creator's + the
+   usernames in for_users. The seam (api.listCalendarEntries) applies the SAME
+   visibility rule the route's SQL does — the whole store is here, but only
+   what ME may see ever leaves it. A yearly row's `date` is its anchor year.
+   ========================================================================== */
+var _calEntrySeq = 0;
+var CAL_ENTRIES = [], CAL_ENTRIES_BY_ID = {};
+function mkCalEntry(o) {
+  var e = { id: ++_calEntrySeq, label: o.label, date: o.date, end_date: o.end_date || null,
+            scope: o.scope || 'team', kind: o.kind || 'note', repeat: o.repeat || 'none',
+            for_users: (o.for_users || []).slice(), created_by: o.by || 'tandres',
+            created_at: TODAY_ISO, updated_at: TODAY_ISO };
+  CAL_ENTRIES.push(e); CAL_ENTRIES_BY_ID[e.id] = e;
+  return e;
+}
+/* the one visibility rule, mirrored from routes/calendar.js VISIBLE */
+function calEntryVisibleTo(e, username) {
+  var me = String(username || '').toLowerCase();
+  if (!e) return false;
+  if (e.scope === 'team') return true;
+  if (String(e.created_by).toLowerCase() === me) return e.scope === 'personal' || e.scope === 'directed';
+  if (e.scope === 'directed') return (e.for_users || []).some(function (u) { return String(u).toLowerCase() === me; });
+  return false;
+}
+mkCalEntry({ label: 'Aaron’s birthday', date: '2024' + dayISO(9).slice(4), kind: 'birthday', repeat: 'yearly', by: 'aramos' });
+mkCalEntry({ label: 'Devin out — family trip', date: dayISO(4), end_date: dayISO(7), kind: 'ooo', by: 'dvargas' });
+mkCalEntry({ label: 'Renew the Flex license', date: dayISO(2), scope: 'personal', by: 'tandres' });
+mkCalEntry({ label: 'Bring the spare processor to the shop', date: dayISO(3), scope: 'directed', for_users: ['tandres'], by: 'tvigon' });
+mkCalEntry({ label: 'Dentist', date: dayISO(5), scope: 'personal', kind: 'ooo', by: 'jhawk' });
+
 function meetingCount(projectId) {
   var n = 0;
   ALL_MEETINGS.forEach(function (m) { if (m.project_id === Number(projectId)) n++; });

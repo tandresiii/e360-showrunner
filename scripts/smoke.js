@@ -7117,6 +7117,155 @@ const DEL = (p, o) => call('DELETE', p, o);
     // "a meeting dies with its folder" is actually proven.
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('CE. calendar entries — company life on the calendar (wave 3, 2026-09-25)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "someone's birthday? out of office notes, etc?" + "put post it notes on a
+  // date and have it show up on someone elses calendar". Rows that hang off NO
+  // show. THE LOAD-BEARING GATES, each named on its assertion:
+  //   1. VISIBILITY (routes/calendar.js VISIBLE) — pinned with DISCRIMINATING
+  //      identities in both directions: tech sees tech's personal note and pm
+  //      does not; pm sees pm's and tech does not; an ADMIN sees neither; a
+  //      directed note reaches its target and not a third party.
+  //   2. ANY-ROLE CREATE — a tech posts their own OOO.
+  //   3. CREATOR-OR-ADMIN writes — a stranger's DELETE is 403, the creator's 200.
+  //   4. THE PING — one outbox row per directed target, none for the author.
+  //   5. `calendar_entries` in RECAP_FORBIDDEN_TABLES.
+  {
+    const CE = TAG + ' CE';
+    const has = (res, id) => Array.isArray(res.body) && res.body.some((e) => e.id === id);
+    ok('CE an unauthenticated read is 401', (await GET('/api/calendar-entries')).status === 401);
+
+    // ── 2. any role creates — a tech marks themselves out, as a SPAN ─────────
+    const ceOoo = await POST('/api/calendar-entries',
+      { label: CE + ' tech out', date: '2031-07-07', end_date: '2031-07-10', kind: 'ooo', scope: 'team' },
+      { token: TECHT });
+    ok('CE ANY-ROLE: a TECH posts their own out-of-office span (no PM needed) — 200, stamped with them',
+       ceOoo.status === 200 && ceOoo.body.created_by === techUser && ceOoo.body.end_date === '2031-07-10'
+       && ceOoo.body.kind === 'ooo' && ceOoo.body.scope === 'team', ceOoo.body);
+
+    // ── 1. personal visibility, both directions ────────────────────────────
+    const cePT = await POST('/api/calendar-entries',
+      { label: CE + ' tech private', date: '2031-07-08', scope: 'personal' }, { token: TECHT });
+    const cePP = await POST('/api/calendar-entries',
+      { label: CE + ' pm private', date: '2031-07-08', scope: 'personal' }, { token: PMT });
+    ok('CE two personal notes, one each by tech and pm', cePT.status === 200 && cePP.status === 200,
+       [cePT.body, cePP.body]);
+    const ceT = await GET('/api/calendar-entries', { token: TECHT });
+    const ceP = await GET('/api/calendar-entries', { token: PMT });
+    const ceAdm = await GET('/api/calendar-entries', { token: A });
+    ok('CE VISIBILITY: the tech is served THEIR OWN personal note and NOT the pm’s',
+       has(ceT, cePT.body.id) && !has(ceT, cePP.body.id), ceT.body);
+    ok('CE VISIBILITY: the pm is served THEIR OWN personal note and NOT the tech’s (the pair discriminates — ' +
+       'widen or narrow the personal clause in VISIBLE and one of these two goes red)',
+       has(ceP, cePP.body.id) && !has(ceP, cePT.body.id), ceP.body);
+    ok('CE VISIBILITY: an ADMIN is served neither personal note — "never served" means never',
+       ceAdm.status === 200 && !has(ceAdm, cePT.body.id) && !has(ceAdm, cePP.body.id), ceAdm.body);
+    ok('CE ...while a TEAM entry is served to all three',
+       has(ceT, ceOoo.body.id) && has(ceP, ceOoo.body.id) && has(ceAdm, ceOoo.body.id));
+
+    // ── 1+4. directed: target yes, third party no, one ping, none to self ──
+    const ceD = await POST('/api/calendar-entries',
+      { label: CE + ' bring the spare processor', date: '2031-07-09', scope: 'directed', for_users: [techUser] },
+      { token: PMT });
+    ok('CE a pm directs a note at the tech — 200, for_users resolved, notified names the tech',
+       ceD.status === 200 && ceD.body.scope === 'directed' && ceD.body.for_users.join() === techUser
+       && Array.isArray(ceD.body.notified) && ceD.body.notified.join() === techUser, ceD.body);
+    const ceDT = await GET('/api/calendar-entries', { token: TECHT });
+    const ceD3 = await GET('/api/calendar-entries', { token: PM2T });
+    const ceDP = await GET('/api/calendar-entries', { token: PMT });
+    ok('CE VISIBILITY: the directed note is served to its TARGET (tech) and its CREATOR (pm)…',
+       has(ceDT, ceD.body.id) && has(ceDP, ceD.body.id));
+    ok('CE VISIBILITY: …and NOT to a THIRD PARTY (pm2) — drop the for_users clause’s target test and this pair splits',
+       ceD3.status === 200 && !has(ceD3, ceD.body.id), ceD3.body);
+    const ceOut = async (u) => (await pool.query(
+      `SELECT * FROM notification_outbox WHERE LOWER(username)=LOWER($1) AND kind='notify' AND subject LIKE $2`,
+      [u, '%' + CE + '%'])).rows;
+    const ceOT = await ceOut(techUser);
+    ok('CE THE PING: exactly ONE outbox row for the target, in the notify lane, saying who left what for when',
+       ceOT.length === 1 && ceOT[0].link === '/#calendar' && ceOT[0].actor === pmUser
+       && ceOT[0].subject.indexOf('left a note on your calendar: ' + CE + ' bring the spare processor — 2031-07-09') >= 0,
+       ceOT.map((r) => r.subject));
+    ok('CE ...and ZERO for the author (the outbox never mails you about your own act)',
+       (await ceOut(pmUser)).length === 0);
+    const ceSelf = await POST('/api/calendar-entries',
+      { label: CE + ' note to self', date: '2031-07-11', scope: 'directed', for_users: [pmUser] }, { token: PMT });
+    ok('CE a note directed at YOURSELF saves, pings nobody (notified is empty)',
+       ceSelf.status === 200 && ceSelf.body.notified.length === 0, ceSelf.body);
+    ok('CE ...and left no outbox row anywhere',
+       (await pool.query(`SELECT COUNT(*)::int AS n FROM notification_outbox WHERE subject LIKE $1`,
+         ['%' + CE + ' note to self%'])).rows[0].n === 0);
+    const ceTeamOut = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM notification_outbox WHERE subject LIKE $1`, ['%' + CE + ' tech out%']);
+    ok('CE team and personal entries ping NOBODY', ceTeamOut.rows[0].n === 0 &&
+       (await pool.query(`SELECT COUNT(*)::int AS n FROM notification_outbox WHERE subject LIKE $1`,
+         ['%' + CE + ' %private%'])).rows[0].n === 0);
+
+    // ── validation ─────────────────────────────────────────────────────────
+    const bad = async (body, re, what) => {
+      const r = await POST('/api/calendar-entries', body, { token: TECHT });
+      ok('CE refuses ' + what, r.status === 400 && re.test(r.body.error || ''), r.body);
+    };
+    await bad({ date: '2031-07-01' }, /needs a label/, 'a missing label');
+    await bad({ label: 'x'.repeat(121), date: '2031-07-01' }, /at most 120/, 'a 121-character label');
+    await bad({ label: 'x', date: '2031-02-30' }, /real date/, 'a date that does not exist (Feb 30)');
+    await bad({ label: 'x', date: '2031-07-05', end_date: '2031-07-01' }, /before the start/, 'an end before the start');
+    await bad({ label: 'x', date: '2031-07-05', kind: 'party' }, /kind must be one of/, 'an unknown kind');
+    await bad({ label: 'x', date: '2031-07-05', scope: 'public' }, /scope must be one of/, 'an unknown scope');
+    await bad({ label: 'x', date: '2031-07-05', repeat: 'weekly' }, /repeat must be one of/, 'an unknown repeat');
+    await bad({ label: 'x', date: '2031-07-05', scope: 'team', for_users: [pmUser] }, /only for scope 'directed'/,
+      'for_users on a team note');
+    await bad({ label: 'x', date: '2031-07-05', scope: 'directed', for_users: [] }, /at least one person/,
+      'a directed note naming nobody');
+    await bad({ label: 'x', date: '2031-07-05', scope: 'directed', for_users: [pmUser, TAG + 'ghost'] },
+      new RegExp(`Unknown user '${(TAG + 'ghost').toLowerCase()}' in for_users`), 'an unknown username (named)');
+
+    // ── 3. creator or admin ────────────────────────────────────────────────
+    const ceStrangerPut = await PUT(`/api/calendar-entries/${ceOoo.body.id}`, { label: 'hijack' }, { token: PM2T });
+    ok('CE GATE: a stranger cannot EDIT the tech’s team OOO — 403, in the route’s words',
+       ceStrangerPut.status === 403 && /only the person who added this calendar entry, or an admin/.test(ceStrangerPut.body.error || ''),
+       ceStrangerPut.body);
+    const ceStrangerDel = await DEL(`/api/calendar-entries/${ceOoo.body.id}`, { token: PM2T });
+    ok('CE GATE: a stranger’s DELETE of it is 403 (drop the creator check in writableEntry and this goes red)',
+       ceStrangerDel.status === 403, ceStrangerDel.body);
+    const ceMgrDel = await DEL(`/api/calendar-entries/${ceOoo.body.id}`, { token: MGRT });
+    ok('CE GATE: …a MANAGER is a stranger here too (creator or ADMIN — not rank)', ceMgrDel.status === 403, ceMgrDel.body);
+    const ceHiddenDel = await DEL(`/api/calendar-entries/${cePT.body.id}`, { token: PMT });
+    ok('CE a stranger poking at someone’s PERSONAL note gets a 404 — not even its existence is served',
+       ceHiddenDel.status === 404, ceHiddenDel.body);
+    const ceEdit = await PUT(`/api/calendar-entries/${ceOoo.body.id}`, { end_date: '2031-07-12' }, { token: TECHT });
+    ok('CE the creator edits their own (a partial patch keeps the rest)',
+       ceEdit.status === 200 && ceEdit.body.end_date === '2031-07-12' && ceEdit.body.label === CE + ' tech out', ceEdit.body);
+    const ceRe = await PUT(`/api/calendar-entries/${ceD.body.id}`, { for_users: [techUser, mgrUser] }, { token: PMT });
+    ok('CE adding a person to a directed note pings ONLY the newcomer',
+       ceRe.status === 200 && ceRe.body.notified.join() === mgrUser
+       && (await ceOut(techUser)).length === 1 && (await ceOut(mgrUser)).length === 1, ceRe.body);
+    const ceOwnDel = await DEL(`/api/calendar-entries/${ceOoo.body.id}`, { token: TECHT });
+    ok('CE the creator deletes their own — 200', ceOwnDel.status === 200 && ceOwnDel.body.ok === true, ceOwnDel.body);
+    ok('CE ...and it is gone for everyone (a second delete is a 404)',
+       (await DEL(`/api/calendar-entries/${ceOoo.body.id}`, { token: TECHT })).status === 404
+       && !has(await GET('/api/calendar-entries', { token: PMT }), ceOoo.body.id));
+    const ceAdmDel = await DEL(`/api/calendar-entries/${cePT.body.id}`, { token: A });
+    ok('CE an ADMIN may remove any entry, even one never served to them', ceAdmDel.status === 200, ceAdmDel.body);
+
+    // ── yearly is stored as its anchor ─────────────────────────────────────
+    const ceBday = await POST('/api/calendar-entries',
+      { label: CE + ' birthday', date: '2030-03-14', kind: 'birthday', repeat: 'yearly' }, { token: TECHT });
+    ok('CE a yearly birthday stores its ANCHOR date as given (the client materializes the occurrences)',
+       ceBday.status === 200 && ceBday.body.date === '2030-03-14' && ceBday.body.repeat === 'yearly', ceBday.body);
+
+    // ── 5. the recap firewall ──────────────────────────────────────────────
+    let fwCE = null;
+    try { await require('../lib/firewall').guardRecapQuery(pool).query('SELECT label FROM calendar_entries'); }
+    catch (e) { fwCE = e.message; }
+    ok('CE THE FIREWALL REFUSES company life — `calendar_entries` is a forbidden table for the recap ' +
+       '(drop it from RECAP_FORBIDDEN_TABLES and this goes red)',
+       !!fwCE && /may not read `calendar_entries`/.test(fwCE), fwCE);
+
+    await pool.query(`DELETE FROM calendar_entries WHERE label LIKE $1`, [CE + '%']);
+    await pool.query(`DELETE FROM notification_outbox WHERE subject LIKE $1`, ['%' + CE + '%']);
+  }
+
   section('6. cascade integrity — a folder with a child of EVERY type');
   const before = await childCounts(P);
   ok('the smoke folder has children of every wired type',
@@ -8080,9 +8229,12 @@ const DEL = (p, o) => call('DELETE', p, o);
     [TAG + '%']);
   await pool.query(`DELETE FROM contacts
     WHERE name LIKE $1 OR flex_contact_id IN ('ct-lovb', 'ct-CREATED')`, [TAG + '%']);
+  // company life hangs off no folder, so no cascade tidies it — the run does
+  await pool.query(`DELETE FROM calendar_entries WHERE created_by LIKE $1`, [TAG + '%']);
   const leftovers = await pool.query(
     `SELECT (SELECT COUNT(*) FROM projects WHERE name LIKE $1)
           + (SELECT COUNT(*) FROM users WHERE username LIKE $1)
+          + (SELECT COUNT(*) FROM calendar_entries WHERE created_by LIKE $1 OR label LIKE $1)
           + (SELECT COUNT(*) FROM contacts WHERE name LIKE $1)
           + (SELECT COUNT(*) FROM proposals WHERE payload::text LIKE $1) AS n`, ['%' + TAG + '%']);
   ok('the smoke run cleaned up after itself', parseInt(leftovers.rows[0].n, 10) === 0,

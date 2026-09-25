@@ -290,14 +290,14 @@ var SR = (function () {
      REPORTS_BY_ID, NOTIF_BY_ID, NEEDS_BY_ID,
      CONTACTS_BY_ID, SHOW_CONTACTS_BY_ID,
      CONTENT_BY_ID, CONTENT_VERSIONS_BY_ID,
-     MEETINGS_BY_ID,
+     MEETINGS_BY_ID, CAL_ENTRIES_BY_ID,
      NOTE_READS].forEach(clearMap);
     [PROJECTS, ALL_SHOWS, ALL_JOBS, ALL_EXPENSES, ALL_POS, PO_LINES, ALL_NOTES,
      ALL_DELIVERABLES, USERS, BUDGET_LINES,
      TECH_REPORTS, NOTIF_OUTBOX, ALL_NEEDS,
      ALL_CONTACTS, ALL_SHOW_CONTACTS,
      ALL_CONTENT, ALL_CONTENT_VERSIONS,
-     ALL_MEETINGS].forEach(function (a) { a.length = 0; });
+     ALL_MEETINGS, CAL_ENTRIES].forEach(function (a) { a.length = 0; });
     NOTIF_PREFS = {};
     /* mentionLookup() memoizes name->username off USERS on first use. USERS is
        emptied above, but the cache is not derived state the maps own — so
@@ -5343,6 +5343,68 @@ var api = (function () {
       });
     },
 
+    /* ---- calendar wave 3 — company life (notes · OOO · birthdays) ---------
+       Full parity with routes/calendar.js, refusals in the SERVER'S OWN words.
+       The demo store holds everybody's rows; only what calEntryVisibleTo(ME)
+       admits ever leaves the seam — the same rule as the route's VISIBLE SQL.
+       A directed note pings each target once (mkNotif, 'notify' kind), never
+       its author: the outbox's own self-suppression, mirrored. */
+    listCalendarEntries: function () {
+      if (!API()) {
+        return ok(CAL_ENTRIES.filter(function (e) { return calEntryVisibleTo(e, ME); })
+          .map(function (e) { return _calEntryCopy(e); })
+          .sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : a.id - b.id; }));
+      }
+      return SR.get('/api/calendar-entries').then(function (rows) { return rows || []; });
+    },
+    addCalendarEntry: function (body) {
+      body = body || {};
+      if (!API()) {
+        var v = _calEntryCheck(body, null);
+        if (v.error) return fail(v.error);
+        var e = mkCalEntry({ label: v.label, date: v.date, end_date: v.end_date, scope: v.scope, kind: v.kind,
+                             repeat: v.repeat, for_users: v.for_users, by: ME });
+        var out = _calEntryCopy(e);
+        out.notified = _calEntryPing(e, v.for_users);
+        return ok(out);
+      }
+      return SR.post('/api/calendar-entries', body);
+    },
+    updateCalendarEntry: function (id, patch) {
+      patch = patch || {};
+      if (!API()) {
+        var e = CAL_ENTRIES_BY_ID[Number(id)];
+        var admin = CURRENT_USER && CURRENT_USER.role === 'admin';
+        if (!e || (!admin && !calEntryVisibleTo(e, ME))) return fail('calendar entry ' + id + ' not found');
+        if (!admin && String(e.created_by).toLowerCase() !== String(ME).toLowerCase()) {
+          return fail('only the person who added this calendar entry, or an admin, can change or remove it');
+        }
+        var v = _calEntryCheck(patch, e);
+        if (v.error) return fail(v.error);
+        var before = e.scope === 'directed' ? e.for_users.map(function (u) { return u.toLowerCase(); }) : [];
+        ['label', 'date', 'end_date', 'scope', 'kind', 'repeat', 'for_users'].forEach(function (k) { e[k] = v[k]; });
+        e.updated_at = TODAY_ISO;
+        var out = _calEntryCopy(e);
+        out.notified = _calEntryPing(e, v.for_users.filter(function (u) { return before.indexOf(u.toLowerCase()) < 0; }));
+        return ok(out);
+      }
+      return SR.put('/api/calendar-entries/' + Number(id), patch);
+    },
+    deleteCalendarEntry: function (id) {
+      if (!API()) {
+        var e = CAL_ENTRIES_BY_ID[Number(id)];
+        var admin = CURRENT_USER && CURRENT_USER.role === 'admin';
+        if (!e || (!admin && !calEntryVisibleTo(e, ME))) return fail('calendar entry ' + id + ' not found');
+        if (!admin && String(e.created_by).toLowerCase() !== String(ME).toLowerCase()) {
+          return fail('only the person who added this calendar entry, or an admin, can change or remove it');
+        }
+        CAL_ENTRIES.splice(CAL_ENTRIES.indexOf(e), 1);
+        delete CAL_ENTRIES_BY_ID[e.id];
+        return ok({ ok: true, id: e.id });
+      }
+      return SR.del('/api/calendar-entries/' + Number(id));
+    },
+
     /* ---- B2. the call-sheet header — rendered everywhere, editable nowhere */
     updateCallSheet: function (showId, patch) {
       if (!API()) {
@@ -6317,6 +6379,93 @@ var api = (function () {
   function _nowHM() {
     var d = new Date(), h = String(d.getHours()), m = String(d.getMinutes());
     return (h.length < 2 ? '0' + h : h) + ':' + (m.length < 2 ? '0' + m : m);
+  }
+
+  /* ---- calendar wave 3 — the demo twin of routes/calendar.js, word for word.
+     Returns the MERGED row ({label, date, end_date, scope, kind, repeat,
+     for_users}) or {error} — `existing` present on a PUT, absent on a POST,
+     the same partial-patch rule the route applies. */
+  function _calEntryCopy(e) {
+    var o = {}; Object.keys(e).forEach(function (k) { o[k] = e[k]; });
+    o.for_users = (e.for_users || []).slice();
+    return o;
+  }
+  function _calRealDate(s) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(s || ''))) return false;
+    var d = new Date(s + 'T00:00:00Z');
+    return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+  }
+  function _calEntryCheck(b, existing) {
+    function has(k) { return Object.prototype.hasOwnProperty.call(b, k); }
+    function en(k, list, fb) {
+      var v = b[k];
+      if (v === undefined || v === null || v === '') return { v: fb };
+      v = String(v).trim();
+      return list.indexOf(v) < 0 ? { error: k + ' must be one of: ' + list.join(', ') } : { v: v };
+    }
+    var x = existing || {};
+    var out = {};
+    if (!existing || has('label')) {
+      var l = String(b.label == null ? '' : b.label).replace(/\s+/g, ' ').trim();
+      if (!l) return { error: 'a calendar entry needs a label — what is this date?' };
+      if (l.length > 120) return { error: 'a label is at most 120 characters' };
+      out.label = l;
+    } else out.label = x.label;
+    if (!existing || has('date')) {
+      var d = String(b.date == null ? '' : b.date).trim();
+      if (!_calRealDate(d)) return { error: 'date must be a real date (YYYY-MM-DD) — got "' + (b.date == null ? '' : b.date) + '"' };
+      out.date = d;
+    } else out.date = x.date;
+    var endRaw = existing && !has('end_date') ? x.end_date : b.end_date;
+    if (endRaw === undefined || endRaw === null || endRaw === '') out.end_date = null;
+    else {
+      var e2 = String(endRaw).trim();
+      if (!_calRealDate(e2)) return { error: 'end_date must be a real date (YYYY-MM-DD) — got "' + endRaw + '"' };
+      if (e2 < out.date) return { error: 'end_date ' + e2 + ' is before the start date ' + out.date };
+      var span = Math.round((new Date(e2 + 'T00:00:00Z') - new Date(out.date + 'T00:00:00Z')) / 86400000);
+      if (span > 366) return { error: 'a calendar entry may span at most 366 days' };
+      out.end_date = e2 === out.date ? null : e2;
+    }
+    var r;
+    r = en('scope', ['team', 'personal', 'directed'], existing ? x.scope : 'team'); if (r.error) return r; out.scope = existing && !has('scope') ? x.scope : r.v;
+    r = en('kind', ['note', 'ooo', 'birthday'], existing ? x.kind : 'note'); if (r.error) return r; out.kind = existing && !has('kind') ? x.kind : r.v;
+    r = en('repeat', ['none', 'yearly'], existing ? x.repeat : 'none'); if (r.error) return r; out.repeat = existing && !has('repeat') ? x.repeat : r.v;
+    var list = has('for_users') ? b.for_users : (existing && out.scope === 'directed' ? (x.for_users || []) : []);
+    if (list === undefined || list === null || list === '') list = [];
+    if (typeof list === 'string') list = list.split(',');
+    if (!Array.isArray(list)) return { error: 'for_users must be an array of usernames' };
+    list = list.map(function (u) { return String(u || '').trim(); }).filter(Boolean);
+    if (out.scope !== 'directed') {
+      if (list.length) return { error: "for_users is only for scope 'directed' — a team note is everybody's, a personal one is yours" };
+      out.for_users = [];
+      return out;
+    }
+    if (!list.length) return { error: 'a directed note needs at least one person to show up for' };
+    if (list.length > 25) return { error: 'a directed note may name at most 25 people' };
+    var seen = {}, valid = [], unknown = [];
+    list.forEach(function (u) {
+      var k = u.toLowerCase(); if (seen[k]) return; seen[k] = 1;
+      var hit = USERS.filter(function (x2) { return String(x2.username).toLowerCase() === k; })[0];
+      if (hit) valid.push(hit.username); else unknown.push(k);
+    });
+    if (unknown.length) {
+      return { error: 'Unknown user' + (unknown.length > 1 ? 's' : '') + ' ' +
+        unknown.map(function (u) { return "'" + u + "'"; }).join(', ') + ' in for_users' };
+    }
+    out.for_users = valid;
+    return out;
+  }
+  /* one outbox row per target, never the author — returns who was QUEUED */
+  function _calEntryPing(e, targets) {
+    var who = (ROSTER[ME] && ROSTER[ME].name) || ME;
+    var text = who + ' left a note on your calendar: ' + e.label + ' — ' + e.date + (e.end_date ? ' → ' + e.end_date : '');
+    var out = [];
+    (targets || []).forEach(function (u) {
+      if (String(u).toLowerCase() === String(ME).toLowerCase()) return;
+      var n = mkNotif(u, 'notify', text, { body: text, link: '/#calendar', actor: ME });
+      if (n.status === 'queued') out.push(u);
+    });
+    return out;
   }
 
   /* The demo twin of routes/meetings.js's validation, word for word — a demo
