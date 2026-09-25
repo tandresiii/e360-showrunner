@@ -3502,7 +3502,7 @@ const DEL = (p, o) => call('DELETE', p, o);
   const prefs = await GET('/api/me/notification-prefs', { token: TECHT });
   ok('F3: a person with no stored row gets Tom’s defaults',
      prefs.status === 200 && prefs.body.prefs.assignment === 'immediate' &&
-     prefs.body.prefs.mention === 'immediate' && prefs.body.prefs.notify === 'digest' &&
+     prefs.body.prefs.mention === 'immediate' && prefs.body.prefs.notify === 'immediate' &&
      prefs.body.prefs.report_nag === 'digest', prefs.body.prefs);
   const prefRows0 = await pool.query(
     'SELECT COUNT(*)::int AS n FROM notification_prefs WHERE username=$1', [techUser]);
@@ -3513,7 +3513,7 @@ const DEL = (p, o) => call('DELETE', p, o);
   const prefRows1 = await pool.query(
     'SELECT mode FROM notification_prefs WHERE username=$1 AND kind=$2', [techUser, 'notify']);
   ok('F3: ...as exactly one row', prefRows1.rows.length === 1 && prefRows1.rows[0].mode === 'off');
-  await PUT('/api/me/notification-prefs', { notify: 'digest' }, { token: TECHT });
+  await PUT('/api/me/notification-prefs', { notify: 'immediate' }, { token: TECHT });
   const prefRows2 = await pool.query(
     'SELECT COUNT(*)::int AS n FROM notification_prefs WHERE username=$1', [techUser]);
   ok('F3: writing the HOUSE DEFAULT removes the row again', prefRows2.rows[0].n === 0);
@@ -3649,8 +3649,9 @@ const DEL = (p, o) => call('DELETE', p, o);
      digestFlush.status === 200 && digestFlush.body.considered >= 0, digestFlush.body);
 
   // ── THE DIGEST QUEUE HAS A DRAIN (9/16 audit) ────────────────────────────
-  // NOTIFY_DEFAULT_MODE batches 'notify'/'report_nag'/'change' into digest
-  // mode — and until this pass NOTHING drained those rows on its own: the
+  // NOTIFY_DEFAULT_MODE batches 'report_nag'/'change' into digest mode
+  // ('notify' rode with them until 9/25, when it went immediate) — and until
+  // this pass NOTHING drained those rows on its own: the
   // lifecycle sweep flushes immediate-only on purpose, the digest sweep
   // passed {}, and the {digest:true} endpoint hung unused. Batched rows
   // queued forever. The morning digest sweep (lib/digest.js runDigestSweep)
