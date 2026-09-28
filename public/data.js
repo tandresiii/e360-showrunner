@@ -4867,6 +4867,7 @@ var DIGEST_GROUPS = [
   { kind: 'content',     title: 'Content pieces due on you' },
   { kind: 'chase',       title: 'Content owed to us, past due' },
   { kind: 'byteless',    title: 'Files you filed with no document behind them' },
+  { kind: 'life',        title: 'Company life' },
   { kind: 'backup_stale', title: 'Backups' },
   { kind: 'health',      title: 'System health' }
 ];
@@ -4903,9 +4904,54 @@ function digestSummary(items) {
   if (ch.length) parts.push(ch.length === 1 ? 'a client piece is past due' : ch.length + ' client pieces past due');
   var bl = by.byteless || [];
   if (bl.length) parts.push(bl.length + ' file' + s(bl.length) + ' with no bytes');
+  var lf = by.life || [];
+  var lOoo = lf.filter(function (i) { return i.life_kind === 'ooo'; }).length;
+  var lBd = lf.filter(function (i) { return i.life_kind === 'birthday'; }).length;
+  var lNote = lf.length - lOoo - lBd;
+  if (lOoo) parts.push(lOoo === 1 ? 'someone is out this week' : lOoo + ' out-of-office this week');
+  if (lBd) parts.push(lBd === 1 ? 'a birthday this week' : lBd + ' birthdays this week');
+  if (lNote) parts.push(lNote === 1 ? 'a calendar note this week' : lNote + ' calendar notes this week');
   if ((by.backup_stale || []).length) parts.push('backups are stale');
   if ((by.health || []).length) parts.push('storage needs attention');
   return parts.join(' · ');
+}
+/* the lib/calendar-life.js twin: occurrences touching [from, to], the
+   "Thu Oct 1 – Fri Oct 2" wording, and the per-person section */
+var LIFE_WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+var LIFE_MO = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function lifeShift(iso, n) { var d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function lifeDay(iso) { var d = new Date(iso + 'T00:00:00Z'); return LIFE_WD[d.getUTCDay()] + ' ' + LIFE_MO[d.getUTCMonth()] + ' ' + d.getUTCDate(); }
+function lifeLine(label, kind, start, end) {
+  var w = kind === 'ooo' ? 'out of office' : kind === 'birthday' ? 'birthday' : '';
+  return label + ' — ' + (w ? w + ', ' : '') + lifeDay(start) + (end && end !== start ? ' – ' + lifeDay(end) : '');
+}
+function lifeOccurrencesIn(e, from, to) {
+  var iso = /^\d{4}-\d{2}-\d{2}$/;
+  if (!e || !iso.test(String(e.date || ''))) return [];
+  var len = iso.test(String(e.end_date || '')) && e.end_date > e.date
+    ? Math.min(Math.round((new Date(e.end_date + 'T00:00:00Z') - new Date(e.date + 'T00:00:00Z')) / 86400000), 366) : 0;
+  var starts = [];
+  if (e.repeat === 'yearly') {
+    var y0 = Math.max(Number(e.date.slice(0, 4)), Number(from.slice(0, 4)) - 1), y1 = Number(to.slice(0, 4));
+    for (var y = y0; y <= y1; y++) {
+      var md = e.date.slice(5);
+      if (md === '02-29' && !(y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0))) md = '02-28';
+      starts.push(y + '-' + md);
+    }
+  } else starts.push(e.date);
+  return starts.map(function (st) { return { start: st, end: len ? lifeShift(st, len) : st }; })
+    .filter(function (o) { return o.start <= to && o.end >= from; });
+}
+function digestLifeFor(username) {
+  var until = lifeShift(TODAY_ISO, 7), out = [];
+  (typeof CAL_ENTRIES !== 'undefined' ? CAL_ENTRIES : []).forEach(function (e) {
+    if (!calEntryVisibleTo(e, username)) return;
+    lifeOccurrencesIn(e, TODAY_ISO, until).forEach(function (o) {
+      out.push({ kind: 'life', life_kind: e.kind || 'note', label: lifeLine(e.label, e.kind, o.start, o.end),
+                 start: o.start, end: o.end, entry_id: e.id, by: e.created_by || null, age: null });
+    });
+  });
+  return out.sort(function (a, b) { return a.start < b.start ? -1 : a.start > b.start ? 1 : a.entry_id - b.entry_id; });
 }
 function digestFor(username) {
   var user = ROSTER[username];
@@ -4986,6 +5032,10 @@ function digestFor(username) {
                    file_id: f.id, show_id: sh.id, project_id: sh.project_id });
     });
   });
+  /* company life (wave 4) — lib/digest.js's section, mirrored: entries
+     calEntryVisibleTo THIS person (the route's VISIBLE rule), covering today
+     or starting within 7 days, yearly rows expanded by the anchor rule */
+  digestLifeFor(username).forEach(function (i) { items.push(i); });
   /* the admin extras (backup posture, storage config) are LIVE-SERVER truths —
      the demo models a healthy bench and honestly contributes neither */
   out.total = items.length;

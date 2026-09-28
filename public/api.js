@@ -5362,10 +5362,12 @@ var api = (function () {
       if (!API()) {
         var v = _calEntryCheck(body, null);
         if (v.error) return fail(v.error);
+        var hu = _calHeadsUp(v.scope, body.heads_up);
+        if (hu.error) return fail(hu.error);
         var e = mkCalEntry({ label: v.label, date: v.date, end_date: v.end_date, scope: v.scope, kind: v.kind,
                              repeat: v.repeat, for_users: v.for_users, by: ME });
         var out = _calEntryCopy(e);
-        out.notified = _calEntryPing(e, v.for_users);
+        out.notified = v.scope === 'directed' ? _calEntryPing(e, v.for_users) : _calHeadsUpPing(e, hu.list);
         return ok(out);
       }
       return SR.post('/api/calendar-entries', body);
@@ -5378,6 +5380,10 @@ var api = (function () {
         if (!e || (!admin && !calEntryVisibleTo(e, ME))) return fail('calendar entry ' + id + ' not found');
         if (!admin && String(e.created_by).toLowerCase() !== String(ME).toLowerCase()) {
           return fail('only the person who added this calendar entry, or an admin, can change or remove it');
+        }
+        var huP = patch.heads_up;
+        if (huP !== undefined && huP !== null && huP !== '' && !(Array.isArray(huP) && !huP.length)) {
+          return fail('a heads-up goes out when an entry is created — an edit does not re-send one');
         }
         var v = _calEntryCheck(patch, e);
         if (v.error) return fail(v.error);
@@ -6453,6 +6459,50 @@ var api = (function () {
         unknown.map(function (u) { return "'" + u + "'"; }).join(', ') + ' in for_users' };
     }
     out.for_users = valid;
+    return out;
+  }
+  /* THE HEADS-UP twin (routes/calendar.js headsUpFor + pingHeadsUp, word for
+     word): team scope only; 'everyone' = the active roster minus the author;
+     a named list resolves against the roster, unknown names refused by name.
+     Returns {list} or {error}. */
+  function _calHeadsUp(scope, raw) {
+    var list = raw;
+    if (list === undefined || list === null || list === '' || (Array.isArray(list) && !list.length)) return { list: [] };
+    if (scope !== 'team') {
+      return { error: scope === 'personal'
+        ? 'a heads-up is only for a team entry — a personal one is seen by nobody else'
+        : 'a heads-up is only for a team entry — a directed note already pings the people it names' };
+    }
+    var isAll = function (u) { var s = String(u || '').trim().toLowerCase(); return s === 'everyone' || s === '*'; };
+    var me = String(ME || '').toLowerCase(), names;
+    if ((typeof list === 'string' && isAll(list)) || (Array.isArray(list) && list.some(isAll))) {
+      names = USERS.filter(function (u) { return u.active !== false; }).map(function (u) { return u.username; });
+    } else {
+      if (typeof list === 'string') list = list.split(',');
+      if (!Array.isArray(list)) return { error: "heads_up must be an array of usernames, or 'everyone'" };
+      var seen = {}, unknown = [];
+      names = [];
+      list.map(function (u) { return String(u || '').trim(); }).filter(Boolean).forEach(function (u) {
+        var k = u.toLowerCase(); if (seen[k]) return; seen[k] = 1;
+        var hit = USERS.filter(function (x) { return String(x.username).toLowerCase() === k; })[0];
+        if (hit) names.push(hit.username); else unknown.push(k);
+      });
+      if (unknown.length) {
+        return { error: 'Unknown user' + (unknown.length > 1 ? 's' : '') + ' ' +
+          unknown.map(function (u) { return "'" + u + "'"; }).join(', ') + ' in heads_up' };
+      }
+    }
+    return { list: names.filter(function (u) { return String(u).toLowerCase() !== me; }) };
+  }
+  function _calHeadsUpPing(e, people) {
+    var who = (ROSTER[ME] && ROSTER[ME].name) || ME;
+    var text = who + ' added to the calendar: ' + lifeLine(e.label, e.kind, e.date, e.end_date || e.date);
+    var out = [];
+    (people || []).forEach(function (u) {
+      if (String(u).toLowerCase() === String(ME).toLowerCase()) return;
+      var n = mkNotif(u, 'notify', text, { body: text, link: '/#calendar', actor: ME });
+      if (n.status === 'queued') out.push(u);
+    });
     return out;
   }
   /* one outbox row per target, never the author — returns who was QUEUED */

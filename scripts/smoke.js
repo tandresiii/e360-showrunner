@@ -7747,6 +7747,184 @@ const DEL = (p, o) => call('DELETE', p, o);
     await pool.query(`DELETE FROM digest_runs`);
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('CE4. company life reaches people — the heads-up and the digest (wave 4, 2026-09-28)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // Tom: "Would be cool if OOO calendar things are sent to people's digests —
+  // like maybe the option to notify your choice of people when created, then in
+  // global digests when it gets close to those days." MUTATION GATES, each
+  // named on its assertion:
+  //   1. HEADS-UP HONESTY — `notified` is who was QUEUED: a preference-off
+  //      person gets a skipped row and is NOT claimed; the author gets nothing.
+  //   2. EVERYONE = the ACTIVE roster minus the author (an inactive user is in
+  //      the fixture, so dropping the active filter goes red).
+  //   3. DIGEST VISIBILITY — a stranger's PERSONAL entry never reaches anyone's
+  //      digest (the pair discriminates: its owner's digest DOES carry it).
+  //   4. DIGEST WINDOW — covering today or starting within 7 days; a day-9
+  //      entry is absent; spans render as ranges; yearly rows expand.
+  //   5. COMPANY LIFE COUNTS — a plate of only company life still sends; an
+  //      empty section leaves the digest (and its silence) as it was.
+  {
+    const C4 = TAG + ' CE4';
+    const nt = require('../lib/notify');
+    const dg4 = require('../lib/digest');
+    const outMax0 = (await pool.query('SELECT COALESCE(MAX(id), 0)::int AS m FROM notification_outbox')).rows[0].m;
+    const today = new Date().toISOString().slice(0, 10);
+    const dayOf = (n) => { const d = new Date(today + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+    // an INDEPENDENT formatter — the suite does not borrow the lib's words
+    const fmtD = (iso) => new Date(iso + 'T00:00:00Z').toLocaleDateString('en-US',
+      { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' }).replace(',', '');
+    const outFor = async (like) => (await pool.query(
+      `SELECT username, status, skipped_reason, actor, subject, link FROM notification_outbox WHERE kind='notify' AND subject LIKE $1`,
+      ['%' + like + '%'])).rows;
+
+    // fixture: mgr has the notify lane OFF; one extra user is INACTIVE
+    await nt.setPref(mgrUser, 'notify', 'off');
+    const offUser = TAG + 'c4off';
+    const offMade = await POST('/api/users', { username: offUser, password: 'smokepass123', role: 'tech', name: 'C4 OFF' }, { token: A });
+    await PUT(`/api/users/${offMade.body.id}`, { active: false }, { token: A });
+
+    // ── 1. a picked list ────────────────────────────────────────────────────
+    const hu1 = await POST('/api/calendar-entries',
+      { label: C4 + ' pm out', date: '2031-10-01', end_date: '2031-10-02', kind: 'ooo', scope: 'team',
+        heads_up: [techUser, mgrUser, pmUser] }, { token: PMT });
+    const hu1Rows = await outFor(C4 + ' pm out');
+    ok('CE4 HEADS-UP: a team OOO created with a picked list saves as an ordinary TEAM entry (200, for_users empty)',
+       hu1.status === 200 && hu1.body.scope === 'team' && hu1.body.for_users.length === 0, hu1.body);
+    ok('CE4 HEADS-UP: one notify row per picked person — tech queued, mgr (notify OFF) skipped — and ZERO for the author',
+       hu1Rows.length === 2 && hu1Rows.some((r) => r.username === techUser) && hu1Rows.some((r) => r.username === mgrUser)
+       && !hu1Rows.some((r) => r.username.toLowerCase() === pmUser.toLowerCase())
+       && hu1Rows.find((r) => r.username === mgrUser).skipped_reason === 'preference off', hu1Rows);
+    ok('CE4 HEADS-UP HONESTY (mutation gate): `notified` names ONLY the queued — tech, not the preference-off mgr, never the author',
+       Array.isArray(hu1.body.notified) && hu1.body.notified.join() === techUser, hu1.body.notified);
+    ok('CE4 the ping says who added what, for when — as a range — in the notify lane, linked to the calendar',
+       hu1Rows.every((r) => r.link === '/#calendar' && r.actor === pmUser
+         && r.subject === `${pmUser.toUpperCase()} added to the calendar: ${C4} pm out — out of office, ${fmtD('2031-10-01')} – ${fmtD('2031-10-02')}`),
+       hu1Rows.map((r) => r.subject));
+    ok('CE4 the heads-up is not an audience: pm2 (never pinged) is still served the team entry',
+       ((await GET('/api/calendar-entries', { token: PM2T })).body || []).some((e) => e.id === hu1.body.id));
+    const hu1Stored = await pool.query('SELECT for_users, scope FROM calendar_entries WHERE id=$1', [hu1.body.id]);
+    ok('CE4 ...and nothing about it was stored on the row (ephemeral: the outbox is the record)',
+       hu1Stored.rows[0].scope === 'team' && hu1Stored.rows[0].for_users.length === 0, hu1Stored.rows[0]);
+
+    // ── 2. everyone ─────────────────────────────────────────────────────────
+    const huAll = await POST('/api/calendar-entries',
+      { label: C4 + ' all hands', date: '2031-10-05', scope: 'team', heads_up: 'everyone' }, { token: PMT });
+    const allRows = await outFor(C4 + ' all hands');
+    const roster = (await pool.query(`SELECT username FROM users WHERE active IS NOT FALSE`)).rows
+      .map((r) => r.username).filter((u) => u.toLowerCase() !== pmUser.toLowerCase()).sort();
+    const pinged = allRows.map((r) => r.username).sort();
+    ok('CE4 EVERYONE (mutation gate): one row for every ACTIVE roster member except the author — not the inactive one, not the author',
+       huAll.status === 200 && pinged.join() === roster.join() && !pinged.includes(offUser) && !pinged.includes(pmUser),
+       { pinged: pinged.length, roster: roster.length, off: pinged.includes(offUser) });
+    // (an immediate row may already have been flushed by kickImmediate, so
+    // "was queued" is read as "was not refused by preference")
+    ok('CE4 ...and its `notified` is exactly the queued subset (the preference-off mgr excluded)',
+       huAll.body.notified.slice().sort().join() === allRows.filter((r) => r.skipped_reason !== 'preference off').map((r) => r.username).sort().join()
+       && !huAll.body.notified.includes(mgrUser) && huAll.body.notified.includes(techUser), huAll.body.notified);
+
+    // ── refusals ────────────────────────────────────────────────────────────
+    const huBad = async (body, re, what, token = PMT) => {
+      const r = await POST('/api/calendar-entries', body, { token });
+      ok('CE4 refuses ' + what, r.status === 400 && re.test(r.body.error || ''), r.body);
+    };
+    await huBad({ label: C4 + ' x', date: '2031-10-06', scope: 'personal', heads_up: [techUser] },
+      /only for a team entry — a personal one/, 'a heads-up on a PERSONAL entry');
+    await huBad({ label: C4 + ' x', date: '2031-10-06', scope: 'directed', for_users: [techUser], heads_up: [mgrUser] },
+      /only for a team entry — a directed note/, 'a heads-up on a DIRECTED entry');
+    await huBad({ label: C4 + ' x', date: '2031-10-06', scope: 'team', heads_up: [techUser, TAG + 'nobody'] },
+      new RegExp(`Unknown user '${(TAG + 'nobody').toLowerCase()}' in heads_up`), 'an unknown heads-up name (named)');
+    const huPut = await PUT(`/api/calendar-entries/${hu1.body.id}`, { heads_up: [techUser] }, { token: PMT });
+    ok('CE4 an EDIT refuses a heads-up (it is a create-time act) instead of silently dropping it',
+       huPut.status === 400 && /when an entry is created/.test(huPut.body.error || ''), huPut.body);
+    ok('CE4 the refused writes stored nothing and pinged nobody',
+       (await pool.query(`SELECT COUNT(*)::int n FROM calendar_entries WHERE label=$1`, [C4 + ' x'])).rows[0].n === 0
+       && (await outFor(C4 + ' x')).length === 0);
+    await pool.query(`DELETE FROM calendar_entries WHERE label LIKE $1`, [C4 + '%']);
+
+    // ── 5a. an empty section leaves the digest as it was ───────────────────
+    const lifeUser = TAG + 'c4life';
+    await POST('/api/users', { username: lifeUser, password: 'smokepass123', role: 'viewer', name: 'C4 LIFE' }, { token: A });
+    const LIFET = (await POST('/api/auth/login', { username: lifeUser, password: 'smokepass123' })).body.token;
+    const d0 = (await GET('/api/me/digest', { token: LIFET })).body;
+    ok('CE4 EMPTY SECTION: with no company life in the window the plate is untouched — total 0, no life group, empty summary',
+       d0.total === 0 && !(d0.groups || []).some((g) => g.kind === 'life') && d0.summary === '', d0);
+    const s0 = await dg4.runDigestSweep({ actor: 'system', flush: false });
+    ok('CE4 ...and the sweep stays SILENT for them (the silence rule unchanged)',
+       s0.users[lifeUser]?.outcome === 'empty — silent', s0.users[lifeUser]);
+
+    // ── 5b. a plate of ONLY company life still sends ───────────────────────
+    const own = await POST('/api/calendar-entries',
+      { label: C4 + ' my dentist', date: dayOf(2), kind: 'ooo', scope: 'personal' }, { token: LIFET });
+    const d1 = (await GET('/api/me/digest', { token: LIFET })).body;
+    ok('CE4 their own personal OOO two days out is on their plate — the ONLY group, counted in total',
+       own.status === 200 && d1.total === 1 && (d1.groups || []).map((g) => g.kind).join() === 'life'
+       && d1.groups[0].title === 'Company life', d1);
+    const s1 = await dg4.runDigestSweep({ actor: 'system', flush: false });
+    const lifeMail = (await pool.query(
+      `SELECT subject, body FROM notification_outbox WHERE username=$1 AND kind='daily_digest'`, [lifeUser])).rows;
+    ok('CE4 COMPANY LIFE COUNTS (mutation gate): a digest of ONLY company life SENDS — one daily_digest row',
+       s1.users[lifeUser]?.outcome === 'notified' && lifeMail.length === 1, { outcome: s1.users[lifeUser], rows: lifeMail.length });
+    ok('CE4 ...its subject says someone is out, and its body carries a COMPANY LIFE block with the day',
+       /^Today — someone is out this week$/.test(lifeMail[0]?.subject || '')
+       && /COMPANY LIFE\n  · .* my dentist — out of office, /.test(lifeMail[0]?.body || '')
+       && (lifeMail[0]?.body || '').includes(fmtD(dayOf(2))), lifeMail[0]);
+
+    // ── 3 + 4. what the TECH's morning shows ───────────────────────────────
+    const mk = (body, token = PMT) => POST('/api/calendar-entries', Object.assign({ scope: 'team' }, body), { token });
+    const eOoo = await mk({ label: C4 + ' Jim', date: dayOf(3), end_date: dayOf(4), kind: 'ooo' });
+    const eNow = await mk({ label: C4 + ' already out', date: dayOf(-3), end_date: dayOf(1), kind: 'ooo' });
+    const eFar = await mk({ label: C4 + ' far off', date: dayOf(9), kind: 'ooo' });
+    const eGone = await mk({ label: C4 + ' was out', date: dayOf(-6), end_date: dayOf(-1), kind: 'ooo' });
+    const ePriv = await mk({ label: C4 + ' pm2 private', date: dayOf(1), scope: 'personal' }, PM2T);
+    const anchor = String(Number(dayOf(5).slice(0, 4)) - 3) + dayOf(5).slice(4);
+    const eBday = await mk({ label: C4 + ' Aaron', date: anchor, kind: 'birthday', repeat: 'yearly' });
+    // a YEARLY row 9 days out: every yearly row passes the SQL prefilter, so
+    // only the occurrence window itself can keep this one out
+    const farAnchor = String(Number(dayOf(9).slice(0, 4)) - 2) + dayOf(9).slice(4);
+    const eFarY = await mk({ label: C4 + ' far birthday', date: farAnchor, kind: 'birthday', repeat: 'yearly' });
+    ok('CE4 fixture: seven entries saved', [eOoo, eNow, eFar, eGone, ePriv, eBday, eFarY].every((r) => r.status === 200),
+       [eOoo, eNow, eFar, eGone, ePriv, eBday, eFarY].map((r) => r.body));
+    const lifeOf = async (t) => {
+      const d = (await GET('/api/me/digest', { token: t })).body;
+      return ((d.groups || []).find((g) => g.kind === 'life') || { items: [] }).items;
+    };
+    const techLife = await lifeOf(TECHT);
+    const line = (id) => (techLife.find((i) => i.entry_id === id) || {}).label;
+    ok('CE4 WINDOW: the tech’s digest carries the team OOO starting in 3 days, rendered as a RANGE',
+       line(eOoo.body.id) === `${C4} Jim — out of office, ${fmtD(dayOf(3))} – ${fmtD(dayOf(4))}`, techLife.map((i) => i.label));
+    ok('CE4 WINDOW: ...and the span that started 3 days ago and still COVERS today',
+       line(eNow.body.id) === `${C4} already out — out of office, ${fmtD(dayOf(-3))} – ${fmtD(dayOf(1))}`, techLife.map((i) => i.label));
+    ok('CE4 WINDOW (mutation gate): the entry 9 days out is ABSENT, and so is the span that ended yesterday',
+       !line(eFar.body.id) && !line(eGone.body.id), techLife.map((i) => i.label));
+    ok('CE4 WINDOW (mutation gate): a YEARLY birthday whose day is 9 out is ABSENT too — the occurrence window, not the SQL, keeps it out',
+       !line(eFarY.body.id), techLife.map((i) => i.label));
+    ok('CE4 YEARLY: a birthday anchored three years back appears on THIS year’s day (5 days out)',
+       line(eBday.body.id) === `${C4} Aaron — birthday, ${fmtD(dayOf(5))}`, techLife.map((i) => i.label));
+    ok('CE4 VISIBILITY (mutation gate): pm2’s PERSONAL entry NEVER reaches the tech’s digest — nor the c4life user’s personal one',
+       !line(ePriv.body.id) && !line(own.body.id) && !techLife.some((i) => /private|dentist/.test(i.label)), techLife.map((i) => i.label));
+    const pm2Life = await lifeOf(PM2T);
+    ok('CE4 ...while pm2’s OWN digest does carry it (the pair discriminates: personal is not simply dropped)',
+       pm2Life.some((i) => i.entry_id === ePriv.body.id) && !pm2Life.some((i) => i.entry_id === own.body.id),
+       pm2Life.map((i) => i.label));
+    ok('CE4 the section is date-ordered and a Today-panel item knows its entry (opens it)',
+       techLife.every((i, k) => !k || techLife[k - 1].start <= i.start) && techLife.every((i) => i.kind === 'life' && i.entry_id),
+       techLife.map((i) => i.start));
+    ok('CE4 the summary names it once, in the fixed group order (pure seam)',
+       dg4.digestSummary([{ kind: 'task', age: 2 }, { kind: 'life', life_kind: 'ooo' }, { kind: 'life', life_kind: 'ooo' },
+         { kind: 'life', life_kind: 'birthday' }]) === '1 overdue task · 2 out-of-office this week · a birthday this week');
+
+    // tidy — back to the pre-section world, and today's ledger cleared (the
+    // 15f doctrine: a leftover (user, day) row reads "already sent" tomorrow)
+    await pool.query(`DELETE FROM calendar_entries WHERE label LIKE $1`, [C4 + '%']);
+    await pool.query(`DELETE FROM notification_outbox WHERE subject LIKE $1`, ['%' + C4 + '%']);
+    // this section's two sweeps mailed the whole roster's mornings — take
+    // those rows back out so no later section inherits them
+    await pool.query(`DELETE FROM notification_outbox WHERE kind='daily_digest' AND id > $1`, [outMax0]);
+    await pool.query(`DELETE FROM digest_runs`);
+    await nt.setPref(mgrUser, 'notify', 'immediate');
+  }
+
   // ── G. THE UNATTENDED TRANSCRIPT READER — and Tran's audit log ───────────
   section('G. unattended transcripts — app-only Graph, and the audit log that pays for it');
   // E360's IT admin granted tenant API access for Teams transcripts on

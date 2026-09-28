@@ -8,7 +8,9 @@
 //
 // A calendar entry hangs off NO show and NO folder. Three audiences:
 //
-//   team      everybody signed in
+//   team      everybody signed in. Optionally, AT CREATE, a heads-up ping to
+//             picked people or 'everyone' (wave 4 — see headsUpFor): a side
+//             effect, never stored, never a change to who can see the row.
 //   personal  its creator, and NOBODY else — not a teammate, not an admin.
 //             "Never served" is enforced HERE, in one SQL fragment (VISIBLE
 //             below), and smoke pins it with two discriminating identities.
@@ -35,6 +37,7 @@ const { asyncH, badRequest, forbidden, notFound, idParam } = require('../lib/htt
 const { requireAuth } = require('../lib/auth');
 const { resolveUsernames } = require('../lib/mentions');
 const notify = require('../lib/notify');
+const life = require('../lib/calendar-life');
 
 const router = express.Router();
 
@@ -46,16 +49,14 @@ const ENTRY_SCOPES = ['team', 'personal', 'directed'];
 const ENTRY_KINDS = ['note', 'ooo', 'birthday'];
 const ENTRY_REPEATS = ['none', 'yearly'];
 const LABEL_MAX = 120;          // a chip, not a document
-const SPAN_MAX_DAYS = 366;      // a year of OOO is already absurd; this bounds the render
+const SPAN_MAX_DAYS = life.SPAN_MAX_DAYS; // a year of OOO is already absurd; this bounds the render
 const TARGETS_MAX = 25;
 
 // THE VISIBILITY RULE, ONCE. $1 is the signed-in username. Every read and the
 // non-admin write lookups go through this fragment, so "who may see a row" has
-// exactly one answer on the server.
-const VISIBLE = `(scope = 'team'
-   OR (scope = 'personal' AND LOWER(created_by) = LOWER($1))
-   OR (scope = 'directed' AND (LOWER(created_by) = LOWER($1)
-        OR LOWER($1) IN (SELECT LOWER(u) FROM unnest(for_users) AS u))))`;
+// exactly one answer on the server. Since wave 4 it lives in lib/calendar-life
+// so the morning digest's "Company life" section reads through the SAME text.
+const VISIBLE = life.VISIBLE;
 
 function isAdmin(req) { return !!(req.session && req.session.role === 'admin'); }
 
@@ -132,6 +133,58 @@ async function pingTargets(c, row, targets, actor) {
   return rows.filter((r) => r.status === 'queued').map((r) => r.username);
 }
 
+// ── THE HEADS-UP (wave 4, 2026-09-28) ───────────────────────────────────────
+// "the option to notify your choice of people when created". A CREATE-TIME
+// side effect of a TEAM entry — never stored. The entry is team-visible no
+// matter who was pinged (the ping list is not an audience; for_users is, and
+// only for 'directed'), so persisting it would be a column whose only reader
+// is nobody. The outbox rows ARE the record of who was told.
+//
+//   heads_up   absent / []          nobody (the wave-3 default)
+//              'everyone' (or ['*']) the active roster, minus the author
+//              ['jim', 'devin']     those roster usernames (unknown → 400 naming each)
+//
+// Personal scope refuses it (nobody else can see the entry); directed scope
+// refuses it too — its targets are already pinged, by for_users.
+async function headsUpFor(scope, raw, actor, q = pool) {
+  let list = raw;
+  if (list === undefined || list === null || list === '' || (Array.isArray(list) && !list.length)) return [];
+  if (scope !== 'team') {
+    throw badRequest(scope === 'personal'
+      ? 'a heads-up is only for a team entry — a personal one is seen by nobody else'
+      : 'a heads-up is only for a team entry — a directed note already pings the people it names');
+  }
+  const everyone = (typeof list === 'string' && ['everyone', '*'].includes(list.trim().toLowerCase()))
+    || (Array.isArray(list) && list.some((u) => ['everyone', '*'].includes(String(u || '').trim().toLowerCase())));
+  let names;
+  if (everyone) {
+    const r = await q.query(
+      `SELECT username FROM users WHERE active IS NOT FALSE ORDER BY LOWER(username)`);
+    names = r.rows.map((x) => x.username);
+  } else {
+    if (typeof list === 'string') list = list.split(',');
+    if (!Array.isArray(list)) throw badRequest("heads_up must be an array of usernames, or 'everyone'");
+    list = list.map((u) => String(u || '').trim()).filter(Boolean);
+    const { valid, unknown } = await resolveUsernames(list, q);
+    if (unknown.length) {
+      throw badRequest(`Unknown user${unknown.length > 1 ? 's' : ''} ${unknown.map((u) => `'${u}'`).join(', ')} in heads_up`);
+    }
+    names = valid;
+  }
+  // the author is never told about their own entry (enqueue drops them too —
+  // this keeps the list honest before it gets there)
+  return names.filter((u) => u.toLowerCase() !== String(actor || '').toLowerCase());
+}
+async function pingHeadsUp(c, row, people, actor) {
+  if (!people.length) return [];
+  const who = await nameOf(actor, c);
+  const text = `${who} added to the calendar: ${life.lifeLine(row.label, row.kind, row.date, row.end_date || row.date)}`;
+  const rows = await notify.enqueueMany(c, people, {
+    kind: 'notify', actor, subject: text, body: text, link: '/#calendar'
+  });
+  return rows.filter((r) => r.status === 'queued').map((r) => r.username);
+}
+
 // The row a write may touch: a non-admin must be able to SEE it (an invisible
 // row is a 404 — a stranger learns nothing about another person's personal
 // note), and then must be its creator (403). An admin reaches any row.
@@ -169,6 +222,7 @@ router.post('/calendar-entries', asyncH(async (req, res) => {
   const kind = enumOr400(pick(b, 'kind'), ENTRY_KINDS, 'kind', 'note');
   const repeat = enumOr400(pick(b, 'repeat'), ENTRY_REPEATS, 'repeat', 'none');
   const targets = await targetsFor(scope, pick(b, 'for_users'));
+  const headsUp = await headsUpFor(scope, pick(b, 'heads_up'), req.actor);
 
   const out = await withTx(async (c) => {
     const r = await c.query(
@@ -176,7 +230,11 @@ router.post('/calendar-entries', asyncH(async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
       [label, date, endDate, scope, kind, repeat, targets, req.actor]);
     const row = r.rows[0];
-    const notified = await pingTargets(c, row, targets, req.actor);
+    // directed → its targets; team → the heads-up list (never both: each
+    // refuses the other's scope). `notified` is who was actually QUEUED.
+    const notified = scope === 'directed'
+      ? await pingTargets(c, row, targets, req.actor)
+      : await pingHeadsUp(c, row, headsUp, req.actor);
     return { ...dbToCalendarEntry(row), notified };
   });
   res.json(out);
@@ -188,6 +246,10 @@ router.put('/calendar-entries/:id', asyncH(async (req, res) => {
   const id = idParam(req);
   const b = req.body || {};
   const cur = await writableEntry(req, id);
+  const hu = pick(b, 'heads_up');
+  if (hu !== undefined && hu !== null && hu !== '' && !(Array.isArray(hu) && !hu.length)) {
+    throw badRequest('a heads-up goes out when an entry is created — an edit does not re-send one');
+  }
 
   const label = has(b, 'label') ? labelOr400(pick(b, 'label')) : cur.label;
   const date = has(b, 'date') ? dateOr400(pick(b, 'date'), 'date') : cur.date;

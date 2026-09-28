@@ -3564,6 +3564,22 @@ function calAddPersonAct(u) {
   if (i >= 0) CAL_ADD.forUsers.splice(i, 1); else CAL_ADD.forUsers.push(u);
   calAddRedraw();
 }
+/* the heads-up (wave 4) — team scope, create only */
+function calAddHuAct(k) {
+  if (!CAL_ADD) return;
+  calAddCapture();
+  CAL_ADD.hu = k === 'everyone' || k === 'pick' ? k : 'none';
+  if (!CAL_ADD.huUsers) CAL_ADD.huUsers = [];
+  calAddRedraw();
+}
+function calAddHuPersonAct(u) {
+  if (!CAL_ADD || !u) return;
+  calAddCapture();
+  if (!CAL_ADD.huUsers) CAL_ADD.huUsers = [];
+  var i = CAL_ADD.huUsers.indexOf(u);
+  if (i >= 0) CAL_ADD.huUsers.splice(i, 1); else CAL_ADD.huUsers.push(u);
+  calAddRedraw();
+}
 /* the note door's commit — create, or save an edit. The toast is built from
    the SERVER's answer: `notified` is who actually had a notification queued
    (a person whose setting is off gets none, and is not claimed). */
@@ -3571,16 +3587,23 @@ async function calNoteCommit() {
   var p = CAL_ADD;
   if (!p.nlabel.trim()) { toast('A note needs a label', 'What is this date?'); return; }
   if (p.who === 'directed' && !p.forUsers.length) { toast('Pick at least one person', 'Or choose Everyone / Just me'); return; }
+  var editing = !!p.editId;
+  if (!editing && p.who === 'team' && p.hu === 'pick' && !(p.huUsers || []).length) {
+    toast('Pick who gets the heads-up', 'Or choose Nobody / Everyone'); return;
+  }
+  var hu = editing || p.who !== 'team' ? null : p.hu === 'everyone' ? 'everyone' : p.hu === 'pick' ? (p.huUsers || []).slice() : null;
   var body = calNoteBody({ label: p.nlabel, date: p.iso, end_date: p.end, kind: p.nkind, scope: p.who,
-                           repeat: p.yearly ? 'yearly' : 'none', for_users: p.forUsers });
-  var rec, editing = !!p.editId;
+                           repeat: p.yearly ? 'yearly' : 'none', for_users: p.forUsers, heads_up: hu });
+  var rec;
   try {
     rec = editing ? await api.updateCalendarEntry(p.editId, body) : await calNoteSubmit(body);
   } catch (e) { toast(editing ? 'Not saved' : 'Not added', String(e && e.message || e), 'err'); return; }
   var told = (rec.notified || []).map(function (u) { return firstName(u) || u; });
   var who = rec.scope === 'personal' ? 'only you see it' : rec.scope === 'directed'
     ? (told.length ? 'a notification is queued for ' + told.join(', ') : 'nobody new was notified')
-    : 'everyone sees it';
+    : 'everyone sees it' + (!editing && hu
+      ? (told.length ? ' · a heads-up is queued for ' + (told.length > 6 ? told.length + ' people' : told.join(', ')) : ' · nobody was sent a heads-up')
+      : '');
   var hiddenBy = (CAL_UI.hide.kind[rec.kind] || (CAL_UI.justMine && rec.scope === 'team') ||
     (CAL_UI.justMine && rec.scope === 'directed' && (rec.for_users || []).indexOf(ME) < 0))
     ? ' — your filters hide it; Reset to see it' : '';
@@ -8433,6 +8456,8 @@ var ACTIONS = {
   calEntry:      function (t, id) { return calEntryAct(id); },
   calEntryEdit:  function (t, id) { return calEntryEditAct(id); },
   calEntryDel:   function (t, id) { return calEntryDelAct(id); },
+  calAddHu:       function (t, id, k) { return calAddHuAct(k); },
+  calAddHuPerson: function (t, id, k) { return calAddHuPersonAct(k); },
   calDay:        function (t, id, k) { return calDayAct(k); },
   calOpenShow:   function (t, id) { closeM(); return openShow(id); },
   calPrint:      function () { return calPrintAct(); },

@@ -668,7 +668,9 @@ var CAL_ADD = null;                              /* { iso, door, fk, sid, label,
 function calAddStart(iso, door) {
   CAL_ADD = { iso: iso, door: door === 'mine' || door === 'note' ? door : 'team', fk: null, sid: null, label: '', title: '', lane: '',
               /* the note door (wave 3) */
-              editId: null, nlabel: '', nkind: 'note', who: 'team', forUsers: [], end: '', yearly: false, yearlyTouched: false };
+              editId: null, nlabel: '', nkind: 'note', who: 'team', forUsers: [], end: '', yearly: false, yearlyTouched: false,
+              /* the heads-up (wave 4): 'none' | 'everyone' | 'pick' + the picked */
+              hu: 'none', huUsers: [] };
   return CAL_ADD;
 }
 /* the edit form of the same door, prefilled from a stored entry */
@@ -688,7 +690,9 @@ function calAddNoteHTML(st) {
   function lab(t, inner) { return '<label class="cal-addf"><span>' + esc(t) + '</span>' + inner + '</label>'; }
   var hint = st.who === 'personal' ? 'Only you see it — nobody else is ever sent it, admins included.'
     : st.who === 'directed' ? 'You and the people you pick see it on their calendars. Each of them gets one notification — by email, on their own notification setting.'
-    : 'Everyone on the team sees it on their calendar. Nobody is notified.';
+    : st.hu === 'everyone' || (st.hu === 'pick' && (st.huUsers || []).length)
+      ? 'Everyone on the team sees it on their calendar. The people you give a heads-up get one notification now, on their own notification setting.'
+      : 'Everyone on the team sees it on their calendar. Nobody is notified now — it shows in everyone’s morning digest the week it comes up.';
   var ph = st.nkind === 'birthday' ? 'Aaron’s birthday' : st.nkind === 'ooo' ? 'Devin out — family trip' : 'Bring the spare processor to the shop';
   var people = '';
   if (st.who === 'directed') {
@@ -717,6 +721,33 @@ function calAddNoteHTML(st) {
     '<div class="cal-addf" style="margin-bottom:8px"><span>Who sees this</span></div>' +
     '<div class="seg cal-who">' + CAL_WHO.map(function (w) {
       return '<button class="' + (st.who === w[0] ? 'on' : '') + '" aria-pressed="' + (st.who === w[0]) + '" ' + act('calAddWho', null, w[0]) + '>' + esc(w[1]) + '</button>';
+    }).join('') + '</div>' + people + calAddHeadsUpHTML(st);
+}
+/* THE HEADS-UP (wave 4) — TEAM scope only, and only when CREATING: an
+   optional one-time ping to picked people or everyone. It never changes who
+   sees the entry (a team entry is everybody's); personal has nobody to tell,
+   directed already pings its people. Same roster picker rows as "Pick people". */
+var CAL_HU = [['none', 'Nobody'], ['everyone', 'Everyone'], ['pick', 'Pick people']];
+function calAddHeadsUpHTML(st) {
+  if (!st || st.who !== 'team' || st.editId) return '';
+  var mode = st.hu === 'everyone' || st.hu === 'pick' ? st.hu : 'none';
+  var pick = st.huUsers || [];
+  var people = '';
+  if (mode === 'pick') {
+    var me = String(ME || '').toLowerCase();
+    people = '<div class="cal-ppl" role="group" aria-label="Who gets a heads-up now">' + activeUsers().filter(function (u) {
+      return String(u.username).toLowerCase() !== me;
+    }).map(function (u) {
+      var on = pick.indexOf(u.username) >= 0;
+      return '<button class="rp-opt ' + (on ? 'on' : '') + '" aria-pressed="' + on + '" ' + act('calAddHuPerson', null, u.username) + '>' + av(u.username) +
+        '<span class="ri2"><span class="rn">' + esc(u.name) + '</span><span class="rr">' + esc(roleName(u.role) + (u.title ? ' · ' + u.title : '')) + '</span></span>' +
+        '<span class="chk">' + icon('check') + '</span></button>';
+    }).join('') + '</div>' +
+    '<div class="cal-ppl-n">' + (pick.length ? pick.length + ' picked' : 'Pick who to tell — or choose Nobody') + '</div>';
+  }
+  return '<div class="cal-addf cal-hu" style="margin:12px 0 8px"><span>Give people a heads-up now (optional)</span></div>' +
+    '<div class="seg cal-hu-seg">' + CAL_HU.map(function (w) {
+      return '<button class="' + (mode === w[0] ? 'on' : '') + '" aria-pressed="' + (mode === w[0]) + '" ' + act('calAddHu', null, w[0]) + '>' + esc(w[1]) + '</button>';
     }).join('') + '</div>' + people;
 }
 /* the folders this person may add to, each with its shows — from the loaded
@@ -803,9 +834,15 @@ async function calAddSubmit(door, f) {
 /* the note door's write (wave 3) — no show; the seam carries the refusal */
 function calNoteBody(f) {
   var scope = f.scope === 'personal' || f.scope === 'directed' ? f.scope : 'team';
-  return { label: String(f.label || '').trim(), date: f.date, end_date: f.end_date || null,
+  var body = { label: String(f.label || '').trim(), date: f.date, end_date: f.end_date || null,
            kind: f.kind || 'note', scope: scope, repeat: f.repeat === 'yearly' ? 'yearly' : 'none',
            for_users: scope === 'directed' ? (f.for_users || []).slice() : [] };
+  /* the heads-up rides a TEAM create only; an empty one is not sent at all */
+  if (scope === 'team') {
+    if (f.heads_up === 'everyone') body.heads_up = 'everyone';
+    else if (Array.isArray(f.heads_up) && f.heads_up.length) body.heads_up = f.heads_up.slice();
+  }
+  return body;
 }
 async function calNoteSubmit(f) {
   f = f || {};
@@ -2190,6 +2227,7 @@ function digestItemAct(i) {
   if (i.kind === 'po_approval' && i.po_id) return act('openPO', i.po_id);
   if (i.kind === 'byteless' && i.file_id) return act('openViewer', i.file_id);
   if (i.kind === 'backup_stale' || i.kind === 'health') return act('goSettings');
+  if (i.kind === 'life' && i.entry_id) return act('calEntry', i.entry_id);
   if (i.show_id) return act('openShow', i.show_id);
   if (i.project_id) return act('openFolder', i.project_id);
   return act('goToday');
@@ -2197,7 +2235,7 @@ function digestItemAct(i) {
 var DIGEST_KIND_PILL = {
   task: 'Task', po_approval: 'Approval', push_stale: 'Push behind', crewless: 'No crew',
   report: 'Report', content: 'Content', chase: 'Chase', byteless: 'No bytes',
-  backup_stale: 'Backups', health: 'Health'
+  backup_stale: 'Backups', health: 'Health', life: 'Company life'
 };
 function viewToday(d) {
   d = d || { groups: [], total: 0, summary: '' };

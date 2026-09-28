@@ -2026,10 +2026,68 @@ async function main() {
     try { await demoTab.api.addCalendarEntry({ label: 'x', date: '2031-02-30' }); } catch (e) { dBad = String(e.message || e); }
     ok('DEMO · validation parity: Feb 30 is refused in the server’s words', /real date/.test(dBad || ''), dBad);
 
+    /* 9/28 · WAVE 4 — the heads-up (create-time, TEAM scope only) and company
+       life in the morning digest. */
+    const huDraw = (who, edit) => {
+      if (edit) demoTab.calAddStartEdit({ id: 770002, label: 'x', date: '2031-08-12', end_date: null, scope: who, kind: 'note', repeat: 'none', for_users: who === 'directed' ? ['dvargas'] : [], created_by: me3 });
+      else { demoTab.calAddStart('2031-08-12', 'note'); demoTab.CAL_ADD.who = who; if (who === 'directed') demoTab.CAL_ADD.forUsers = ['dvargas']; }
+      return demoTab.calAddHTML([]);
+    };
+    const huTeam = huDraw('team'), huPers = huDraw('personal'), huDir = huDraw('directed'), huEdit = huDraw('team', true);
+    ok('W4 · THE HEADS-UP CONTROL (mutation gate) renders for a TEAM entry — Nobody / Everyone / Pick people…',
+       /Give people a heads-up now/.test(huTeam) && /data-act="calAddHu" data-k="none"/.test(huTeam)
+       && /data-act="calAddHu" data-k="everyone"/.test(huTeam) && /data-act="calAddHu" data-k="pick"/.test(huTeam), huTeam.slice(-900));
+    ok('…and NOT for a personal entry (nobody else can see it), NOT for a directed one (it already pings), NOT on an edit',
+       !/calAddHu/.test(huPers) && !/calAddHu/.test(huDir) && !/calAddHu/.test(huEdit) && !/heads-up now/.test(huPers + huDir + huEdit));
+    demoTab.calAddStart('2031-08-12', 'note'); demoTab.CAL_ADD.hu = 'pick'; demoTab.CAL_ADD.huUsers = ['bsawyer'];
+    const huPick = demoTab.calAddHTML([]);
+    const huOpts = (huPick.match(/data-act="calAddHuPerson" data-k="[^"]+"/g) || []);
+    ok('W4 · "Pick people" under the heads-up is the ROSTER picker — every active teammate but me, the picked one on',
+       huOpts.length === demoTab.activeUsers().length - 1 && !new RegExp(`data-act="calAddHuPerson" data-k="${me3}"`).test(huPick)
+       && /class="rp-opt on" aria-pressed="true" data-act="calAddHuPerson" data-k="bsawyer"/.test(huPick)
+       && /The people you give a heads-up get one notification now/.test(huPick), { n: huOpts.length });
+    ok('W4 · calNoteBody sends heads_up ONLY on a team create (a personal body never carries one)',
+       demoTab.calNoteBody({ label: 'a', date: '2031-08-12', scope: 'team', heads_up: 'everyone' }).heads_up === 'everyone'
+       && !('heads_up' in demoTab.calNoteBody({ label: 'a', date: '2031-08-12', scope: 'personal', heads_up: 'everyone' }))
+       && !('heads_up' in demoTab.calNoteBody({ label: 'a', date: '2031-08-12', scope: 'team', heads_up: [] })));
+    demoTab.CAL_ADD = null;
+
+    // the demo twin of the ping — Devin's notify lane is OFF in the fixture
+    const hPick = await demoTab.api.addCalendarEntry({ label: 'WALK hu pick', date: '2031-08-16', kind: 'ooo', scope: 'team', heads_up: ['dvargas', 'bsawyer', me3] });
+    const hRows = demoTab.NOTIF_OUTBOX.filter((n) => /WALK hu pick/.test(n.subject) && n.kind === 'notify');
+    ok('DEMO · heads-up: one notify row per picked person (bsawyer queued, dvargas skipped), ZERO for the author, entry stays TEAM',
+       hPick.scope === 'team' && hPick.for_users.length === 0 && hRows.map((n) => n.username).sort().join() === 'bsawyer,dvargas'
+       && hRows.find((n) => n.username === 'dvargas').status === 'skipped', hRows.map((n) => n.username + ':' + n.status));
+    ok('DEMO · …`notified` is honest (only bsawyer), and the words match the server’s',
+       hPick.notified.join() === 'bsawyer' && /added to the calendar: WALK hu pick — out of office, /.test(hRows[0].subject), [hPick.notified, hRows[0] && hRows[0].subject]);
+    const hAll = await demoTab.api.addCalendarEntry({ label: 'WALK hu all', date: '2031-08-17', scope: 'team', heads_up: 'everyone' });
+    const aRows = demoTab.NOTIF_OUTBOX.filter((n) => /WALK hu all/.test(n.subject));
+    const aRoster = demoTab.USERS.filter((u) => u.active !== false && u.username !== me3).map((u) => u.username).sort();
+    ok('DEMO · Everyone expands to the active roster minus me',
+       aRows.map((n) => n.username).sort().join() === aRoster.join() && !aRows.some((n) => n.username === me3), { rows: aRows.length, roster: aRoster.length });
+    let hRef = null;
+    try { await demoTab.api.addCalendarEntry({ label: 'WALK hu bad', date: '2031-08-17', scope: 'personal', heads_up: ['bsawyer'] }); } catch (e) { hRef = String(e.message || e); }
+    ok('DEMO · a heads-up on a personal entry is refused in the server’s words',
+       hRef === 'a heads-up is only for a team entry — a personal one is seen by nobody else', hRef);
+    await demoTab.api.deleteCalendarEntry(hPick.id); await demoTab.api.deleteCalendarEntry(hAll.id);
+
+    // company life in the demo digest — the seeded team OOO (Devin, days 4→7)
+    const dLife = demoTab.digestFor(me3);
+    const lifeG = (dLife.groups || []).find((g) => g.kind === 'life');
+    ok('DEMO · the Today digest gains a Company life group with the seeded team OOO as a RANGE',
+       !!lifeG && lifeG.items.some((i) => /^Devin out — family trip — out of office, \w{3} \w{3} \d+ – \w{3} \w{3} \d+$/.test(i.label)),
+       lifeG && lifeG.items.map((i) => i.label));
+    ok('DEMO · …never jhawk’s PERSONAL "Dentist" (day 5), and never Aaron’s birthday (day 9, outside the week)',
+       !!lifeG && !lifeG.items.some((i) => /Dentist|Aaron/.test(i.label))
+       && ((demoTab.digestFor('jhawk').groups || []).find((g) => g.kind === 'life') || { items: [] }).items.some((i) => /Dentist/.test(i.label)));
+    const todayH = demoTab.viewToday(dLife);
+    ok('DEMO · the Today panel draws it as a Company life row that opens the entry',
+       /<h3>Company life · \d+<\/h3>/.test(todayH) && /data-act="calEntry" data-id="\d+"[^>]*>.*Devin out/.test(todayH));
+
     // ── THE REAL SERVER, rendered as three different people ────────────────
     reach('Company life on the calendar (note / OOO / birthday · team / personal / directed)',
       { seam: ['listCalendarEntries', 'addCalendarEntry', 'updateCalendarEntry', 'deleteCalendarEntry'],
-        action: ['calEntry', 'calEntryEdit', 'calEntryDel', 'calAddWho', 'calAddPerson', 'calAddDoor', 'calAddCommit'] });
+        action: ['calEntry', 'calEntryEdit', 'calEntryDel', 'calAddWho', 'calAddPerson', 'calAddDoor', 'calAddCommit', 'calAddHu', 'calAddHuPerson'] });
     const lOoo = await POST('/api/calendar-entries',
       { label: 'WALK omar out', date: '2031-09-08', end_date: '2031-09-10', kind: 'ooo', scope: 'personal' }, { token: T.omar });
     ok('LIVE · ANY ROLE: Omar (TECH) posts his own out-of-office — 200',
