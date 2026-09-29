@@ -5693,6 +5693,192 @@ async function main() {
        && /superseded-/.test(seamDemo));
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('55 · a FOLDER-LEVEL file opens in the viewer  (Tom, 9/29, prod: /api/shows/0 ×8, "didn’t load")');
+  // ══════════════════════════════════════════════════════════════════════════
+  // The viewer did getShow(file.show_id) unconditionally. A folder-level row
+  // (project_id set, show_id NULL — the folder "Add file" door, season PO
+  // paperwork) coerced null to 0 and fired /api/shows/0 plus its seven
+  // sub-routes, all 400, and the view died. Executed here in BOTH modes, with
+  // the real views-global.js drawing into a fake stage.
+  // MUTATION GATES: make viewerHost() call api.getShow(VIEWER.showId)
+  // unconditionally → the API "no /api/shows/ request" and the demo "getShow
+  // never asked" assertions go red; drop the show_id filter in
+  // folderViewerHost() → the "strip carries no show file" assertions go red.
+  {
+    const viewerDom = () => {
+      const els = {};
+      return {
+        els,
+        doc: {
+          addEventListener: () => {}, querySelectorAll: () => [],
+          getElementById: (id) => els[id] || null,
+          querySelector: (s) => {
+            const m = /^#(\w+)$/.exec(String(s));
+            if (!m) return null;
+            if (!els[m[1]] && ['vStage', 'vMeta', 'vRecord'].includes(m[1])) els[m[1]] = { innerHTML: '' };
+            return els[m[1]] || null;
+          }
+        }
+      };
+    };
+    // the app.js viewer branch, step for step: openViewer's VIEWER, then
+    // render('viewer')'s host → viewViewer → crumb → drawViewer
+    const openIn = async (tab, fileId) => {
+      const f = await tab.api.getFile(fileId);
+      tab.VIEWER = { showId: f.show_id || null, projectId: f.project_id || null, fileId: f.id, max: false };
+      const dom = viewerDom();
+      const savedDoc = tab.document;
+      tab.document = dom.doc;
+      let out;
+      try {
+        const host = await tab.viewerHost();
+        const html = tab.viewViewer(host);
+        const crumb = tab.showLabel(host) + ' · Viewer';
+        tab.drawViewer(host);
+        await new Promise((r) => setTimeout(r, 30));   // let any stray async fetch fire
+        out = { host, html, crumb, stage: dom.els.vStage ? dom.els.vStage.innerHTML : '',
+                meta: dom.els.vMeta ? dom.els.vMeta.innerHTML : '', err: null };
+      } catch (e) {
+        out = { err: String(e && e.message || e), html: '', stage: '', meta: '', crumb: '' };
+      } finally { tab.document = savedDoc; }
+      return out;
+    };
+
+    // ── the wiring, over the shipped app.js ────────────────────────────────
+    ok('openViewer carries the file’s FOLDER beside its show — a null show_id has somewhere to go',
+       /VIEWER = \{ showId: f\.show_id \|\| null, projectId: f\.project_id \|\| null/.test(APP_JS));
+    ok('…and no viewer path asks api.getShow(VIEWER.showId) any more — every one goes through viewerHost()',
+       !/api\.getShow\(VIEWER\.showId\)/.test(APP_JS)
+       && /var vshow = await viewerHost\(\);/.test(APP_JS));
+    ok('…and the crumb wears showLabel, not an inline vshow.project read (the thin-project pattern)',
+       !/vshow\.project\./.test(APP_JS) && /showLabel\(vshow\) \+ ' · Viewer'/.test(APP_JS));
+
+    // ── API MODE: the prod shape, with every request the browser half makes seen
+    const seen = [];
+    const vwTab = (() => {
+      const store = new Map();
+      const ctx = {
+        fetch: (p, opts) => { seen.push(String(p)); return fetch(new URL(p, BASE), opts); },
+        localStorage: {
+          getItem: (k) => (store.has(k) ? store.get(k) : null),
+          setItem: (k, v) => store.set(k, String(v)),
+          removeItem: (k) => store.delete(k)
+        },
+        location: { protocol: 'http:' },
+        setTimeout, clearTimeout, AbortController, console,
+        document: { addEventListener: () => {}, querySelector: () => null,
+                    querySelectorAll: () => [], getElementById: () => null },
+        navigator: { userAgent: 'walk' }
+      };
+      ctx.window = ctx;
+      vm.createContext(ctx);
+      for (const f of ['data.js', 'api.js', 'components.js', 'views-notes.js', 'views-contacts.js',
+                       'views-finance.js', 'views-purchasing.js', 'views-folder.js',
+                       'views-dashboard.js', 'views-global.js']) {
+        new vm.Script(SRC[f], { filename: 'public/' + f }).runInContext(ctx);
+      }
+      return ctx;
+    })();
+    ok('the viewer half loads headless in API mode',
+       (await vwTab.SR.probe()) === 'api' && typeof vwTab.viewerHost === 'function');
+    vwTab.SR.setToken(T.brenden);
+
+    const projName = (await GET(`/api/projects/${PROJ}`, { token: T.brenden })).body.name;
+    const fInv = await POST('/api/files', { project_id: PROJ, name: 'WALK55 season invoice', ext: 'pdf',
+      kind: 'invoice', vendor: 'Folder Vendor Co', amount: 1234 }, { token: T.brenden });
+    const fSib = await POST('/api/files', { project_id: PROJ, name: 'WALK55 season sibling memo', ext: 'pdf',
+      kind: 'other' }, { token: T.brenden });
+    const fShow = await POST('/api/files', { show_id: SHOW, name: 'WALK55 show-level receipt', ext: 'pdf',
+      kind: 'receipt', vendor: 'Show Vendor Co', amount: 77 }, { token: T.brenden });
+    const INV = (fInv.body.file || fInv.body).id, SIB = (fSib.body.file || fSib.body).id;
+    const SHF = (fShow.body.file || fShow.body).id;
+    ok('fixture: two FOLDER-LEVEL rows (show_id null) and one show row',
+       [fInv.status, fSib.status, fShow.status].every((s) => s === 200 || s === 201)
+       && (fInv.body.file || fInv.body).show_id == null && (fSib.body.file || fSib.body).show_id == null
+       && (fShow.body.file || fShow.body).show_id === SHOW,
+       [fInv.status, fSib.status, fShow.status]);
+
+    seen.length = 0;
+    const av = await openIn(vwTab, INV);
+    const showHits = seen.filter((u) => /\/api\/shows\//.test(u));
+    ok('API · the folder-level invoice OPENS — no throw, the strip and stage drawn',
+       av.err === null && /class="vfile on"/.test(av.html) && av.stage.indexOf('WALK55 season invoice') >= 0,
+       av.err);
+    ok('API · NOT ONE /api/shows/ request while it opened — no /shows/0, no sub-route fan-out',
+       showHits.length === 0, showHits.slice(0, 8));
+    ok('API · the chrome wears the FOLDER’s name — header, strip head and crumb',
+       av.html.indexOf(vwTab.esc(projName)) >= 0 && av.crumb === projName + ' · Viewer',
+       av.crumb);
+    ok('API · the strip carries the sibling folder file',
+       av.html.indexOf(`data-act="vSet" data-id="${SIB}"`) >= 0);
+    ok('API · …and NOT the show’s own file — the folder strip is the folder’s rows only',
+       av.html.indexOf(`data-act="vSet" data-id="${SHF}"`) < 0);
+    ok('API · Back to folder goes to the FOLDER, never openShow(null)',
+       av.html.indexOf(`data-act="openFolder" data-id="${PROJ}"`) >= 0 && !/data-act="openShow"/.test(av.html));
+    ok('API · the money metadata still renders — vendor and amount on the invoice',
+       av.meta.indexOf('Folder Vendor Co') >= 0 && /1,234/.test(av.meta) && /Filed on the folder/.test(av.meta),
+       av.meta.slice(0, 300));
+    ok('API · the lock line tells the truth: folder level, no single show',
+       /Filed at the folder level on/.test(av.meta) && !/— folder-level — no single show\./.test(av.meta));
+
+    // the regression pair: a show file renders EXACTLY as the direct show read would
+    seen.length = 0;
+    const as = await openIn(vwTab, SHF);
+    const direct = vwTab.viewViewer(await vwTab.api.getShow(SHOW));
+    ok('API · REGRESSION PAIR — a show file still opens, through the show',
+       as.err === null && seen.some((u) => new RegExp(`/api/shows/${SHOW}\\b`).test(u))
+       && as.html.indexOf(`data-act="openShow" data-id="${SHOW}"`) >= 0, as.err);
+    ok('…drawing the byte-identical page the direct getShow render draws',
+       as.html === direct, [as.html.length, direct.length]);
+    ok('…whose strip holds the show file and none of the folder-level rows',
+       as.html.indexOf(`data-act="vSet" data-id="${SHF}"`) >= 0
+       && as.html.indexOf(`data-act="vSet" data-id="${INV}"`) < 0
+       && as.html.indexOf(`data-act="vSet" data-id="${SIB}"`) < 0);
+
+    // ── DEMO MODE (file://): the same door, the twin's store ───────────────
+    const dAsked = [];
+    const dGetShow = demoTab.api.getShow;
+    demoTab.api.getShow = (id) => { dAsked.push(id); return dGetShow(id); };
+    const dProj = Object.values(demoTab.PROJECTS_BY_ID).find((p) => (p.shows || []).length > 1)
+      || Object.values(demoTab.PROJECTS_BY_ID)[0];
+    const dShow55 = dProj.shows[0];
+    const dInv = await demoTab.api.addFile(null, { project_id: dProj.id, name: 'WALK55 demo season invoice',
+      ext: 'pdf', kind: 'invoice', ver: 'v1', size: 0, dim: '—' });
+    dInv.vendor = 'Demo Folder Vendor'; dInv.amount = 4321;
+    const dSib = await demoTab.api.addFile(null, { project_id: dProj.id, name: 'WALK55 demo sibling',
+      ext: 'pdf', kind: 'other', ver: 'v1', size: 0, dim: '—' });
+    const dShowFile = await demoTab.api.addFile(dShow55.id, { name: 'WALK55 demo show file',
+      ext: 'pdf', kind: 'other', ver: 'v1', size: 0, dim: '—' });
+    ok('DEMO fixture: folder-level rows carry project_id and no show; the show row keeps both',
+       dInv.show_id == null && dInv.project_id === dProj.id && dShowFile.show_id === dShow55.id
+       && Number(dShowFile.project_id) === Number(dProj.id));
+    dAsked.length = 0;
+    const dv = await openIn(demoTab, dInv.id);
+    ok('DEMO · the folder-level invoice OPENS — no throw',
+       dv.err === null && dv.stage.indexOf('WALK55 demo season invoice') >= 0, dv.err);
+    ok('DEMO · getShow was never asked — not with null, not with 0, not at all',
+       dAsked.length === 0, dAsked);
+    ok('DEMO · folder name in the chrome, the sibling in the strip',
+       dv.html.indexOf(demoTab.esc(dProj.name)) >= 0 && dv.crumb === demoTab.showLabel(dv.host) + ' · Viewer'
+       && dv.html.indexOf(`data-act="vSet" data-id="${dSib.id}"`) >= 0);
+    ok('DEMO · …and the show-level file is NOT in the folder strip (the twin keeps project_id on it)',
+       dv.html.indexOf(`data-act="vSet" data-id="${dShowFile.id}"`) < 0);
+    ok('DEMO · the invoice’s vendor and amount render on the folder host',
+       dv.meta.indexOf('Demo Folder Vendor') >= 0 && /4,321/.test(dv.meta), dv.meta.slice(0, 300));
+    dAsked.length = 0;
+    const ds = await openIn(demoTab, dShowFile.id);
+    const dAskedShow = dAsked.slice();
+    const dDirect = demoTab.viewViewer(await dGetShow(dShow55.id));
+    ok('DEMO · REGRESSION PAIR — the show file opens through getShow(its show)',
+       ds.err === null && dAskedShow.length === 1 && Number(dAskedShow[0]) === dShow55.id,
+       [ds.err, dAskedShow]);
+    ok('…drawing the byte-identical page the direct getShow render draws, the folder rows absent',
+       ds.html === dDirect && ds.html.indexOf(`data-act="vSet" data-id="${dInv.id}"`) < 0,
+       [ds.html.length, dDirect.length]);
+    demoTab.api.getShow = dGetShow;
+  }
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

@@ -267,9 +267,11 @@ async function renderView(view, arg) {
     crumb([{ t: 'Files' }]);
 
   } else if (view === 'viewer') {
-    var vshow = await api.getShow(VIEWER.showId);
+    /* the show the file is bound to, or its FOLDER when show_id is null —
+       viewerHost() never asks a /shows/:id route with a null id (9/29) */
+    var vshow = await viewerHost();
     s.innerHTML = viewViewer(vshow);
-    crumb([{ t: 'Files', act: act('goFiles') }, { t: (vshow.project.single ? vshow.project.name : vshow.name) + ' · Viewer' }]);
+    crumb([{ t: 'Files', act: act('goFiles') }, { t: showLabel(vshow) + ' · Viewer' }]);
     drawViewer(vshow);
     navOn('files');
 
@@ -1596,7 +1598,9 @@ async function deleteFileAct(fileId) {
   try { await updateFinCount(); } catch (_) {}
   /* The viewer was looking AT the row that just stopped existing — there is
      nothing to re-render, so go back to where the file lived. */
-  if (CUR.view === 'viewer') return showId ? openShow(showId) : render('projects');
+  if (CUR.view === 'viewer') {
+    return showId ? openShow(showId) : f.project_id ? openFolder(f.project_id) : render('projects');
+  }
   if (CUR.view === 'finance' || CUR.view === 'job') return refreshFinanceUI();
   if (CUR.view === 'show' && showId) return refreshShowTab(showId);
   return render(CUR.view, CUR.showId || CUR.projectId);
@@ -1705,7 +1709,7 @@ async function openViewer(fileId) {
   if (!f) return;
   /* keep `max`: it is the person's window preference, not a property of the
      file they happened to be looking at when they set it */
-  VIEWER = { showId: f.show_id, fileId: f.id, max: !!VIEWER.max };
+  VIEWER = { showId: f.show_id || null, projectId: f.project_id || null, fileId: f.id, max: !!VIEWER.max };
   return render('viewer');
 }
 /* Full width: drop the strip and the meta panel, keep everything reachable —
@@ -1718,11 +1722,11 @@ async function vMax() {
 }
 async function vSet(fileId) {
   VIEWER.fileId = Number(fileId);
-  drawViewer(await api.getShow(VIEWER.showId));
+  drawViewer(await viewerHost());
   routeDidRender('viewer');     /* the hash names the file on stage (replace) */
 }
 async function vGo(d) {
-  var show = await api.getShow(VIEWER.showId);
+  var show = await viewerHost();
   /* when a photo is up, prev/next pages the photo set only (photo pass) */
   var list = viewerNavList(show), n = list.length;
   if (!n) return;
@@ -1750,7 +1754,7 @@ async function printFile() {
       return;
     }
   }
-  var show = await api.getShow(VIEWER.showId);
+  var show = await viewerHost();
   var f = show.files.filter(function (x) { return x.id === VIEWER.fileId; })[0] || show.files[0];
   if (f) printSheet(show, f, show.gear);
 }
@@ -3384,7 +3388,7 @@ async function photoPickAct(fileId) {
     toast('Not starred', String(e && e.message || e), 'err');
     return;
   }
-  if (CUR.view === 'viewer') return drawViewer(await api.getShow(VIEWER.showId));
+  if (CUR.view === 'viewer') return drawViewer(await viewerHost());
   if (CUR.view === 'show') return refreshShowTab(CUR.showId);
   if (CUR.view === 'files') return render('files');
 }
@@ -3398,7 +3402,7 @@ async function photoConfirmAct(fileId) {
   }
   refreshBellPanel();
   updateBellBadge();
-  if (CUR.view === 'viewer') return drawViewer(await api.getShow(VIEWER.showId));
+  if (CUR.view === 'viewer') return drawViewer(await viewerHost());
   if (CUR.view === 'show') return refreshShowTab(CUR.showId);
   if (CUR.view === 'files') return render('files');
 }
@@ -3415,7 +3419,10 @@ async function photoRejectAct(fileId) {
   }
   refreshBellPanel();
   updateBellBadge();
-  if (CUR.view === 'viewer') { await openShow(showId); return setFolderTab('photos'); }
+  if (CUR.view === 'viewer') {
+    if (!showId) return f.project_id ? openFolder(f.project_id) : render('projects');
+    await openShow(showId); return setFolderTab('photos');
+  }
   if (CUR.view === 'show') return refreshShowTab(showId);
   if (CUR.view === 'files') return render('files');
 }
@@ -3426,7 +3433,7 @@ async function phTagAct(showId, tag) {
 }
 async function phCapEditAct(fileId) {
   PH_UI.editCap = Number(fileId);
-  drawViewer(await api.getShow(VIEWER.showId));
+  drawViewer(await viewerHost());
   var ta = document.getElementById('phCapIn');
   if (ta && ta.focus) ta.focus();
 }
@@ -3440,11 +3447,11 @@ async function phCapSaveAct(fileId) {
     toast('Not saved', String(e && e.message || e), 'err');
     return;
   }
-  return drawViewer(await api.getShow(VIEWER.showId));
+  return drawViewer(await viewerHost());
 }
 async function phCapCancelAct() {
   PH_UI.editCap = null;
-  return drawViewer(await api.getShow(VIEWER.showId));
+  return drawViewer(await viewerHost());
 }
 async function filesModeAct(mode) {
   FILES_UI.mode = mode === 'photos' || mode === 'all' ? mode : 'docs';
@@ -7987,7 +7994,7 @@ async function feCommitAct() {
   PENDING_FILEEDIT = null;
   closeM();
   toast('File updated', fileNameWithExt(f) + ' · ' + fileKindLabel(f.kind));
-  if (CUR.view === 'viewer') return drawViewer(await api.getShow(VIEWER.showId));
+  if (CUR.view === 'viewer') return drawViewer(await viewerHost());
   if (CUR.view === 'files') return render('files');
   if (CUR.view === 'show') return refreshShowTab(CUR.showId);
   return refreshFinanceUI();
@@ -8306,7 +8313,7 @@ async function phTagAddAct(fileId) {
   try { await api.updatePhoto(f.id, { tags: tags }); }
   catch (e) { toast('Not tagged', String(e && e.message || e), 'err'); return; }
   toast('Tagged', '“' + t + '”');
-  if (CUR.view === 'viewer') return drawViewer(await api.getShow(VIEWER.showId));
+  if (CUR.view === 'viewer') return drawViewer(await viewerHost());
 }
 async function phTagDelAct(fileId, tag) {
   var f = await api.getFile(fileId);
@@ -8315,7 +8322,7 @@ async function phTagDelAct(fileId, tag) {
   try { await api.updatePhoto(f.id, { tags: tags }); }
   catch (e) { toast('Not removed', String(e && e.message || e), 'err'); return; }
   toast('Tag removed', '“' + tag + '”');
-  if (CUR.view === 'viewer') return drawViewer(await api.getShow(VIEWER.showId));
+  if (CUR.view === 'viewer') return drawViewer(await viewerHost());
 }
 
 var ACTIONS = {

@@ -1525,6 +1525,18 @@ var api = (function () {
       return SR.get('/api/files' + SR.qs({ show_id: showId == null ? null : Number(showId), limit: 1000 }))
         .then(function (rows) { return (rows || []).map(A.file); });
     },
+    /* the rows filed AGAINST a folder (GET /api/files?project_id=). The server
+       stores project_id only on folder-level rows; the demo store keeps it on
+       show rows too, so the viewer's folder host filters show_id itself. */
+    listProjectFiles: function (projectId) {
+      var pid = Number(projectId);
+      if (!API()) {
+        return ok(Object.keys(FILES_BY_ID).map(function (k) { return FILES_BY_ID[k]; })
+          .filter(function (f) { return f && Number(f.project_id) === pid; }));
+      }
+      return SR.get('/api/files' + SR.qs({ project_id: pid, limit: 1000 }))
+        .then(function (rows) { return (rows || []).map(A.file); });
+    },
     getFile: function (id) {
       if (!API()) return ok(FILES_BY_ID[Number(id)] || null);
       return SR.get('/api/files/' + Number(id)).then(A.file, function () { return null; });

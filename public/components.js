@@ -1428,6 +1428,11 @@ function sheetHTML(show, f, gear) {
       '.' + String(f.ext || 'file').toUpperCase() + ' · FINANCIAL DOC',
       'Financial document');
   }
+  /* A FOLDER host (viewerHost, 9/29) is no show: there is no gear to pull and
+     no venue a modeled spec sheet could honestly describe — the plain document
+     card says what the row is. Same answer for a gear sheet with no gear. */
+  if ((show && show.folder && (c === 'e360' || c === 'nsf' || c === 'pcfg')) ||
+      ((c === 'pullsheet' || c === 'manifest') && !(gear && gear.kit))) return docSheet(show, f);
   if (c === 'e360') return show.type === 'print' ? printSpecSheet(show, f) : ledSpecSheet(show, f);
   if (c === 'nsf') return nsfSpecSheet(show, f);
   if (c === 'pcfg') return pcfgSpecSheet(show, f);

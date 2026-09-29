@@ -2288,10 +2288,36 @@ function viewToday(d) {
    gives the whole row to the document. It is deliberately a VIEW preference and
    not a per-file one — it survives paging, because somebody who wanted the big
    window for page 1 wants it for page 2. */
-var VIEWER = { showId: null, fileId: null, max: false };
+var VIEWER = { showId: null, projectId: null, fileId: null, max: false };
+
+/* THE VIEWER'S HOST (9/29). A file is bound to a SHOW, or — show_id null,
+   project_id set — to its FOLDER: the folder-level "Add file" door and season
+   PO paperwork both file that way. The viewer used to getShow(file.show_id)
+   unconditionally, so a folder-level invoice fired /api/shows/0 and seven of
+   its sub-routes (all 400) and the view died. The host is now either the real
+   show or a FOLDER host built from the project: its own folder-level rows in
+   the strip, no gear, no expenses, no show id — and every renderer below that
+   reads a show-only fact checks `host.folder` instead of fetching with a null. */
+async function viewerHost() {
+  if (VIEWER.showId) return api.getShow(VIEWER.showId);
+  if (!VIEWER.projectId) throw new Error('This file is bound to no show and no folder');
+  var p = await api.getProject(VIEWER.projectId);
+  var rows = await api.listProjectFiles(VIEWER.projectId);
+  return folderViewerHost(p, rows);
+}
+function folderViewerHost(p, rows) {
+  return {
+    folder: true, id: null, project_id: p.id, project: p,
+    name: p.name, venue: 'folder-level — no single show', type: p.type,
+    /* ONLY the folder's own rows: a show's files belong to that show's viewer,
+       and the demo store keeps project_id on show-level rows too */
+    files: (rows || []).filter(function (f) { return f && f.show_id == null; }),
+    gear: null, expenses: [], job: null, default_job_id: null
+  };
+}
 function viewViewer(show) {
   var files = show.files;
-  if (!files.length) return '<div class="empty">No files bound to this show yet.</div>';
+  if (!files.length) return '<div class="empty">No files bound to this ' + (show.folder ? 'folder' : 'show') + ' yet.</div>';
   if (!files.some(function (f) { return f.id === VIEWER.fileId; })) VIEWER.fileId = files[0].id;
   var strip = files.map(function (f) {
     /* photos show their real thumb + caption in the strip (photo pass) */
@@ -2311,7 +2337,8 @@ function viewViewer(show) {
      rather than a guess. */
   return '<div class="page-h v-head"><div><h1>Multimedia Viewer</h1>' +
     '<div class="sub">' + esc(title) + ' · ' + files.length + ' file' + (files.length === 1 ? '' : 's') + '</div></div>' +
-    '<button class="btn ghost" ' + act('openShow', show.id) + '>' + icon('folder') + 'Back to folder</button></div>' +
+    '<button class="btn ghost" ' + (show.folder ? act('openFolder', show.project_id) : act('openShow', show.id)) + '>' +
+      icon('folder') + 'Back to folder</button></div>' +
     '<div class="viewer-shell' + (VIEWER.max ? ' max' : '') + '" id="vShell">' +
     '<div class="vstrip"><div class="vsh"><b>' + esc(title) + '</b><span class="n">' + files.length + '</span></div>' + strip + '</div>' +
     '<div class="stage" id="vStage"></div>' +
@@ -2333,7 +2360,11 @@ function viewerIndex(show) {
 function viewerNavList(show) {
   var cur = null;
   show.files.forEach(function (x) { if (x.id === VIEWER.fileId) cur = x; });
-  if (cur && cur.kind === 'photo') return photosForShow(show.id);
+  if (cur && cur.kind === 'photo') {
+    return show.folder
+      ? show.files.filter(function (x) { return x.kind === 'photo'; })
+      : photosForShow(show.id);
+  }
   return show.files;
 }
 function drawViewer(show) {
@@ -2370,7 +2401,8 @@ function drawViewer(show) {
      modeled sheet) and only for the three spec classes; the async lookup
      (api.specRenderForFile) resolves null for a legacy bind and the stage
      falls back to the card, saying so. */
-  var specNode = (!live && !isPhoto && typeof SR !== 'undefined' && SR.isApi())
+  /* a folder host has no spec chain — the bundle routes are /shows/:id */
+  var specNode = (!live && !isPhoto && !show.folder && typeof SR !== 'undefined' && SR.isApi())
     ? specNodeForFile(f) : null;
   var staged = (live || specNode) && !isPhoto;
   var sheet = sheetHTML(show, f, show.gear);
@@ -2421,7 +2453,7 @@ function drawViewer(show) {
       '<button class="btn ghost" ' + act('rejectDoc', f.id) + '>' + icon('x') + 'Reject proposal</button>'
     : '';
   $('#vMeta').innerHTML = '<div class="mh"><b>File details</b></div>' +
-    '<div class="bound"><div class="bi">' + icon('pin') + '</div><div class="bt"><span>Bound to</span><b>' + esc(title) + '</b></div></div>' +
+    '<div class="bound"><div class="bi">' + icon('pin') + '</div><div class="bt"><span>' + (show.folder ? 'Filed on the folder' : 'Bound to') + '</span><b>' + esc(title) + '</b></div></div>' +
     /* the byteless truth, ABOVE the metadata it qualifies — this panel is the
        screen that finally told Brendon, and now it says so before the rows
        instead of leaving a download error to break the news */
@@ -2457,7 +2489,10 @@ function drawViewer(show) {
     (canDeleteFile(f, show) ? '<button class="btn danger" ' + act('deleteFile', f.id) + '>' +
       icon('trash') + 'Delete file</button>' : '') +
     '<button class="btn ghost" ' + toastAttrs('Bound', 'Spec re-bound to ' + title) + '>' + icon('link') + 'Re-bind to folder</button></div>' +
-    '<div class="note-meta-lock">' + icon('lock') + '<span>Bound to ' + esc(title) + ' — ' + esc(show.venue) + '. Anyone with folder access can view and print; the approved version stays locked.</span></div>' +
+    '<div class="note-meta-lock">' + icon('lock') + '<span>' + (show.folder
+      ? 'Filed at the folder level on ' + esc(title) + ' — no single show.'
+      : 'Bound to ' + esc(title) + ' — ' + esc(show.venue) + '.') +
+      ' Anyone with folder access can view and print; the approved version stays locked.</span></div>' +
     /* the file's anchored thread (notes pass) — agents read it when filing */
     '<div class="vnotes"><div class="vh">Notes' + (noteCount('file', f.id) ? ' · ' + noteCount('file', f.id) : '') + '</div>' +
     notesThread('file', f.id) + '</div>';
