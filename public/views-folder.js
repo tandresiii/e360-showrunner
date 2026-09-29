@@ -729,7 +729,10 @@ function chainStrip(show) {
         ? '<button class="btn sm ghost" ' + act('specOutdateClear', show.id, nd.k) +
           ' title="Withdraw the outdated flag — the spec reads as current again">' + icon('refresh') + 'Un-flag</button>'
         : '<button class="btn sm ghost" ' + act('specOutdate', show.id, nd.k) +
-          ' title="The design changed and nothing new is bound yet — mark the record known-stale">' + icon('alert') + 'Outdated</button>';
+          /* a bare adjective on a button reads as a STATUS, not a door — Tom
+             saw "Outdated" and read it as the card calling its own spec stale
+             (9/29). Verb first: buttons do things, chips state things. */
+          ' title="The design changed and nothing new is bound yet — mark the record known-stale">' + icon('alert') + 'Mark outdated</button>';
       btns += '<button class="btn sm ghost" ' + act('specUnbind', show.id, nd.k) +
         ' title="Detach from the show — the file stays in Files, every version stays in Spec history">' + icon('x') + 'Unbind</button>';
     }
