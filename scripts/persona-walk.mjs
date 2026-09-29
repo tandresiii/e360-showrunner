@@ -1480,6 +1480,42 @@ async function main() {
        mtThrew || 'rendered');
   }
   {
+    /* 9/29: a SEASON-LEVEL step (project_id, show:null) must be VISIBLE in
+       My Tasks, wearing its folder's name and opening the folder — the
+       client used to filter these rows out entirely, so the season's most
+       important tasks never appeared anywhere a person looks. */
+    const spid = 313132;
+    demoTab.PROJECTS_BY_ID[spid] = { id: spid, name: 'WALK season folder' };
+    const seasonRow = { show: null,
+      step: { id: 2, title: 'WALK season task', lane: 'client', status: 'todo',
+              owner: demoTab.ME, project_id: spid, due_date: '2031-03-14' } };
+    let ssHtml = null, ssThrew = null;
+    try { ssHtml = demoTab.viewMyTasks([seasonRow], []); }
+    catch (e) { ssThrew = String(e); }
+    ok('DEMO RENDER · a SEASON task (no show) is VISIBLE in My Tasks, named by its folder, opening the folder',
+       ssThrew === null && typeof ssHtml === 'string'
+         && ssHtml.indexOf('WALK season task') >= 0 && ssHtml.indexOf('WALK season folder') >= 0
+         && new RegExp(`openFolder[^>]*${spid}`).test(ssHtml),
+       ssThrew || 'rendered');
+    let calItems = null, calThrew = null;
+    try {
+      calItems = demoTab.calendarItems([], { tasks: [seasonRow] })
+        .filter((it) => it.kind === 'task');
+    } catch (e) { calThrew = String(e); }
+    ok('DEMO FEED · the same season task reaches the CALENDAR as a folder-opening chip',
+       calThrew === null && Array.isArray(calItems) && calItems.length === 1
+         && calItems[0].open && calItems[0].open[0] === 'openFolder' && calItems[0].open[1] === spid
+         && calItems[0].mine === true,
+       calThrew || JSON.stringify(calItems));
+    delete demoTab.PROJECTS_BY_ID[spid];
+    /* and the live mapping must never re-grow the row-dropping filter: the
+       my-steps map keeps show:null rows (source scan — the live client path
+       is unreachable from this harness, so the scan is the tripwire). */
+    ok('SOURCE · api.js myOpenSteps no longer drops show-less rows',
+       !/filter\(function \(x\) \{ return x\.show; \}\)/.test(SRC['api.js']),
+       'the 9/29 season-task filter is back');
+  }
+  {
     /* 9/23 · My Tasks "Done" — executed render, then the demo half of the
        click: the button is drawn on the row (inside the rowlink, carrying the
        step id), a viewer gets none, and the demo seam's flip takes the step

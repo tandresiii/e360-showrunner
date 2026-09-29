@@ -1494,16 +1494,19 @@ var api = (function () {
         return ok(out);
       }
       /* the server returns flat steps with a show stub; the views want the
-         {show, step} pair the mock produced, with a real show record. */
+         {show, step} pair the mock produced, with a real show record. A
+         SEASON-LEVEL step (project_id, no show) comes back with show:null and
+         MUST survive this mapping — filtering it out made the season's most
+         important tasks invisible in My Tasks (Tom, 9/29). */
       return Promise.all([
         SR.get('/api/my-steps' + SR.qs({ username: username || null })),
         ALL_SHOWS.length ? ok(null) : fetchShows(null)
       ]).then(function (r) {
-        return (r[0] || []).filter(function (x) { return x.show; }).map(function (x) {
+        return (r[0] || []).map(function (x) {
           var stub = x.show;
           var step = A.step(x);
           delete step.show;
-          return { show: SHOWS_BY_ID[stub.id] || stub, step: step };
+          return { show: stub ? (SHOWS_BY_ID[stub.id] || stub) : null, step: step };
         });
       });
     },

@@ -47,9 +47,13 @@ function viewMyTasks(mine, owedReports) {
     /* my-steps rows can carry a bare server stub (show not in SHOWS_BY_ID
        yet) — no .project on it. showLabel owns this decision and survives
        thin/missing projects; an inline .project read here took the view
-       down in prod, 9/23. */
-    var where = showLabel(m.show);
-    return '<tr class="rowlink" ' + act('openShow', m.show.id) + '><td><b style="font-weight:600">' + esc(m.step.title) + '</b></td>' +
+       down in prod, 9/23. A SEASON-LEVEL step has NO show at all: it wears
+       its folder's name and opens the folder (invisible until 9/29). */
+    var seasonP = !m.show && m.step.project_id != null ? PROJECTS_BY_ID[m.step.project_id] : null;
+    var where = m.show ? showLabel(m.show)
+      : ((seasonP && seasonP.name) || 'Season') + ' — season-wide';
+    var rowAct = m.show ? act('openShow', m.show.id) : act('openFolder', m.step.project_id);
+    return '<tr class="rowlink" ' + rowAct + '><td><b style="font-weight:600">' + esc(m.step.title) + '</b></td>' +
       '<td style="color:var(--muted)">' + esc(where) + '</td><td><span class="tag">' + esc(laneOf(m).label) + '</span></td>' +
       '<td>' + (m.step.risk ? '<span class="pill warn"><span class="dot"></span>At risk</span>' : statusPill(m.step.status)) + '</td>' +
       '<td class="mono" style="color:' + (isOverdue(m.step) ? 'var(--crit)' : 'var(--text-2)') + '">' + esc(fmtDate(m.step.due_date)) + '</td>' +
@@ -260,10 +264,13 @@ function calendarItems(shows, ctx) {
     var st = m && m.step;
     if (!st || !st.due_date) return;
     var s = m.show || (st.show_id != null ? SHOWS_BY_ID[st.show_id] : null) || null;
-    if (!s || s.id == null) return;
-    items.push({ show: s, label: st.title || 'Task', date: String(st.due_date).slice(0, 10), kind: 'task',
-                 pid: s.project_id != null ? s.project_id : (st.project_id != null ? st.project_id : null),
-                 mine: true, open: ['openShow', s.id], stepId: st.id });
+    /* a SEASON-LEVEL task (no show, a project_id) belongs on the calendar
+       too — it opens its folder, the meetings pattern below (9/29) */
+    if ((!s || s.id == null) && st.project_id == null) return;
+    var hasShow = !!(s && s.id != null);
+    items.push({ show: hasShow ? s : null, label: st.title || 'Task', date: String(st.due_date).slice(0, 10), kind: 'task',
+                 pid: hasShow && s.project_id != null ? s.project_id : (st.project_id != null ? st.project_id : null),
+                 mine: true, open: hasShow ? ['openShow', s.id] : ['openFolder', st.project_id], stepId: st.id });
   });
   /* SHOW REPORTS I OWE — the reportsOwedBy(ME) rows; they open the report */
   (ctx.reports || []).forEach(function (r) {
