@@ -380,13 +380,33 @@ router.post('/files', requireRole('tech'), asyncH(async (req, res) => {
       // (house stance — supersede, never delete), and the swap is named in the
       // PO's activity so the history reads back. The outcome rides home in
       // `po_link`, which is what the toast is allowed to speak from.
-      const slot = kind === 'invoice' ? 'invoice' : 'quote';
+      //
+      // ── …AND THE QUOTE SLOT IS NO LONGER THE DEFAULT  (Tom 2026-09-29) ─────
+      // "What if I want a PO, a quote, an invoice, a contract, like any number
+      // of things?" `anything else → the quote slot` meant a drawing, a packing
+      // list or a bank letter SUPERSEDED the vendor's quote. The routing is now:
+      //   kind 'invoice'          → the invoice slot   (unchanged)
+      //   po_role 'quote'         → the quote slot     (asked for BY NAME)
+      //   everything else         → a po_documents row (po_link 'document')
+      // The two slots keep their supersede-never-silent rules exactly.
+      const slot = kind === 'invoice' ? 'invoice'
+        : pick(b, 'po_role') === 'quote' ? 'quote' : 'document';
+      if (slot === 'document') {
+        await c.query(
+          `INSERT INTO po_documents (po_id, file_id, added_by) VALUES ($1,$2,$3)
+           ON CONFLICT (po_id, file_id) DO NOTHING`,
+          [po.id, file.id, req.session.username || '']);
+        await c.query('UPDATE purchase_orders SET updated_at=NOW() WHERE id=$1', [po.id]);
+        poLink = 'document';
+      }
       const col = slot === 'invoice' ? 'invoice_file_id' : 'quote_file_id';
-      const prior = slot === 'invoice' ? po.invoice_file_id : po.quote_file_id;
-      const superseded = !!prior && prior !== file.id;
-      poLink = superseded ? `superseded-${slot}` : slot;
-      await c.query(`UPDATE purchase_orders SET ${col}=$1, updated_at=NOW() WHERE id=$2`,
-        [file.id, po.id]);
+      const prior = slot === 'invoice' ? po.invoice_file_id : slot === 'quote' ? po.quote_file_id : null;
+      const superseded = slot !== 'document' && !!prior && prior !== file.id;
+      if (slot !== 'document') {
+        poLink = superseded ? `superseded-${slot}` : slot;
+        await c.query(`UPDATE purchase_orders SET ${col}=$1, updated_at=NOW() WHERE id=$2`,
+          [file.id, po.id]);
+      }
       if (kind === 'invoice') {
         await c.query('UPDATE expenses SET file_id=$1 WHERE po_id=$2 AND file_id IS NULL',
           [file.id, po.id]);
@@ -441,7 +461,7 @@ router.post('/files', requireRole('tech'), asyncH(async (req, res) => {
     return { file, created, poLink };
   });
   // `po_link` is the server's own account of the linkage — 'invoice' | 'quote' |
-  // 'superseded-invoice' | 'superseded-quote' | 'none'. The client renders its
+  // 'superseded-invoice' | 'superseded-quote' | 'document' | 'none'. The client renders its
   // receipt from THIS, not from what it asked for.
   res.json({ ...dbToFile(out.file), created: out.created, po_link: out.poLink,
              upload_url: `/api/files/${out.file.id}/content` });
@@ -727,6 +747,9 @@ router.delete('/files/:id', asyncH(async (req, res) => {
     await c.query('UPDATE content_versions SET file_id=NULL WHERE file_id=$1', [cur.id]);
     await c.query('UPDATE purchase_orders SET quote_file_id=NULL WHERE quote_file_id=$1', [cur.id]);
     await c.query('UPDATE purchase_orders SET invoice_file_id=NULL WHERE invoice_file_id=$1', [cur.id]);
+    // The same rule for a PO's documents list: the pointer goes, the PO stays.
+    // No PO may keep serving a document whose row no longer exists.
+    await c.query('DELETE FROM po_documents WHERE file_id=$1', [cur.id]);
     // A meeting's transcript is its SOURCE, not its life. Deleting the vtt
     // unpicks the link and leaves the digest — what was decided in the room is
     // not undecided because the recording went away. Same rule, and the same

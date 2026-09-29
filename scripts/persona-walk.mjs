@@ -5524,14 +5524,14 @@ async function main() {
     poTab.SR.setToken(T.brenden);
 
     const q1 = await poTab.api.addFinancialDoc(SHOW, {
-      kind: 'po', name: 'Deposit Vendor quote v1', ext: 'pdf',
+      kind: 'po', name: 'Deposit Vendor quote v1', ext: 'pdf', poRole: 'quote',
       vendor: 'Deposit Vendor Co', poId: DPO });
     ok('a vendor quote fills the empty quote slot — and the SEAM is told which slot',
        q1.po_link === 'quote', q1.po_link);
 
     // THE BRANCH THAT WAS A SILENT NO-OP
     const q2 = await poTab.api.addFinancialDoc(SHOW, {
-      kind: 'po', name: 'Deposit Vendor quote v2 revised', ext: 'pdf',
+      kind: 'po', name: 'Deposit Vendor quote v2 revised', ext: 'pdf', poRole: 'quote',
       vendor: 'Deposit Vendor Co', poId: DPO });
     const dpoQ2 = await GET(`/api/pos/${DPO}`, { token: T.brenden });
     ok('A SECOND QUOTE SUPERSEDES — a request that names a po_id never ends linked to nothing',
@@ -5569,13 +5569,14 @@ async function main() {
        && poTab.FILES_BY_ID[inv.id].name === 'Deposit Vendor deposit invoice',
        [!!poTab.FILES_BY_ID[q2.id], !!poTab.FILES_BY_ID[inv.id]]);
     const coldHtml = poTab.viewPO(coldPo);
-    ok('…so the Linked docs panel DRAWS BOTH CARDS on a tab that just opened the PO',
-       /Linked docs · 2/.test(coldHtml)
+    // (9/29: "Linked docs" became the one Documents panel — slots first, then the list)
+    ok('…so the Documents panel DRAWS BOTH ROWS on a tab that just opened the PO',
+       /Documents · 2/.test(coldHtml)
        && coldHtml.indexOf(`data-act="openViewer" data-id="${q2.id}"`) >= 0
        && coldHtml.indexOf(`data-act="openViewer" data-id="${inv.id}"`) >= 0,
-       (coldHtml.match(/Linked docs · \d+/) || [])[0]);
+       (coldHtml.match(/Documents · \d+/) || [])[0]);
     ok('…naming each one by its role, so the invoice is not mistaken for the quote',
-       /Linked docs · 2/.test(coldHtml) && />invoice</.test(coldHtml) && />quote</.test(coldHtml),
+       /Documents · 2/.test(coldHtml) && />invoice</.test(coldHtml) && />quote</.test(coldHtml),
        (coldHtml.match(/>(invoice|quote)</g) || []));
 
     // ── THE DOOR, RENDERED ON A QUOTED PO ──────────────────────────────────
@@ -5608,7 +5609,7 @@ async function main() {
       /function finLabelWrap\(text, inner, hint\)[\s\S]*?\n\}/,
       /function finPoSlotRow\(link\)[\s\S]*?\n\}/,
       /function finCardsHTML\(\)[\s\S]*?\n\}/,
-      /function finPoHintIndex\(\)[\s\S]*?\n\}/,
+      /function finPoHintRole\(link\)[\s\S]*?\n\}/,
       /function finPickedKind\(i\)[\s\S]*?\n\}/
     ].map((re) => (re.exec(APP_JS) || [''])[0]);
     ok('the modal’s PO half is liftable — every piece of it found in the shipped app.js',
@@ -5629,14 +5630,21 @@ async function main() {
 
     finTab.PENDING_FIN = { showId: SHOW, link: { poId: DPO, poKindHint: 'invoice' } };
     const rowInv = finTab.finPoSlotRow(finTab.PENDING_FIN.link);
-    ok('THE KIND IS A CONTROL, NOT A SIDE EFFECT — the PO modal draws a labelled slot choice',
-       /id="fdPoSlot"/.test(rowInv) && /Vendor quote/.test(rowInv) && /Vendor invoice/.test(rowInv));
+    ok('THE KIND IS A CONTROL, NOT A SIDE EFFECT — the PO modal draws a labelled ROLE choice',
+       /id="fdPoSlot"/.test(rowInv) && /Document — /.test(rowInv) && /Quote — /.test(rowInv)
+       && /Invoice — /.test(rowInv));
     ok('…PREFILLED from the button that opened it — Attach invoice selects the invoice slot',
        /value="invoice" selected/.test(rowInv), rowInv.slice(rowInv.indexOf('<select'), 400));
     finTab.PENDING_FIN = { showId: SHOW, link: { poId: DPO, poKindHint: 'quote' } };
     const rowQuote = finTab.finPoSlotRow(finTab.PENDING_FIN.link);
     ok('…and Attach quote selects the quote slot — the same control, the other default',
-       /value="po" selected/.test(rowQuote) && !/value="invoice" selected/.test(rowQuote));
+       /value="quote" selected/.test(rowQuote) && !/value="invoice" selected/.test(rowQuote));
+    const rowDoc = finTab.finPoSlotRow({ poId: DPO, poKindHint: 'document' });
+    const rowNone = finTab.finPoSlotRow({ poId: DPO });
+    ok('…and the Documents door (or no hint at all) defaults to DOCUMENT — never the quote slot',
+       /value="document" selected/.test(rowDoc) && /value="document" selected/.test(rowNone)
+       && !/value="quote" selected/.test(rowNone) && /quote and invoice slots are untouched/.test(rowDoc),
+       rowNone.slice(rowNone.indexOf('<select'), 300));
     ok('…and it says out loud that an occupied slot is REPLACED, because this one is',
        /replaces<\/b> it/.test(rowQuote), rowQuote.indexOf('replaces'));
     ok('…while an EMPTY slot gets the plain promise instead of a false warning',
@@ -5652,14 +5660,20 @@ async function main() {
        (finTab.finCardsHTML().match(/data-act="commitFinDoc"/g) || []).length === 4);
 
     finTab.PENDING_FIN = { showId: SHOW, link: { poId: DPO, poKindHint: 'invoice' } };
+    finTab._sel = { value: 'invoice' };
     ok('THE VISIBLE CHOICE WINS · the commit sends what the control says, not the card’s index',
-       finTab.finPickedKind(finTab.finPoHintIndex()).kind === 'invoice');
-    finTab._sel = { value: 'po' };
-    ok('…so changing it to Vendor quote really changes the kind that is POSTed',
-       finTab.finPickedKind(finTab.finPoHintIndex()).kind === 'po');
+       finTab.finPickedKind(0).kind === 'invoice');
+    finTab._sel = { value: 'quote' };
+    const pickQ = finTab.finPickedKind(0);
+    ok('…so changing it to Quote really changes what is POSTed — kind po AND po_role quote',
+       pickQ.kind === 'po' && pickQ.poRole === 'quote', pickQ);
+    finTab._sel = { value: 'document' };
+    const pickD = finTab.finPickedKind(0);
+    ok('…and Document posts a non-invoice kind with po_role document — the list, not a slot',
+       pickD.kind !== 'invoice' && pickD.poRole === 'document', pickD);
     finTab._sel = null;
     ok('…and with no reachable control it still commits the HINT, never index 0',
-       finTab.finPickedKind(finTab.finPoHintIndex()).kind === 'invoice',
+       finTab.finPickedKind(0).kind === 'invoice',
        finTab.FIN_DOC_KINDS[0].kind);
 
     // ── THE TOAST, AND THE MUTATION THAT PUTS THE LIE BACK ──────────────────
@@ -5676,10 +5690,10 @@ async function main() {
     ok('…and the hardcoded "the PO" — the request’s INTENT, printed as an outcome — is gone',
        !/link\.poId \? 'the PO'/.test(finRealSrc) && !/:\s*'the PO'\s*:/.test(finRealSrc));
     ok('…with a distinct, true sentence for every outcome the route can report',
-       ['quote', 'invoice', 'superseded-quote', 'superseded-invoice']
+       ['quote', 'invoice', 'superseded-quote', 'superseded-invoice', 'document']
          .every((k) => typeof finTab.PO_LINK_WHERE[k] === 'string'
                     && finTab.PO_LINK_WHERE[k].indexOf('the PO (') === 0)
-       && new Set(Object.values(finTab.PO_LINK_WHERE)).size === 4,
+       && new Set(Object.values(finTab.PO_LINK_WHERE)).size === 5,
        finTab.PO_LINK_WHERE);
     ok('…and an unlinked answer falls through to copy that does NOT claim the PO',
        (finTab.PO_LINK_WHERE.none === undefined)
@@ -5691,6 +5705,151 @@ async function main() {
     ok('DEMO TWIN · the file:// half no longer skips an occupied quote slot either',
        !/if \(!linkPo\.quote_file_id\) linkPo\.quote_file_id = f\.id;/.test(seamDemo)
        && /superseded-/.test(seamDemo));
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  section('54b · a PO holds N documents  (Tom, 9/29: "a PO, a quote, an invoice, a contract, like any number of things")');
+  // ══════════════════════════════════════════════════════════════════════════
+  // The two financial slots stay; everything else joins po_documents. Walked
+  // end to end in BOTH modes: the seam files five documents, the real
+  // views-purchasing.js draws five rows, unlink drops exactly one pointer, and
+  // the demo twin routes and refuses in the server's words.
+  // MUTATION GATES: drop the `po.document_ids` loop from viewPO's Documents
+  // panel → "FIVE ROWS" goes red; drop the documents absorb in absorbPODetail
+  // (api.js) → "COLD READ" goes red; revert the demo twin's slot line to
+  // `kind === 'invoice' ? 'invoice' : 'quote'` → "DEMO · plain documents" red.
+  {
+    reach('Attach / unlink a PO’s documents', {
+      seam: ['getPO', 'addFinancialDoc', 'linkPODocument', 'unlinkPODocument'],
+      action: ['poAttachDocument', 'poUnlinkDoc'] });
+
+    const mkTab = (protocol, files, fetchFn) => {
+      const store = new Map();
+      const ctx = {
+        fetch: fetchFn,
+        localStorage: {
+          getItem: (k) => (store.has(k) ? store.get(k) : null),
+          setItem: (k, v) => store.set(k, String(v)),
+          removeItem: (k) => store.delete(k)
+        },
+        location: { protocol },
+        setTimeout, clearTimeout, AbortController, console,
+        document: { addEventListener: () => {}, querySelector: () => null,
+                    querySelectorAll: () => [], getElementById: () => null },
+        navigator: { userAgent: 'walk' }
+      };
+      ctx.window = ctx;
+      vm.createContext(ctx);
+      for (const f of files) new vm.Script(SRC[f], { filename: 'public/' + f }).runInContext(ctx);
+      return ctx;
+    };
+    const VIEW_FILES = ['data.js', 'api.js', 'components.js', 'views-notes.js', 'views-contacts.js',
+      'views-finance.js', 'views-purchasing.js', 'views-folder.js', 'views-dashboard.js'];
+    const rowsOf = (html) => ({
+      all: (html.match(/class="next-item po-doc"/g) || []).length,
+      quote: (html.match(/data-role="quote"/g) || []).length,
+      invoice: (html.match(/data-role="invoice"/g) || []).length,
+      document: (html.match(/data-role="document"/g) || []).length,
+      unlink: (html.match(/data-act="poUnlinkDoc"/g) || []).length
+    });
+
+    // ── API MODE ───────────────────────────────────────────────────────────
+    const nTab = mkTab('http:', VIEW_FILES, (p, opts) => fetch(new URL(p, BASE), opts));
+    ok('the browser half loads headless in API mode', (await nTab.SR.probe()) === 'api');
+    nTab.SR.setToken(T.brenden);
+    const npo = await POST('/api/pos', { project_id: PROJ, job_id: JOB,
+      vendor: 'Many Papers Co', memo: 'walk — N documents' }, { token: T.brenden });
+    const NPO = npo.body.id;
+    await POST(`/api/pos/${NPO}/lines`, { item: 'truss', qty: 1, unit_cost: 500,
+      category: 'gear', show_id: SHOW }, { token: T.brenden });
+    const nDoc = (name, kind, poRole) => nTab.api.addFinancialDoc(SHOW, {
+      kind, name, ext: 'pdf', vendor: 'Many Papers Co', poId: NPO, poRole });
+    const nd1 = await nDoc('WALK54b rigging drawing', 'other', 'document');
+    const nd2 = await nDoc('WALK54b supply contract', 'contract');          // no role at all
+    const nd3 = await nDoc('WALK54b packing list', 'po');                   // the OLD quote kind, no role
+    const nq = await nDoc('WALK54b vendor quote', 'po', 'quote');
+    const ni = await nDoc('WALK54b vendor invoice', 'invoice', 'invoice');
+    ok('SEAM · three plain documents answer po_link "document"; quote and invoice answer their slots',
+       [nd1, nd2, nd3].every((f) => f.po_link === 'document')
+       && nq.po_link === 'quote' && ni.po_link === 'invoice',
+       [nd1.po_link, nd2.po_link, nd3.po_link, nq.po_link, ni.po_link]);
+
+    // cold read: the tab forgets every row, then opens the PO
+    for (const f of [nd1, nd2, nd3, nq, ni]) delete nTab.FILES_BY_ID[f.id];
+    const nPo = await nTab.api.getPO(NPO);
+    ok('COLD READ · getPO warms all five file rows and keeps the list as ids, in link order',
+       [nd1, nd2, nd3, nq, ni].every((f) => !!nTab.FILES_BY_ID[f.id])
+       && JSON.stringify(nPo.document_ids) === JSON.stringify([nd1.id, nd2.id, nd3.id]),
+       nPo.document_ids);
+    const nHtml = nTab.viewPO(nPo);
+    const nRows = rowsOf(nHtml);
+    ok('FIVE ROWS · the Documents panel draws quote + invoice (badged) and the three documents',
+       /Documents · 5/.test(nHtml) && nRows.all === 5 && nRows.quote === 1 && nRows.invoice === 1
+       && nRows.document === 3, nRows);
+    ok('…every row opens the viewer',
+       [nd1, nd2, nd3, nq, ni].every((f) => nHtml.indexOf(`data-act="openViewer" data-id="${f.id}"`) >= 0));
+    ok('…and ONLY the list rows carry an unlink, keyed to this PO',
+       nRows.unlink === 3
+       && nHtml.indexOf(`data-act="poUnlinkDoc" data-id="${nd2.id}" data-k="${NPO}"`) >= 0
+       && nHtml.indexOf(`data-act="poUnlinkDoc" data-id="${nq.id}"`) < 0, nRows.unlink);
+    ok('…the slot roles render quote first, then invoice, then the list',
+       nHtml.indexOf('data-role="quote"') < nHtml.indexOf('data-role="invoice"')
+       && nHtml.indexOf('data-role="invoice"') < nHtml.indexOf('data-role="document"'));
+    ok('…and the panel carries its own Attach door (Document role by default)',
+       nHtml.indexOf(`data-act="poAttachDocument" data-id="${NPO}"`) >= 0);
+
+    const nUn = await nTab.api.unlinkPODocument(NPO, nd2.id);
+    const nAfter = rowsOf(nTab.viewPO(nUn));
+    ok('UNLINK · the server answers "unlinked" and the panel redraws four rows',
+       nUn.document_link === 'unlinked' && nAfter.all === 4 && nAfter.document === 2, nAfter);
+    const nd2Back = await GET(`/api/files/${nd2.id}`, { token: T.brenden });
+    ok('…the file itself survives and still opens from its show',
+       nd2Back.status === 200 && nd2Back.body.show_id === SHOW && !!nTab.FILES_BY_ID[nd2.id]);
+
+    // the stranger, in the server's words — the demo twin must say the same
+    const patLink = await POST(`/api/pos/${NPO}/documents`, { file_id: nd2.id }, { token: T.pat });
+    const patUnlink = await DEL(`/api/pos/${NPO}/documents/${nd1.id}`, { token: T.pat });
+    ok('a pm who owns nothing is refused attach AND unlink (403)',
+       patLink.status === 403 && patUnlink.status === 403, [patLink.status, patUnlink.status]);
+    const serverWords = String(patLink.body.error || '').replace(/^\S+ /, '');
+
+    // ── DEMO MODE (file://) ────────────────────────────────────────────────
+    const dTab = mkTab('file:', VIEW_FILES, () => Promise.reject(new Error('demo mode must not reach the network')));
+    ok('the demo twin loads with file:// as its trapdoor', (await dTab.SR.probe()) === 'demo');
+    const dPo = dTab.ALL_POS.find((p) => p.status === 'quoted') || dTab.ALL_POS[0];
+    const dShow = dTab.poPrimaryShow(dPo);
+    const savedSlots = [dPo.quote_file_id, dPo.invoice_file_id];
+    const dd = [];
+    for (const [nm, kind, role] of [['drawing', 'other', 'document'], ['contract', 'contract', null],
+                                    ['PO doc', 'po', null]]) {
+      dd.push(await dTab.api.addFinancialDoc(dShow.id, { kind, vendor: 'WALK54b ' + nm, poId: dPo.id, poRole: role }));
+    }
+    ok('DEMO · plain documents join the list — the twin routes exactly like routes/files.js',
+       dd.every((f) => f.po_link === 'document')
+       && dPo.quote_file_id === savedSlots[0] && dPo.invoice_file_id === savedSlots[1]
+       && dd.every((f) => dPo.document_ids.indexOf(f.id) >= 0),
+       { links: dd.map((f) => f.po_link), slots: [dPo.quote_file_id, dPo.invoice_file_id] });
+    const dq = await dTab.api.addFinancialDoc(dShow.id, { kind: 'po', vendor: 'WALK54b quote', poId: dPo.id, poRole: 'quote' });
+    ok('DEMO · po_role "quote" still takes (or supersedes) the quote slot',
+       dPo.quote_file_id === dq.id && /^(superseded-)?quote$/.test(dq.po_link), dq.po_link);
+    const dRows = rowsOf(dTab.viewPO(dPo));
+    ok('DEMO · the panel draws the list rows with unlinks',
+       dRows.document >= 3 && dRows.unlink === dRows.document, dRows);
+    const dUn = await dTab.api.unlinkPODocument(dPo.id, dd[0].id);
+    ok('DEMO · unlink drops the pointer and keeps the file',
+       dUn.document_link === 'unlinked' && dPo.document_ids.indexOf(dd[0].id) < 0
+       && !!dTab.FILES_BY_ID[dd[0].id]);
+    await dTab.api.deleteFile(dd[1].id);
+    ok('DEMO · deleting the file leaves no dangling pointer on the PO',
+       dPo.document_ids.indexOf(dd[1].id) < 0);
+    dTab.CURRENT_USER = { username: 'walk_nobody', role: 'pm' };
+    let dRefuse = '';
+    try { await dTab.api.unlinkPODocument(dPo.id, dd[2].id); } catch (e) { dRefuse = String(e.message); }
+    let dRefuseLink = '';
+    try { await dTab.api.linkPODocument(dPo.id, dd[0].id); } catch (e) { dRefuseLink = String(e.message); }
+    ok('DEMO · a pm who owns nothing is refused both ways, in the SERVER’s words',
+       !!serverWords && dRefuse.replace(/^\S+ /, '') === serverWords
+       && dRefuseLink.replace(/^\S+ /, '') === serverWords, [dRefuse, serverWords]);
   }
 
   // ══════════════════════════════════════════════════════════════════════════

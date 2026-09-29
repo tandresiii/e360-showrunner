@@ -252,7 +252,22 @@ async function loadPODetail(id, q = pool) {
     ? (await q.query('SELECT * FROM files WHERE id = ANY($1::int[]) ORDER BY id', [ids]))
         .rows.map(dbToFile)
     : [];
+  po.documents = await loadPODocuments(q, po.id);
   return po;
+}
+
+// The PO's documents LIST (po_documents, 2026-09-29) — the pointed-at file
+// rows, oldest link first, each stamped with who linked it and when. An INNER
+// join on purpose: a pointer whose file has gone is never served, even if some
+// future path forgot to remove it (the delete paths do remove it — this is the
+// belt, not the braces).
+async function loadPODocuments(q, poId) {
+  const r = await q.query(
+    `SELECT f.*, pd.added_by AS pd_added_by, pd.created_at AS pd_created_at
+       FROM po_documents pd JOIN files f ON f.id = pd.file_id
+      WHERE pd.po_id=$1 ORDER BY pd.created_at, pd.id`, [poId]);
+  return r.rows.map((row) => Object.assign(dbToFile(row),
+    { linked_by: row.pd_added_by || '', linked_at: row.pd_created_at }));
 }
 
 // The shows referenced by any line on these POs (risk needs their load-in dates).
@@ -932,6 +947,61 @@ router.put('/pos/:id', requireAuth, requireRole('pm'), asyncH(async (req, res) =
     return loadPO(updated.id, c);
   });
   res.json(out);
+}));
+
+// ── A PO'S DOCUMENTS LIST  (Tom 2026-09-29) ─────────────────────────────────
+// POST   /api/pos/:id/documents          {file_id}  link an EXISTING file
+// DELETE /api/pos/:id/documents/:fileId             unlink it
+// Same gate as every other PO edit: pm floor + canEditProject (owner pm or
+// manager+). A link is a POINTER — unlinking removes the row, never the file,
+// which stays on its show / folder. The quote and invoice SLOTS are not this
+// list: a file already in one is refused here rather than drawn twice.
+router.post('/pos/:id/documents', requireAuth, requireRole('pm'), asyncH(async (req, res) => {
+  const id = idParam(req);
+  const fileId = num(pick(req.body || {}, 'file_id'), null);
+  if (!fileId) throw badRequest('file_id required');
+  const out = await withTx(async (c) => {
+    const po = await loadPO(id, c, { activity: false });
+    await assertCanEdit(req, po, c);
+    const f = (await c.query('SELECT id, name FROM files WHERE id=$1', [fileId])).rows[0];
+    if (!f) throw notFound(`file ${fileId} not found`);
+    if (po.quote_file_id === f.id || po.invoice_file_id === f.id) {
+      throw conflict(`${f.name} is already ${po.po_number}’s ${po.quote_file_id === f.id ? 'quote' : 'invoice'}`);
+    }
+    const ins = await c.query(
+      `INSERT INTO po_documents (po_id, file_id, added_by) VALUES ($1,$2,$3)
+       ON CONFLICT (po_id, file_id) DO NOTHING RETURNING id`,
+      [po.id, f.id, req.session.username || '']);
+    const linked = ins.rows.length ? 'linked' : 'already';
+    if (linked === 'linked') {
+      await c.query('UPDATE purchase_orders SET updated_at=NOW() WHERE id=$1', [po.id]);
+      await logActivity(c, { poId: po.id, projectId: po.project_id, actor: req.actor,
+        action: 'po.document.link', detail: `${po.po_number} — ${f.name}` });
+    }
+    return { po: await loadPODetail(po.id, c), linked };
+  });
+  // `document_link` is the server's account: 'linked' | 'already'
+  res.json(Object.assign(out.po, { document_link: out.linked }));
+}));
+
+router.delete('/pos/:id/documents/:fileId', requireAuth, requireRole('pm'), asyncH(async (req, res) => {
+  const id = idParam(req);
+  const fileId = parseInt(req.params.fileId, 10);
+  if (!Number.isInteger(fileId) || fileId <= 0) throw badRequest('bad file id');
+  const out = await withTx(async (c) => {
+    const po = await loadPO(id, c, { activity: false });
+    await assertCanEdit(req, po, c);
+    const del = await c.query('DELETE FROM po_documents WHERE po_id=$1 AND file_id=$2 RETURNING id',
+      [po.id, fileId]);
+    if (!del.rows.length) throw notFound(`file ${fileId} is not on ${po.po_number}’s documents list`);
+    const f = (await c.query('SELECT name FROM files WHERE id=$1', [fileId])).rows[0];
+    await c.query('UPDATE purchase_orders SET updated_at=NOW() WHERE id=$1', [po.id]);
+    await logActivity(c, { poId: po.id, projectId: po.project_id, actor: req.actor,
+      action: 'po.document.unlink',
+      detail: `${po.po_number} — ${f ? f.name : `file #${fileId}`} (the file stays filed)` });
+    return loadPODetail(po.id, c);
+  });
+  res.json(Object.assign(out, { document_link: 'unlinked' }));
 }));
 
 // DELETE /api/pos/:id — manager+. 25's delete-cascade wiring: po_lines, notes

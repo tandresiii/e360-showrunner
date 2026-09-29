@@ -186,6 +186,10 @@ button.next-item:last-child{border-bottom:0}
 button.next-item>svg{width:16px; height:16px; flex:none; color:var(--muted)}
 .next-item .txt{flex:1; font-size:13px; min-width:0}
 .next-item .txt span{display:block; color:var(--muted); font-size:11.5px; margin-top:2px}
+/* PO Documents panel rows (2026-09-29): the recovery chip is a card-corner
+   overlay everywhere else — in a list row it sits inline, in the flow. */
+.po-doc .file-upl{position:static; transform:none}
+.po-doc .txt{overflow:hidden; text-overflow:ellipsis}
 .summary{background:linear-gradient(180deg,var(--accent-ghost),transparent); border:1px solid color-mix(in srgb,var(--accent) 22%,var(--border))}
 .summary .sig{display:flex; align-items:center; gap:8px; color:var(--accent); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; margin-bottom:12px}
 .summary .sig svg{width:14px;height:14px}

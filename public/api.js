@@ -794,6 +794,25 @@ var api = (function () {
     return rows || [];
   }
 
+  /* The PO DETAIL read, absorbed: the slot docs + evidence (`docs`), the
+     expense rows, and the documents LIST (`documents`, po_documents) — every
+     pointed-at file row warmed into FILES_BY_ID, the list itself kept as ids
+     (`document_ids`) the view reads the demo way. The list is REPLACED
+     wholesale, never merged: an unlink elsewhere must not survive a refresh. */
+  function absorbPODetail(p) {
+    if (!p) return p;
+    (p.docs || []).forEach(A.file);
+    (p.expenses || []).forEach(A.expense);
+    var docIds = [];
+    (p.documents || []).forEach(function (d) {
+      var f = A.file(d);
+      if (f && docIds.indexOf(f.id) < 0) docIds.push(f.id);
+    });
+    p.document_ids = docIds;
+    delete p.documents;
+    return A.po(p);
+  }
+
   /* The $5,000 gate is CONFIG, not a constant: `poNeedsApproval()` and every
      "over the threshold" string read the global, so pull the real number once
      per session or the UI and the server can disagree about who needs to
@@ -1657,6 +1676,9 @@ var api = (function () {
           var po = POS_BY_ID[k];
           if (po.quote_file_id === id) po.quote_file_id = null;
           if (po.invoice_file_id === id) po.invoice_file_id = null;
+          /* the documents list drops its POINTER — the server's
+             DELETE FROM po_documents WHERE file_id, in the demo's words */
+          if (po.document_ids) po.document_ids = po.document_ids.filter(function (x) { return x !== id; });
         });
         /* NULLS, never cascades — the same rule routes/files.js holds for a
            meeting's transcript. The digest outlives the recording. */
@@ -1671,6 +1693,10 @@ var api = (function () {
           if (s2 && s2.files) s2.files = s2.files.filter(function (x) { return x.id !== id; });
           delete FILES_BY_ID[id];
         }
+        Object.keys(POS_BY_ID).forEach(function (k) {
+          var po2 = POS_BY_ID[k];
+          if (po2.document_ids) po2.document_ids = po2.document_ids.filter(function (x) { return x !== id; });
+        });
         return r || { ok: true };
       });
     },
@@ -2357,12 +2383,20 @@ var api = (function () {
              beside the server's `else if (!po.quote_file_id)`, so both halves
              told the same lie about a second quote. An occupied slot is
              SUPERSEDED — the old document stays on the show, the swap is named
-             in the log — and the outcome rides home on the row as po_link. */
-          var poSlot = body.kind === 'invoice' ? 'invoice' : 'quote';
-          var poPrior = poSlot === 'invoice' ? linkPo.invoice_file_id : linkPo.quote_file_id;
-          var poSup = !!poPrior && poPrior !== f.id;
-          f.po_link = poSup ? 'superseded-' + poSlot : poSlot;
-          if (body.kind === 'invoice') {
+             in the log — and the outcome rides home on the row as po_link.
+             2026-09-29: the quote slot is no longer the default. invoice kind →
+             invoice slot; po_role 'quote' → quote slot; EVERYTHING ELSE → the
+             PO's documents list (po_link 'document') — routes/files.js's rule. */
+          var poRole = body.poRole || body.po_role || null;
+          var poSlot = body.kind === 'invoice' ? 'invoice' : poRole === 'quote' ? 'quote' : 'document';
+          var poPrior = poSlot === 'invoice' ? linkPo.invoice_file_id : poSlot === 'quote' ? linkPo.quote_file_id : null;
+          var poSup = poSlot !== 'document' && !!poPrior && poPrior !== f.id;
+          f.po_link = poSlot === 'document' ? 'document' : poSup ? 'superseded-' + poSlot : poSlot;
+          if (poSlot === 'document') {
+            linkPo.document_ids = linkPo.document_ids || [];
+            if (linkPo.document_ids.indexOf(f.id) < 0) linkPo.document_ids.push(f.id);
+            linkPo.activity.unshift(mkAct(ME, 'po.document.link', linkPo.po_number + ' — ' + f.name, 0, _nowHM()));
+          } else if (body.kind === 'invoice') {
             linkPo.invoice_file_id = f.id;
             (PO_LINES_BY_PO[linkPo.id] || []).forEach(function (l) {
               if (!l.expense_id) return;
@@ -2431,7 +2465,10 @@ var api = (function () {
         job_id: body.job_id != null ? Number(body.job_id) : null,
         expense_id: body.expenseId != null ? Number(body.expenseId) : (body.expense_id != null ? Number(body.expense_id) : null),
         booking_id: body.bookingId != null ? Number(body.bookingId) : (body.booking_id != null ? Number(body.booking_id) : null),
-        po_id: body.poId != null ? Number(body.poId) : (body.po_id != null ? Number(body.po_id) : null)
+        po_id: body.poId != null ? Number(body.poId) : (body.po_id != null ? Number(body.po_id) : null),
+        /* 'quote' asks for the quote slot BY NAME; anything else on a PO is a
+           documents-list row (an invoice kind still takes the invoice slot) */
+        po_role: body.poRole || body.po_role || null
       };
       Object.keys(b).forEach(function (k) { if (b[k] === null || b[k] === undefined) delete b[k]; });
       b.show_id = Number(showId);
@@ -2443,6 +2480,13 @@ var api = (function () {
            every call — a row that was superseded last time must not keep saying
            so the next time it is filed somewhere else. */
         f.po_link = (r && r.po_link) || 'none';
+        /* the server said it joined the documents list — the cached PO says so
+           too, until the next getPO replaces the list wholesale */
+        var lpo = b.po_id ? POS_BY_ID[b.po_id] : null;
+        if (lpo && f.po_link === 'document') {
+          lpo.document_ids = lpo.document_ids || [];
+          if (lpo.document_ids.indexOf(f.id) < 0) lpo.document_ids.push(f.id);
+        }
         var s2 = SHOWS_BY_ID[Number(showId)];
         if (s2 && s2.files) s2.files.unshift(f);
         return f;
@@ -2566,11 +2610,56 @@ var api = (function () {
          EXPENSES_BY_ID synchronously — the demo way — and on a cold tab nothing
          had ever put those rows in either map. Same shape as fetchShow()
          absorbing show.files: the seam warms the store, the view just reads it. */
-      return SR.get('/api/pos/' + Number(id)).then(function (p) {
-        (p.docs || []).forEach(A.file);
-        (p.expenses || []).forEach(A.expense);
-        return A.po(p);
-      });
+      return SR.get('/api/pos/' + Number(id)).then(absorbPODetail);
+    },
+    /* ── A PO's DOCUMENTS LIST (po_documents, 2026-09-29) ───────────────────
+       POST   /api/pos/:id/documents {file_id}  -> linkPODocument(poId, fileId)
+       DELETE /api/pos/:id/documents/:fileId    -> unlinkPODocument(poId, fileId)
+       A link is a POINTER: unlinking drops the id, never the file. The demo
+       twin refuses in the server's words (routes/purchasing.js). */
+    linkPODocument: function (poId, fileId) {
+      if (!API()) {
+        var po = POS_BY_ID[Number(poId)];
+        if (!po) return fail('PO ' + poId + ' not found');
+        if (!canEditFolder(PROJECTS_BY_ID[po.project_id] || null)) {
+          return fail(po.po_number + ' belongs to a project you do not own — pm (owner) or manager+ required');
+        }
+        var f = FILES_BY_ID[Number(fileId)];
+        if (!f) return fail('file ' + fileId + ' not found');
+        if (po.quote_file_id === f.id || po.invoice_file_id === f.id) {
+          return fail(f.name + ' is already ' + po.po_number + '’s ' + (po.quote_file_id === f.id ? 'quote' : 'invoice'));
+        }
+        po.document_ids = po.document_ids || [];
+        var already = po.document_ids.indexOf(f.id) >= 0;
+        if (!already) {
+          po.document_ids.push(f.id);
+          po.activity.unshift(mkAct(ME, 'po.document.link', po.po_number + ' — ' + f.name, 0, _nowHM()));
+        }
+        po.document_link = already ? 'already' : 'linked';
+        return ok(po);
+      }
+      return SR.post('/api/pos/' + Number(poId) + '/documents', { file_id: Number(fileId) }, { notifyOk: true })
+        .then(function (p) { var out = absorbPODetail(p); out.document_link = p && p.document_link; return out; });
+    },
+    unlinkPODocument: function (poId, fileId) {
+      if (!API()) {
+        var po = POS_BY_ID[Number(poId)];
+        if (!po) return fail('PO ' + poId + ' not found');
+        if (!canEditFolder(PROJECTS_BY_ID[po.project_id] || null)) {
+          return fail(po.po_number + ' belongs to a project you do not own — pm (owner) or manager+ required');
+        }
+        var ids = po.document_ids || [];
+        var at = ids.indexOf(Number(fileId));
+        if (at < 0) return fail('file ' + fileId + ' is not on ' + po.po_number + '’s documents list');
+        ids.splice(at, 1);
+        var f = FILES_BY_ID[Number(fileId)];
+        po.activity.unshift(mkAct(ME, 'po.document.unlink',
+          po.po_number + ' — ' + (f ? f.name : 'file #' + fileId) + ' (the file stays filed)', 0, _nowHM()));
+        po.document_link = 'unlinked';
+        return ok(po);
+      }
+      return SR.del('/api/pos/' + Number(poId) + '/documents/' + Number(fileId), null, { notifyOk: true })
+        .then(function (p) { var out = absorbPODetail(p); out.document_link = p && p.document_link; return out; });
     },
     /* one call for the Purchasing view — stats + board + risks + queue */
     getPurchasingOverview: function () {

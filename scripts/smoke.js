@@ -40,6 +40,12 @@ process.env.STORAGE_ROOT = process.env.STORAGE_ROOT ||
 // and only here: the production ceiling is untouched, and nothing below asserts
 // anything about throttling.
 process.env.LOGIN_RATE_LIMIT = process.env.LOGIN_RATE_LIMIT || '400';
+// The same reasoning for the general /api ceiling (1200 per IP per 5-minute
+// fixed window): the whole suite is ONE client, and by the po_documents wave
+// (2026-09-29) its busiest five minutes crossed 1200 — the G section's 403/401
+// gates started answering 429 and the run aborted. Raised here and only here;
+// production's ceiling is untouched and nothing below asserts throttling.
+process.env.API_RATE_LIMIT = process.env.API_RATE_LIMIT || '20000';
 // §15e begins UNCONFIGURED on purpose (the 501-honesty half), and a developer
 // machine may carry real Dropbox credentials — which this suite must never
 // touch. Cleared before anything reads them; the fake's are set mid-run.
@@ -661,8 +667,10 @@ const DEL = (p, o) => call('DELETE', p, o);
     category: 'gear', show_id: S }, { token: A });
   await PUT(`/api/pos/${DPO}/status`, { status: 'quoted' }, { token: A });
 
+  // po_role: 'quote' — since 2026-09-29 the quote slot is asked for BY NAME;
+  // a non-invoice doc without it joins the documents list (gated below).
   const dq1 = await POST('/api/files', { show_id: S, name: TAG + ' vendor quote v1', ext: '.pdf',
-    kind: 'po', vendor: TAG + ' Deposit Vendor', po_id: DPO }, { token: A });
+    kind: 'po', po_role: 'quote', vendor: TAG + ' Deposit Vendor', po_id: DPO }, { token: A });
   const dpoQ1 = await GET(`/api/pos/${DPO}`, { token: A });
   ok('a vendor quote fills the PO’s empty quote slot — and the ANSWER says so',
      dq1.status === 200 && dq1.body.po_link === 'quote', dq1.body.po_link);
@@ -670,7 +678,7 @@ const DEL = (p, o) => call('DELETE', p, o);
      dpoQ1.body.quote_file_id === dq1.body.id, dpoQ1.body.quote_file_id);
 
   const dq2 = await POST('/api/files', { show_id: S, name: TAG + ' vendor quote v2 revised',
-    ext: '.pdf', kind: 'po', vendor: TAG + ' Deposit Vendor', po_id: DPO }, { token: A });
+    ext: '.pdf', kind: 'po', po_role: 'quote', vendor: TAG + ' Deposit Vendor', po_id: DPO }, { token: A });
   const dpoQ2 = await GET(`/api/pos/${DPO}`, { token: A });
   ok('A SECOND QUOTE SUPERSEDES — it is NEVER filed to nothing (the silent drop)',
      dq2.status === 200 && dpoQ2.body.quote_file_id === dq2.body.id,
@@ -717,6 +725,8 @@ const DEL = (p, o) => call('DELETE', p, o);
   const linkAgrees = (link, poRow, fileId) => (
     link === 'invoice' || link === 'superseded-invoice' ? poRow.invoice_file_id === fileId
     : link === 'quote' || link === 'superseded-quote' ? poRow.quote_file_id === fileId
+    : link === 'document' ? (poRow.documents || []).some((d) => d.id === fileId)
+        && poRow.quote_file_id !== fileId && poRow.invoice_file_id !== fileId
     : link === 'none' && poRow.quote_file_id !== fileId && poRow.invoice_file_id !== fileId);
   ok('po_link IS the database, not a hope about it — every answer agrees with the column',
      linkAgrees(dq1.body.po_link, dpoQ1.body, dq1.body.id)
@@ -761,6 +771,133 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('...and the actuals it generated carry that invoice as their evidence',
      rExp.rows.length > 0 && rExp.rows.every((e) => e.file_id === rInv.body.id),
      rExp.rows.map((e) => e.file_id));
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // A PO HOLDS N DOCUMENTS  (Tom 2026-09-29: "What if I want a PO, a quote, an
+  // invoice, a contract, like any number of things?")
+  // ──────────────────────────────────────────────────────────────────────────
+  // POST /files with a po_id used to shove EVERY non-invoice doc into the quote
+  // slot — a packing list superseded the vendor's quote. Now: kind invoice →
+  // invoice slot, po_role 'quote' → quote slot, everything else → po_documents.
+  // MUTATION GATES: restore `kind === 'invoice' ? 'invoice' : 'quote'` in
+  // routes/files.js → the "PD DOCUMENT" / "PD DEAD DEFAULT" / "PD NEVER A SLOT"
+  // assertions go red. Drop `po.documents =` from loadPODetail → "PD GET SERVES
+  // FIVE" goes red. Drop assertCanEdit from POST /pos/:id/documents → "PD
+  // STRANGER" goes red. Drop the po_documents delete from DELETE /files/:id →
+  // "PD NO DANGLING" goes red.
+  const mpo = await POST('/api/pos', { vendor: TAG + ' Many Docs Vendor', project_id: P, job_id: J,
+    memo: TAG + ' N documents' }, { token: A });
+  const MPO = mpo.body.id;
+  await POST(`/api/pos/${MPO}/lines`, { item: TAG + ' truss', qty: 1, unit_cost: 700,
+    category: 'gear', show_id: S }, { token: A });
+  const pdDoc = (name, kind, extra = {}) => POST('/api/files', Object.assign({ show_id: S,
+    name: TAG + ' ' + name, ext: '.pdf', kind, vendor: TAG + ' Many Docs Vendor', po_id: MPO }, extra),
+    { token: A });
+  const pd1 = await pdDoc('shop drawing', 'spec');
+  const pd2 = await pdDoc('supply contract', 'contract');
+  const pd3 = await pdDoc('PO document itself', 'po');          // the old quote-slot kind, NO role
+  const pdAfter3 = await GET(`/api/pos/${MPO}`, { token: A });
+  ok('PD DOCUMENT · three plain documents each answer po_link "document"',
+     [pd1, pd2, pd3].every((r) => r.status === 200 && r.body.po_link === 'document'),
+     [pd1, pd2, pd3].map((r) => r.body.po_link));
+  ok('PD DEAD DEFAULT · a kind-"po" doc with no po_role does NOT take the quote slot any more',
+     pdAfter3.body.quote_file_id === null && pd3.body.po_link === 'document',
+     { quote: pdAfter3.body.quote_file_id, link: pd3.body.po_link });
+  ok('...and neither slot moved for any of the three',
+     pdAfter3.body.quote_file_id === null && pdAfter3.body.invoice_file_id === null,
+     [pdAfter3.body.quote_file_id, pdAfter3.body.invoice_file_id]);
+
+  const pdQ = await pdDoc('vendor quote', 'po', { po_role: 'quote' });
+  const pdI = await pdDoc('vendor invoice', 'invoice');
+  const pdAll = await GET(`/api/pos/${MPO}`, { token: A });
+  const pdDocIds = (pdAll.body.documents || []).map((d) => d.id);
+  ok('PD GET SERVES FIVE · quote in the quote slot, invoice in the invoice slot, three in documents',
+     pdQ.body.po_link === 'quote' && pdI.body.po_link === 'invoice'
+     && pdAll.body.quote_file_id === pdQ.body.id && pdAll.body.invoice_file_id === pdI.body.id
+     && JSON.stringify(pdDocIds) === JSON.stringify([pd1.body.id, pd2.body.id, pd3.body.id]),
+     { quote: pdAll.body.quote_file_id, invoice: pdAll.body.invoice_file_id, documents: pdDocIds });
+  ok('...documents are whole file rows (name, kind) stamped with who linked them',
+     (pdAll.body.documents || []).every((d) => !!d.name && !!d.kind && d.linked_by === 'admin'),
+     (pdAll.body.documents || []).map((d) => [d.name, d.linked_by]));
+  ok('...and the slot docs are NOT duplicated into the documents list',
+     !pdDocIds.includes(pdQ.body.id) && !pdDocIds.includes(pdI.body.id), pdDocIds);
+  ok('po_link agrees with the database for a documents-list answer too',
+     linkAgrees(pd1.body.po_link, pdAll.body, pd1.body.id)
+     && !linkAgrees('quote', pdAll.body, pd1.body.id));
+
+  // regression: po_role 'quote' on an OCCUPIED slot supersedes exactly as before
+  const pdQ2 = await pdDoc('vendor quote rev B', 'po', { po_role: 'quote' });
+  const pdAfterQ2 = await GET(`/api/pos/${MPO}`, { token: A });
+  const pdSup = await pool.query(
+    `SELECT detail FROM activity WHERE po_id=$1 AND action='po.supersede'`, [MPO]);
+  ok('PD QUOTE SUPERSEDES · po_role "quote" on a full slot replaces it, named in the answer and the log',
+     pdQ2.body.po_link === 'superseded-quote' && pdAfterQ2.body.quote_file_id === pdQ2.body.id
+     && pdSup.rows.length === 1 && pdSup.rows[0].detail.includes('vendor quote rev B'),
+     { link: pdQ2.body.po_link, slot: pdAfterQ2.body.quote_file_id, log: pdSup.rows.length });
+  const pd4 = await pdDoc('packing list', 'other');
+  const pdAfter4 = await GET(`/api/pos/${MPO}`, { token: A });
+  ok('PD NEVER A SLOT · a plain document on a PO with BOTH slots full touches neither',
+     pd4.body.po_link === 'document'
+     && pdAfter4.body.quote_file_id === pdQ2.body.id && pdAfter4.body.invoice_file_id === pdI.body.id
+     && (pdAfter4.body.documents || []).length === 4,
+     { link: pd4.body.po_link, quote: pdAfter4.body.quote_file_id,
+       invoice: pdAfter4.body.invoice_file_id, n: (pdAfter4.body.documents || []).length });
+
+  // link an EXISTING file (the unlinked receipt from above), and the refusals
+  const pdLink = await POST(`/api/pos/${MPO}/documents`, { file_id: noLinkDoc.body.id }, { token: A });
+  ok('POST /pos/:id/documents links an existing file — the answer says "linked"',
+     pdLink.status === 200 && pdLink.body.document_link === 'linked'
+     && (pdLink.body.documents || []).some((d) => d.id === noLinkDoc.body.id), pdLink.body.document_link);
+  const pdAgain = await POST(`/api/pos/${MPO}/documents`, { file_id: noLinkDoc.body.id }, { token: A });
+  ok('...linking it twice is honest: "already", one row, not two',
+     pdAgain.status === 200 && pdAgain.body.document_link === 'already'
+     && (pdAgain.body.documents || []).filter((d) => d.id === noLinkDoc.body.id).length === 1,
+     pdAgain.body.document_link);
+  const pdSlotDup = await POST(`/api/pos/${MPO}/documents`, { file_id: pdQ2.body.id }, { token: A });
+  ok('...the file already in the QUOTE slot is refused (409), not drawn twice',
+     pdSlotDup.status === 409 && /already .*quote/.test(pdSlotDup.body.error || ''), pdSlotDup.body);
+  const pdGhost = await POST(`/api/pos/${MPO}/documents`, { file_id: 99999902 }, { token: A });
+  ok('...a file that does not exist is a 404', pdGhost.status === 404, pdGhost.status);
+
+  const pdStrPm = await POST(`/api/pos/${MPO}/documents`, { file_id: pd4.body.id }, { token: PM2T });
+  const pdStrTech = await POST(`/api/pos/${MPO}/documents`, { file_id: pd4.body.id }, { token: TECHT });
+  const pdStrDelPm = await DEL(`/api/pos/${MPO}/documents/${pd1.body.id}`, { token: PM2T });
+  const pdStrDelTech = await DEL(`/api/pos/${MPO}/documents/${pd1.body.id}`, { token: TECHT });
+  const pdStillThere = await GET(`/api/pos/${MPO}`, { token: A });
+  ok('PD STRANGER · a pm who does not own the folder is refused attach AND unlink (403)',
+     pdStrPm.status === 403 && pdStrDelPm.status === 403, [pdStrPm.status, pdStrDelPm.status]);
+  ok('...and a tech is below the floor for both (403)',
+     pdStrTech.status === 403 && pdStrDelTech.status === 403, [pdStrTech.status, pdStrDelTech.status]);
+  ok('...and the refused unlink left the pointer standing',
+     (pdStillThere.body.documents || []).some((d) => d.id === pd1.body.id));
+
+  // UNLINK — the pointer goes, the file survives and still opens
+  await call('PUT', `/api/files/${pd2.body.id}/content`, { token: A, raw: Buffer.from('contract bytes') });
+  const pdUn = await DEL(`/api/pos/${MPO}/documents/${pd2.body.id}`, { token: A });
+  const pdUnFile = await GET(`/api/files/${pd2.body.id}`, { token: A });
+  const pdUnBytes = await call('GET', `/api/files/${pd2.body.id}/content`, { token: A, wantBytes: true });
+  ok('PD UNLINK · DELETE /pos/:id/documents/:fileId drops the pointer — "unlinked"',
+     pdUn.status === 200 && pdUn.body.document_link === 'unlinked'
+     && !(pdUn.body.documents || []).some((d) => d.id === pd2.body.id), pdUn.body.document_link);
+  ok('...the FILE survives on its show and still opens, bytes and all',
+     pdUnFile.status === 200 && pdUnFile.body.show_id === S
+     && pdUnBytes.status === 200 && Buffer.isBuffer(pdUnBytes.bytes)
+     && pdUnBytes.bytes.toString() === 'contract bytes', [pdUnFile.status, pdUnBytes.status]);
+  const pdUn2 = await DEL(`/api/pos/${MPO}/documents/${pd2.body.id}`, { token: A });
+  ok('...unlinking what is not linked is a 404 naming the list, never a fake 200',
+     pdUn2.status === 404 && /documents list/.test(pdUn2.body.error || ''), pdUn2.body);
+
+  // THE UNDERLYING FILE IS DELETED — no dangling pointer, served or stored
+  const pdDel = await DEL(`/api/files/${pd1.body.id}`, { token: A });
+  const pdAfterDel = await GET(`/api/pos/${MPO}`, { token: A });
+  const pdRows = await pool.query('SELECT COUNT(*)::int n FROM po_documents WHERE file_id=$1', [pd1.body.id]);
+  ok('PD NO DANGLING · deleting the file removes its pointer — the table holds none',
+     pdDel.status === 200 && pdRows.rows[0].n === 0, pdRows.rows[0].n);
+  ok('...and the PO serves no row for it',
+     pdAfterDel.status === 200 && !(pdAfterDel.body.documents || []).some((d) => d.id === pd1.body.id),
+     (pdAfterDel.body.documents || []).map((d) => d.id));
+  // pd3, pd4 and the linked receipt stay pointed-at on purpose: section 6's
+  // folder delete must take them to ZERO (childCounts.po_documents).
 
   // ── the NEEDS LIST (Tom, 2026-09-02) — per-job ancillaries checklist ──────
   const { LED_ANCILLARIES } = require('../lib/enums');
@@ -7283,7 +7420,8 @@ const DEL = (p, o) => call('DELETE', p, o);
      && before.content_pieces > 0 && before.content_versions > 0
      && before.show_dropbox_links > 0
      && before.gear_snapshots > 0
-     && before.meetings > 0,
+     && before.meetings > 0
+     && before.po_documents > 0,
      before);
   // add the remaining child types so the cascade is exercised in full
   await POST('/api/bookings', { show_id: S, category: 'Truck / freight', vendor: 'Landstar',
@@ -8554,6 +8692,16 @@ async function childCounts(projectId) {
     // ONLY project-scoped: a meeting survives its show (show_id NULLS), so
     // counting it through `inShows` would miss exactly the rows at risk.
     meetings:         await q('SELECT COUNT(*) n FROM meetings WHERE project_id=$1'),
+    // po_documents pass (2026-09-29) — a pointer dangles from EITHER end: its PO
+    // (project-scoped) or its file (folder-level or on one of the shows). After
+    // the delete neither end exists to join through, so the count ALSO takes
+    // every pointer whose PO or file is gone — a dangling row counts wherever
+    // it came from.
+    po_documents:     await q(`SELECT COUNT(*) n FROM po_documents
+                               WHERE po_id IN (SELECT id FROM purchase_orders WHERE project_id=$1)
+                                  OR file_id IN (SELECT id FROM files WHERE project_id=$1 OR show_id ${inShows})
+                                  OR po_id NOT IN (SELECT id FROM purchase_orders)
+                                  OR file_id NOT IN (SELECT id FROM files)`),
     activity:         await q(`SELECT COUNT(*) n FROM activity WHERE project_id=$1 OR show_id ${inShows}`)
   };
 }

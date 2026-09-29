@@ -1380,6 +1380,8 @@ var ACTION_LABELS = {
   'expense.delete': 'voided a cost',
   'po.update': 'changed a PO', 'po.status': 'moved a PO',
   'po.supersede': 'replaced a PO document',
+  'po.document.link': 'linked a document to a PO',
+  'po.document.unlink': 'unlinked a document from a PO',
   'need.add': 'added a needs-list item', 'need.update': 'changed a needs-list item',
   'need.status': 'checked the needs list', 'need.delete': 'removed a needs-list item',
   'need.seed': 'seeded the needs list',

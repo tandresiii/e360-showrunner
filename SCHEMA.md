@@ -328,6 +328,17 @@ which is what the finance feed reads for budget events.
 
 **`po_lines`** *(idx: `po_id`, `job_id`)* — `id · po_id · item · detail · qty · unit_cost · category · job_id · show_id · ownership · expense_id · created_at`
 
+**`po_documents`** *(unique `(po_id, file_id)`, idx: `file_id`)* — `id · po_id · file_id · added_by · created_at`
+A PO's documents LIST (2026-09-29) beside the two financial slots
+(`quote_file_id` / `invoice_file_id`, which reconciliation reads). A row is a
+POINTER: unlinking deletes the row, never the file. `POST /api/files` with a
+`po_id` routes kind `invoice` → invoice slot, `po_role: 'quote'` → quote slot,
+everything else → a row here (`po_link: 'document'`). Link/unlink an existing
+file with `POST /api/pos/:id/documents {file_id}` / `DELETE
+/api/pos/:id/documents/:fileId` (pm + canEditProject); `GET /api/pos/:id`
+embeds the pointed-at file rows as `documents`. Removed by the file delete and
+by the PO, show and project cascades.
+
 > **The budget mechanic.** `ordered`/`shipped` = **committed**; `received` =
 > **actual**. `cogs` lines ride the job budget between allotted and actual and
 > generate `expenses` rows on receive; `inventory` lines are **E360 capex** and
@@ -829,7 +840,7 @@ or the per-user agents of `ARCHITECTURE.md`; this app does not fake one.
 | `deleteShowCascade(showId)` | nulls **`meetings.show_id`** and **`meetings.transcript_file_id`** for this show's documents *(both BEFORE the files delete — a meeting belongs to the folder, not to the show it concerned)*, then notes anchored on the show and on its steps/files/expenses (+ reads/mentions), `proofs`, `proof_rounds`, `steps`, `files`, `expenses`, `bookings`, `schedule_items`, `crew_assignments`, **`room_assignments`**, `deliverables`, `milestones`, `spec_chain`, `spec_renders`, `flex_state`, **`gear_snapshots`**, `proposals`, **`tech_reports`**, **`notification_outbox`**, **`show_contacts`** (the LINK — the contact row survives, deliberately), `activity`, nulls `po_lines.show_id` and `purchase_needs.show_id`, the show |
 | `deleteProjectCascade(projectId)` | every show (via the show cascade), every PO (via the PO cascade), job- and project-anchored notes, `budget_lines`, **`purchase_needs`**, `jobs`, project-level `steps`/`files`/`expenses`/`milestones`/`deliverables`/`proposals`/**`tech_reports`**/**`notification_outbox`**, **`meetings`** (a meeting dies with the season it is a record of), `activity`, the project |
 | `DELETE /api/jobs/:id` (`routes/finance.js`) | refuses while shows/expenses/po_lines still attach; then `budget_lines`, **`purchase_needs`**, job-anchored `notes`, the job |
-| `DELETE /api/files/:id` (single file, `routes/files.js`) | file-anchored `notes` (+ reads/mentions), **`spec_renders` by `file_id`**, nulls `expenses.file_id` / `bookings.file_id` / `purchase_orders.quote_file_id` / `.invoice_file_id`, the file. The NAS bytes are left on disk deliberately. `spec_renders` was added in the 2026-08-27 hardening pass: `spec_renders.file_id` is `NOT NULL`, so a render cannot be orphaned the way a nullable FK can — it goes with the file or it is a dangling row |
+| `DELETE /api/files/:id` (single file, `routes/files.js`) | file-anchored `notes` (+ reads/mentions), **`spec_renders` by `file_id`**, nulls `expenses.file_id` / `bookings.file_id` / `purchase_orders.quote_file_id` / `.invoice_file_id`, deletes the file's `po_documents` pointers, the file. The NAS bytes are left on disk deliberately. `spec_renders` was added in the 2026-08-27 hardening pass: `spec_renders.file_id` is `NOT NULL`, so a render cannot be orphaned the way a nullable FK can — it goes with the file or it is a dangling row |
 
 | `DELETE /api/bookings/:id` (`routes/files.js`) | nulls `room_assignments.booking_id` — cancelling a hotel block's paperwork never deletes who sleeps where — then the booking. Mutation-tested in smoke ("BOOKING DELETE NULLS, NEVER DELETES") |
 

@@ -2206,6 +2206,31 @@ async function poAttachQuote(poId) {
   if (!s) { toast('No show to file against', po.po_number + '’s folder has no shows yet — add one, then attach the quote'); return; }
   return openAddFinDoc(s.id, { poId: po.id, poKindHint: 'quote' });
 }
+/* The Documents panel's own door (2026-09-29): same modal, defaulting to the
+   plain DOCUMENT role — a drawing, a contract, a packing list, a bank letter
+   joins the PO's list and touches neither financial slot. */
+async function poAttachDocument(poId) {
+  var po = await api.getPO(poId);
+  var s = poPrimaryShow(po);
+  if (!s) { toast('No show to file against', po.po_number + '’s folder has no shows yet — add one, then attach the document'); return; }
+  return openAddFinDoc(s.id, { poId: po.id, poKindHint: 'document' });
+}
+/* UNLINK — the pointer goes, the file stays. The confirm says both halves, and
+   the toast answers from the server's `document_link`, not from the click. */
+async function poUnlinkDocAct(fileId, poId) {
+  var po = POS_BY_ID[Number(poId)];
+  var f = FILES_BY_ID[Number(fileId)];
+  var nm = f ? fileNameWithExt(f) : 'this document';
+  var home = f && f.show_id && SHOWS_BY_ID[f.show_id] ? showLabel(SHOWS_BY_ID[f.show_id]) : 'its folder';
+  if (!askConfirm('Unlink “' + nm + '” from ' + (po ? po.po_number : 'this PO') + '?\n\n' +
+      'Only the link goes. The file itself stays filed on ' + home + ' and still opens from there.')) return;
+  var r;
+  try { r = await api.unlinkPODocument(Number(poId), Number(fileId)); }
+  catch (e) { toast('Not unlinked', String(e && e.message || e), 'err'); return; }
+  toast(r && r.document_link === 'unlinked' ? 'Unlinked from ' + (r.po_number || 'the PO') : 'PO updated',
+    nm + ' — still filed on ' + home);
+  return refreshFinanceUI();
+}
 
 /* ---- new PO ---- */
 async function openNewPO() {
@@ -2638,18 +2663,24 @@ var FIN_DOC_KINDS = [
   { kind: 'po', label: 'Purchase order', desc: 'ordered — committed spend', ic: 'box' },
   { kind: 'confirmation', label: 'Confirmation', desc: 'booked — reservation held', ic: 'checkC' }
 ];
-/* ── THE TWO SLOTS A PO HAS, SAID OUT LOUD  (Tom 2026-09-21) ────────────────
-   A purchase order holds exactly two documents: the vendor's quote and the
-   vendor's invoice. Every other doc type the modal offers resolves to the quote
-   slot on the server, so on a PO the honest choice is these two and only these
-   two — prefilled from the button that opened the modal, and CHANGEABLE, so
-   what the server is about to do is on screen before the commit.
-   `kind` is the existing file kind each slot is filed under: a vendor quote is
-   the 'po' document type this app has always used for one (data.js q4). */
+/* ── WHAT A PO TAKES, SAID OUT LOUD  (Tom 2026-09-21 · 2026-09-29) ─────────
+   A purchase order has two financial SLOTS — the vendor's quote and the
+   vendor's invoice — and, since 9/29, a documents LIST for everything else:
+   "a PO, a quote, an invoice, a contract, like any number of things". The
+   server routes kind 'invoice' → the invoice slot, po_role 'quote' → the quote
+   slot, and EVERYTHING ELSE → the list (routes/files.js). So the modal's
+   choice is these three ROLES — prefilled from the button that opened it,
+   Document by default, and CHANGEABLE, so what the server is about to do is on
+   screen before the commit.
+   `kind` is the file kind each role is filed under: a vendor quote is the 'po'
+   document type this app has always used for one (data.js q4); a plain
+   document is 'other' — it is paperwork, not a line on Accounting's feed. */
 var FIN_PO_SLOTS = [
-  { kind: 'po', slot: 'quote', label: 'Vendor quote',
+  { kind: 'other', slot: 'document', label: 'Document',
+    desc: 'joins this PO’s documents list — drawings, contracts, packing lists; touches neither slot' },
+  { kind: 'po', slot: 'quote', label: 'Quote',
     desc: 'fills this PO’s QUOTE slot — backs the quoted stage' },
-  { kind: 'invoice', slot: 'invoice', label: 'Vendor invoice',
+  { kind: 'invoice', slot: 'invoice', label: 'Invoice',
     desc: 'fills this PO’s INVOICE slot — reconciles the order on receipt' }
 ];
 /* The toast's destination, keyed by what the SERVER said it did. Anything not
@@ -2658,7 +2689,8 @@ var PO_LINK_WHERE = {
   quote: 'the PO (quote)',
   invoice: 'the PO (invoice)',
   'superseded-quote': 'the PO (quote — replacing the one on file)',
-  'superseded-invoice': 'the PO (invoice — replacing the one on file)'
+  'superseded-invoice': 'the PO (invoice — replacing the one on file)',
+  document: 'the PO (documents list)'
 };
 var PENDING_FIN = null;
 /* `hint` is optional helper text under the field. It has to undo the label's
@@ -2673,65 +2705,65 @@ function finLabelWrap(text, inner, hint) {
       : '') +
     '</label>';
 }
-/* ── THE PO SLOT, CHOSEN IN THE OPEN  (Tom 2026-09-21) ──────────────────────
-   The four doc-type cards are four doors into two rooms on a PO: the server
-   files 'invoice' into the invoice slot and EVERYTHING ELSE into the quote one.
-   Brendon's real sequence was quote on file → "Attach quote" (the only door the
-   PO view offered him) → the vendor INVOICE filed as a quote → linked nowhere.
-   So on a PO link the kind stops being a side effect of which card you click:
-   it is a labelled control, prefilled from the button that opened the modal,
-   naming the slot it fills and saying so when that slot is already full. */
+/* ── THE PO ROLE, CHOSEN IN THE OPEN  (Tom 2026-09-21 · 2026-09-29) ────────
+   On a PO the kind is never a side effect of which card you click: it is a
+   labelled ROLE control — Document / Quote / Invoice — prefilled from the
+   button that opened the modal (Document when the button named none), naming
+   what it fills and saying so when a slot is already full. 9/21's lesson was
+   the vendor INVOICE filed as a quote; 9/29's was a packing list superseding
+   the quote. Both are the same rule: what the PO takes is chosen, not implied. */
+function finPoHintRole(link) {
+  var h = link && link.poKindHint;
+  return h === 'invoice' ? 'invoice' : h === 'quote' ? 'quote' : 'document';
+}
 function finPoSlotRow(link) {
   var po = POS_BY_ID[Number(link.poId)];
-  var want = link.poKindHint === 'invoice' ? 'invoice' : 'po';
+  var want = finPoHintRole(link);
   var opts = FIN_PO_SLOTS.map(function (s) {
-    return '<option value="' + esc(s.kind) + '"' + (s.kind === want ? ' selected' : '') + '>' +
+    return '<option value="' + esc(s.slot) + '"' + (s.slot === want ? ' selected' : '') + '>' +
       esc(s.label + ' — ' + s.desc) + '</option>';
   }).join('');
-  var occupied = po && FIN_PO_SLOTS.filter(function (s) {
-    return s.kind === want && (s.slot === 'invoice' ? po.invoice_file_id : po.quote_file_id);
-  }).length;
+  var occupied = !!po && (want === 'invoice' ? !!po.invoice_file_id : want === 'quote' ? !!po.quote_file_id : false);
   return '<div class="fin-inputs" style="grid-template-columns:1fr">' +
     finLabelWrap('What this PO gets', '<select id="fdPoSlot" class="cell-in">' + opts + '</select>',
       'Prefilled from the button you clicked — change it here and the PO gets what you pick.' +
       (occupied
         ? ' That slot already holds a document: filing this one <b>replaces</b> it, and the old one stays on the show.'
-        : ' A slot that already holds a document is replaced, never silently skipped.')) +
+        : want === 'document'
+          ? ' A document joins the list beside anything already there — the quote and invoice slots are untouched.'
+          : ' A slot that already holds a document is replaced, never silently skipped.')) +
     '</div>';
 }
-/* The commit cards. On a PO link there is exactly ONE — the slot row above IS
+/* The commit cards. On a PO link there is exactly ONE — the role row above IS
    the choice — everywhere else the card you click is still the kind you file. */
 function finCardsHTML() {
   var link = (PENDING_FIN && PENDING_FIN.link) || {};
   if (link.poId) {
     var po = POS_BY_ID[Number(link.poId)];
     return '<button class="tpl-card fin-kind" style="text-align:left" ' +
-      act('commitFinDoc', finPoHintIndex()) + '><div class="ti">' + icon('cart') + '</div><b>File it to ' +
+      act('commitFinDoc', 0) + '><div class="ti">' + icon('cart') + '</div><b>File it to ' +
       esc(po ? po.po_number : 'the PO') + '</b><div class="td">' +
-      esc('into the slot chosen above — the toast reports what the PO actually took') +
+      esc('in the role chosen above — the toast reports what the PO actually took') +
       '</div></button>';
   }
   return FIN_DOC_KINDS.map(function (t, i) {
     return '<button class="tpl-card fin-kind" style="text-align:left" ' + act('commitFinDoc', i) + '><div class="ti">' + icon(t.ic) + '</div><b>' + esc(t.label) + '</b><div class="td">' + esc(t.desc) + '</div></button>';
   }).join('');
 }
-/* The index the PO card carries. Only a FALLBACK — the select is the live
-   answer — but it is the HINTED kind, so a modal whose control cannot be read
-   still commits what the button promised rather than whatever is at index 0. */
-function finPoHintIndex() {
-  var link = (PENDING_FIN && PENDING_FIN.link) || {};
-  var want = link.poKindHint === 'invoice' ? 'invoice' : 'po';
-  for (var i = 0; i < FIN_DOC_KINDS.length; i += 1) if (FIN_DOC_KINDS[i].kind === want) return i;
-  return 0;
-}
-/* The kind the commit will actually send: the visible choice when there is one,
-   the card that was clicked otherwise. One place, so both commit paths agree. */
+/* What the commit will actually send. On a PO: the visible role when there is
+   one, the HINTED role otherwise (never whatever sits at index 0), carried as
+   {kind, label, poRole}. Off a PO: the card that was clicked. One place, so
+   both commit paths agree. */
 function finPickedKind(i) {
-  var sel = document.getElementById('fdPoSlot');
-  if (sel && sel.value) {
-    for (var k = 0; k < FIN_DOC_KINDS.length; k += 1) {
-      if (FIN_DOC_KINDS[k].kind === sel.value) return FIN_DOC_KINDS[k];
+  var link = (PENDING_FIN && PENDING_FIN.link) || {};
+  if (link.poId) {
+    var sel = document.getElementById('fdPoSlot');
+    var role = sel && sel.value ? sel.value : finPoHintRole(link);
+    for (var k = 0; k < FIN_PO_SLOTS.length; k += 1) {
+      var s = FIN_PO_SLOTS[k];
+      if (s.slot === role) return { kind: s.kind, label: s.label, poRole: s.slot };
     }
+    return { kind: 'other', label: 'Document', poRole: 'document' };
   }
   return FIN_DOC_KINDS[Number(i)];
 }
@@ -2770,8 +2802,10 @@ async function openAddFinDoc(showId, link) {
       ctxLine = '<div class="callout" style="margin-bottom:14px"><div class="ci">' + icon('cart') + '</div><div><b>Attaching paperwork to ' + esc(lpo.po_number) + '</b><p>' +
         (link.poKindHint === 'invoice'
           ? 'The <b>invoice</b> evidences the PO’s cost lines and clears the chase-list flag — on a received order it reconciles it. No duplicate expense is created; the PO already owns its costs.'
-          : 'A vendor <b>quote</b> backs the quoted stage; the invoice reconciles it later.') +
-        ' The slot below is what the PO will actually take — change it if the paper says otherwise.</p></div></div>';
+          : link.poKindHint === 'quote'
+            ? 'A vendor <b>quote</b> backs the quoted stage; the invoice reconciles it later.'
+            : 'A <b>document</b> — a drawing, a contract, a packing list, a bank letter — joins the PO’s documents list. The quote and invoice slots are untouched.') +
+        ' The role below is what the PO will actually take — change it if the paper says otherwise.</p></div></div>';
     }
   }
   var catOpts = BUDGET_CAT_ORDER.map(function (c) {
@@ -2905,7 +2939,8 @@ async function commitFinDoc(i) {
     category: cEl ? cEl.value : null,
     expenseId: demoLink.expenseId || null,
     bookingId: demoLink.bookingId || null,
-    poId: demoLink.poId || null
+    poId: demoLink.poId || null,
+    poRole: t.poRole || null
   });
   /* The conf-number field is offered in both modes, so it has to WORK in both —
      a field that silently discards what you type into it is its own small
@@ -2918,7 +2953,11 @@ async function commitFinDoc(i) {
   var fs2 = SHOWS_BY_ID[f.show_id];
   var suffix = await sendNotifies('file', f.id, 'filed a ' + t.label.toLowerCase() + ': ' + (f.vendor || f.name) +
     (f.amount ? ' · ' + fmtMoney(f.amount) : '') + (fs2 ? ' — ' + showLabel(fs2) : ''));
-  toast(t.label + ' filed', (f.vendor || '') + (f.amount ? ' · ' + fmtMoney(f.amount) : '') + ' → Accounting’s feed' + suffix);
+  /* the demo twin answers from its po_link too — same words as the real path */
+  var demoWhere = demoLink.bookingId ? 'the booking'
+    : demoLink.poId ? (PO_LINK_WHERE[f.po_link] || 'Accounting’s feed — the PO linked nothing')
+    : 'Accounting’s feed';
+  toast(t.label + ' filed', (f.vendor || '') + (f.amount ? ' · ' + fmtMoney(f.amount) : '') + ' → ' + demoWhere + suffix);
   await updateFinCount();
   if (CUR.view === 'show') return refreshShowTab(CUR.showId, 'financials');
   return refreshFinanceUI();
@@ -2971,7 +3010,8 @@ async function commitFinDocReal(t) {
       category: cEl ? cEl.value : null,
       expenseId: link.expenseId || null,
       bookingId: link.bookingId || null,
-      poId: link.poId || null
+      poId: link.poId || null,
+      poRole: t.poRole || null
       /* NO size, NO dim. The PUT below owns both. */
     });
   } catch (e) {
@@ -8336,6 +8376,8 @@ var ACTIONS = {
   poApprove:     function (t, id) { return poApprove(id); },
   poAttachInvoice: function (t, id) { return poAttachInvoice(id); },
   poAttachQuote: function (t, id) { return poAttachQuote(id); },
+  poAttachDocument: function (t, id) { return poAttachDocument(id); },
+  poUnlinkDoc:   function (t, id, k) { return poUnlinkDocAct(id, k); },
   openNewPO:     function () { return openNewPO(); },
   commitNewPO:   function () { return commitNewPO(); },
   openAddPOLine: function (t, id) { return openAddPOLine(id); },

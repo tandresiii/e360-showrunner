@@ -321,27 +321,52 @@ function viewPO(po) {
   var jobsPanel = '<div class="panel"><h3>Allocation by job</h3><div class="next-list">' + jobRows + '</div>' +
     '<div class="perm-note">' + inlineIcon('scale') + ' One order can serve many deals — each line bills its own job; the season splits exactly the way the invoices will.</div></div>';
 
-  /* ---- linked docs ---- */
+  /* ---- DOCUMENTS (Tom 2026-09-29) ----
+     "What if I want a PO, a quote, an invoice, a contract, like any number of
+     things?" One panel for all of a PO's paper: the two financial SLOTS first,
+     badged with their roles (reconciliation reads those two), then the
+     evidence the landed costs carry, then the documents LIST (po_documents) —
+     drawings, contracts, packing lists, bank letters, the PO doc itself. Every
+     row opens the viewer; a list row can be UNLINKED, which drops the pointer
+     and leaves the file on its show / folder. Rows read FILES_BY_ID only —
+     never a .project read — so a folder-level file (show_id null) draws too. */
   var docIds = {}, docs = [];
-  [po.quote_file_id, po.invoice_file_id].forEach(function (id) { if (id && FILES_BY_ID[id] && !docIds[id]) { docIds[id] = 1; docs.push(FILES_BY_ID[id]); } });
+  function pushDoc(id, role) {
+    if (!id || docIds[id] || !FILES_BY_ID[id]) return;
+    docIds[id] = 1; docs.push({ f: FILES_BY_ID[id], role: role });
+  }
+  pushDoc(po.quote_file_id, 'quote');
+  pushDoc(po.invoice_file_id, 'invoice');
   lines.forEach(function (l) {
     if (!l.expense_id) return;
     var e = EXPENSES_BY_ID[l.expense_id];
-    if (e && e.file_id && FILES_BY_ID[e.file_id] && !docIds[e.file_id]) { docIds[e.file_id] = 1; docs.push(FILES_BY_ID[e.file_id]); }
+    if (e && e.file_id) pushDoc(e.file_id, 'evidence');
   });
-  var docCards = docs.map(function (f) {
-    var role = f.id === po.invoice_file_id ? 'invoice' : f.id === po.quote_file_id ? 'quote' : 'evidence';
-    /* wrapped in .file-cell like the other doc grids, so a metadata-only row
-       (size 0, no bytes on the NAS) carries its flag and its recovery chip
-       here too — a PO invoice that never landed must not read as landed */
-    return '<div class="file-cell"><button class="file" ' + act('openViewer', f.id) + '>' +
-      '<div class="thumb">' + icon('dollar') + '<span class="ext">' + esc(f.ext) + '</span></div>' +
-      '<div class="fb"><b>' + esc(f.vendor || f.name) + '</b><span>' + esc(role + (f.amount ? ' · ' + fmtMoney(f.amount) : '')) + '</span>' +
-      fileBytelessFlag(f) + '</div></button>' +
-      fileUploadChip(f) + '</div>';
-  }).join('') || '<div class="empty" style="padding:18px">No docs yet — attach the vendor quote, then the invoice.</div>';
-  var docsPanel = '<div class="panel"><h3>Linked docs · ' + docs.length + '</h3>' +
-    '<div class="file-grid" style="grid-template-columns:repeat(auto-fill,minmax(140px,1fr))">' + docCards + '</div>' +
+  (po.document_ids || []).forEach(function (id) { pushDoc(id, 'document'); });
+  var docRows = docs.map(function (d) {
+    var f = d.f;
+    var badge = d.role === 'quote' || d.role === 'invoice'
+      ? '<span class="pill go" style="flex:none"><span class="dot"></span>' + esc(d.role) + '</span>'
+      : '<span class="tag" style="flex:none">' + esc(d.role) + '</span>';
+    var sub = [f.vendor && f.vendor !== f.name ? f.vendor : '', f.amount ? fmtMoney(f.amount) : '',
+               f.kind && f.kind !== 'other' ? f.kind : ''].filter(Boolean).join(' · ');
+    /* the metadata-only flag and recovery chip ride here too — a PO invoice
+       that never landed must not read as landed */
+    return '<div class="next-item po-doc" data-role="' + esc(d.role) + '" style="gap:8px">' +
+      '<button class="btn sm ghost" style="flex:1;min-width:0;justify-content:flex-start;text-align:left" title="Open in the viewer" ' +
+        act('openViewer', f.id) + '>' + icon(d.role === 'document' ? 'file' : 'dollar') +
+        '<span class="txt" style="min-width:0">' + esc(String(f.name || 'file') + (f.ext ? '.' + String(f.ext).replace(/^\./, '') : '')) +
+        (sub ? '<span>' + esc(sub) + '</span>' : '') + fileBytelessFlag(f) + '</span></button>' +
+      badge + fileUploadChip(f) +
+      (d.role === 'document'
+        ? '<button class="iconbtn" title="Unlink from this PO — the file stays on its show / folder" ' +
+          act('poUnlinkDoc', f.id, String(po.id)) + '>' + icon('x') + '</button>'
+        : '') +
+      '</div>';
+  }).join('') || '<div class="empty" style="padding:18px">No documents yet — attach the vendor quote, the invoice, and any other paper (drawings, contracts, packing lists).</div>';
+  var docsPanel = '<div class="panel"><h3>Documents · ' + docs.length + '<span style="flex:1"></span>' +
+    '<button class="btn sm ghost" ' + act('poAttachDocument', po.id) + '>' + icon('plus') + 'Attach</button></h3>' +
+    '<div class="next-list">' + docRows + '</div>' +
     (!po.invoice_file_id && po.status !== 'needed' && po.status !== 'quoted'
       ? '<div class="perm-note">' + inlineIcon('bolt') + ' No vendor invoice on file — this PO sits on Accounting’s <b>waiting on me</b> list until it lands.</div>' : '') + '</div>';
 

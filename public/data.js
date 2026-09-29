@@ -1869,6 +1869,9 @@ function mkPO(o) {
     approval: o.approval || null, provenance: o.provenance || null,
     memo: o.memo || '', tracking: o.tracking || null,
     quote_file_id: o.quote || null, invoice_file_id: o.invoice || null,
+    /* the PO's documents LIST (po_documents) — pointers to file ids, beside
+       the two financial slots above. Unlinking drops the id, never the file. */
+    document_ids: (o.documents || []).slice(),
     activity: [] };
   ALL_POS.push(po); POS_BY_ID[po.id] = po; PO_LINES_BY_PO[po.id] = [];
   return po;
