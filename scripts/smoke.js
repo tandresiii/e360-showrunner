@@ -2815,6 +2815,95 @@ const DEL = (p, o) => call('DELETE', p, o);
      'content' in ((await GET(`/api/shows/${S}/spec-check`, { token: A })).body.nodes || {}));
 
   // ══════════════════════════════════════════════════════════════════════════
+  // 13b2. THE SPEC LIBRARY (Tom, 9/29: "every spec sheet at our fingertips")
+  // ──────────────────────────────────────────────────────────────────────────
+  // GET /api/spec-library is a QUERY over what the bind already banks. State
+  // entering here, on show S's content node: v1–v3 superseded, v4 UNBOUND
+  // (filed, chain_key cleared), v5 current; plus §13's agent-filed spec (no
+  // render, now superseded). The library must list v5 and ONLY v5 by default.
+  // Mutations that must turn this red: drop the status filter (v1–v3 appear),
+  // drop the chain_key clause (unbound v4 appears), drop the render EXISTS
+  // (a filed agent doc appears), drop requireRole('tech') (the viewer gets 200).
+  // ══════════════════════════════════════════════════════════════════════════
+  section('13b2. the spec library — every current bound .e360, one query');
+  const libOut = await GET('/api/spec-library');
+  ok('LIB AUTH: a signed-out caller is refused (401)', libOut.status === 401, libOut.status);
+  const libView = await GET('/api/spec-library', { token: VIEWT });
+  ok('LIB AUTH: a viewer is 403 — the floor is tech', libView.status === 403, libView.status);
+  const libAgent = await GET('/api/spec-library', { key: K });
+  ok('LIB AUTH: an agent key cannot reach it (route topology)', libAgent.status === 403, libAgent.status);
+
+  // a FILED agent doc on the content node — claims the node, was never bound
+  const libAgentDoc = await POST('/api/agent/documents', {
+    showId: S, kind: 'spec', name: TAG + ' LIBGHOST agent spec', ext: '.e360',
+    spec_type: 'e360', chain_key: 'content', artifact: 'document', status: 'filed',
+    provenance: { sourceKind: 'email', sourceRef: TAG + ':libghost', sourceLabel: 'lib ghost',
+                  confidence: 92, matchedBy: ['client_name'] }
+  }, { key: K, idem: TAG + ':libghost#doc' });
+  ok('LIB: (precondition) a filed, never-bound agent spec sits on the content node',
+     libAgentDoc.status === 200 && (await pool.query('SELECT status, chain_key FROM files WHERE id=$1',
+       [libAgentDoc.body.fileId])).rows[0].status === 'filed', libAgentDoc.body);
+
+  const lib = await GET('/api/spec-library', { token: TECHT });
+  ok('LIB: a tech reads the library', lib.status === 200 && Array.isArray(lib.body.specs), lib.status);
+  const libIds = (lib.body.specs || []).map((x) => x.fileId);
+  const libV5 = (lib.body.specs || []).find((x) => x.fileId === rebind2.body.fileId);
+  ok('LIB: the CURRENT bind (v5) is listed', !!libV5, libIds);
+  ok('LIB SHAPE: each row carries file, version, show, folder, uploader and the byte door',
+     !!libV5 && libV5.rev === 5 && libV5.ver === 'v5' && libV5.node === 'content'
+     && libV5.ext === '.e360' && libV5.showId === S && !!libV5.showName && !!libV5.projectName
+     && Number.isInteger(libV5.projectId) && libV5.size > 0 && libV5.uploadedBy === 'admin'
+     && !!libV5.createdAt && libV5.status === 'filed'
+     && libV5.contentUrl === `/api/files/${rebind2.body.fileId}/content`, libV5);
+  ok('LIB EXCLUSION: superseded binds (v1, v2, v3) are NOT listed',
+     !libIds.includes(specFileId) && !libIds.includes(bindEvil.body.fileId)
+     && !libIds.includes(rebind.body.fileId), libIds);
+  ok('LIB EXCLUSION: the UNBOUND v4 is not offered as a sheet of the show',
+     !libIds.includes(curContentFiles[0]), { v4: curContentFiles[0], libIds });
+  ok('LIB EXCLUSION: a filed spec that was never BOUND (no render) is not listed',
+     !libIds.includes(libAgentDoc.body.fileId), libIds);
+  ok('LIB: exactly one row for this show — the library lists CURRENT sheets',
+     (lib.body.specs || []).filter((x) => x.showId === S).length === 1,
+     (lib.body.specs || []).filter((x) => x.showId === S).map((x) => [x.fileId, x.ver]));
+  const libBytes = await call('GET', libV5 ? libV5.contentUrl : '/api/files/0/content',
+    { token: TECHT, wantBytes: true });
+  ok('LIB BYTES: the existing content route serves the sheet, and it parses as a loadable .e360',
+     libBytes.status === 200 && (() => { try { return !!JSON.parse(libBytes.bytes.toString('utf8')).version; }
+       catch { return false; } })(), libBytes.status);
+
+  const libSup = await GET('/api/spec-library?superseded=1', { token: TECHT });
+  const libSupIds = (libSup.body.specs || []).map((x) => x.fileId);
+  ok('LIB ?superseded=1 adds the retired revs back, marked, newest first',
+     libSup.status === 200 && libSupIds.includes(specFileId) && libSupIds.includes(rebind2.body.fileId)
+     && (libSup.body.specs.find((x) => x.fileId === specFileId) || {}).status === 'superseded'
+     && libSupIds.indexOf(rebind2.body.fileId) < libSupIds.indexOf(specFileId), libSupIds);
+  ok('…and still never the unbound v4 or the unbound agent doc',
+     !libSupIds.includes(curContentFiles[0]) && !libSupIds.includes(libAgentDoc.body.fileId), libSupIds);
+
+  const libQName = await GET('/api/spec-library?q=' + encodeURIComponent('V5 (REBOUND)'), { token: TECHT });
+  ok('LIB q: case-insensitive on the spec name',
+     libQName.status === 200 && (libQName.body.specs || []).some((x) => x.fileId === rebind2.body.fileId),
+     (libQName.body.specs || []).map((x) => x.name));
+  const libQShow = await GET('/api/spec-library?q=' + encodeURIComponent(String(libV5 && libV5.showName).toUpperCase()),
+    { token: TECHT });
+  ok('LIB q: …and on the show name',
+     (libQShow.body.specs || []).some((x) => x.fileId === rebind2.body.fileId), libV5 && libV5.showName);
+  const libQFolder = await GET('/api/spec-library?q=' + encodeURIComponent(String(libV5 && libV5.projectName).toLowerCase()),
+    { token: TECHT });
+  ok('LIB q: …and on the folder name',
+     (libQFolder.body.specs || []).some((x) => x.fileId === rebind2.body.fileId), libV5 && libV5.projectName);
+  const libQNone = await GET('/api/spec-library?q=' + encodeURIComponent(TAG + ' no such sheet anywhere'),
+    { token: TECHT });
+  ok('LIB q: a query nothing matches is an honest empty list, not an error',
+     libQNone.status === 200 && libQNone.body.specs.length === 0 && libQNone.body.count === 0, libQNone.body);
+  const libQPct = await GET('/api/spec-library?q=' + encodeURIComponent('%'), { token: TECHT });
+  ok('LIB q: a typed % is a character, not a wildcard',
+     libQPct.status === 200 && (libQPct.body.specs || []).every((x) =>
+       /%/.test(x.name + x.showName + x.projectName)), (libQPct.body.specs || []).length);
+  // leave the node as §13c+ found it: the ghost doc is history, not inventory
+  await pool.query(`UPDATE files SET status='rejected' WHERE id=$1`, [libAgentDoc.body.fileId]);
+
+  // ══════════════════════════════════════════════════════════════════════════
   // 13c. EAGER FOLDERS (Tom, 9/11: "the folder should get created the minute
   //      a show is created")
   // ─────────────────────────────────────────────────────────────────────────

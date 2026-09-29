@@ -95,6 +95,7 @@ across two deals.
 | `views-global.js` | My Tasks · Calendar · Team & Roles · Files library · Templates · Settings · the multimedia viewer. |
 | `router.js` | The hash router's pure core — route strings ↔ `{view, arg, tab}`, the echo guard, the replace/push policy. `#/shows/13/schedule` works from a bookmark, a refresh, and file:// alike; the Back button stays in the app (see SCHEMA.md → Frontend routes). |
 | `bind.js` | The `?bind-spec=1` popup — a first-party page that carries the operator's session so a spec tool never holds a credential. |
+| `speclib.js` | The `?spec-library=1` popup — the Spec Sheet Generator's LOAD FROM SHOWRUNNER door: lists every current bound `.e360` (`GET /api/spec-library`) and posts the picked sheet's text back to the tool, only ever toward a `TOOLS_ORIGINS` origin. |
 | `app.js` | The view router + its URL/history wiring, the **one** delegated `data-act` click listener, every mutation, the login screen, and boot. |
 | `app.css` / `tokens.css` | Dark-first tokens with a light override on `:root[data-theme="light"]`. |
 

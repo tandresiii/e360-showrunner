@@ -5135,6 +5135,13 @@ var api = (function () {
       if (!API()) return fail('Binding a spec needs the live Showrunner server');
       return SR.post('/api/shows/' + Number(showId) + '/spec-bind', payload, { timeout: 120000, noNotify: true });
     },
+    /* THE SPEC LIBRARY (9/29) — every current bound .e360 across all shows,
+       newest first. The ?spec-library=1 picker reads it; the bytes come from
+       downloadFileBytes(), the existing content route. */
+    specLibrary: function (q) {
+      if (!API()) return fail('The spec library needs the live Showrunner server');
+      return SR.get('/api/spec-library' + SR.qs({ q: q || undefined }));
+    },
 
     /* ==================================================================== */
     /* THE SEAM PASS (2026-08-28) — closing the gap DESIGN_GAPS P1 names:    */

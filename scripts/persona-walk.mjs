@@ -6038,6 +6038,86 @@ async function main() {
     demoTab.api.getShow = dGetShow;
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('56 · the spec library — every bound sheet, one popup away  (Tom, 9/29)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "every spec sheet at our fingertips for editing or starting a new one."
+  // The tool's LOAD FROM SHOWRUNNER opens ?spec-library=1; the picker lists
+  // GET /api/spec-library and hands the chosen .e360's text to the opener.
+  // Executed, not scanned: the REAL speclib.js renders over the REAL
+  // components.js, and the REAL api.js seam is asked against this server.
+  {
+    const lib = (() => {
+      const ctx = { console };
+      ctx.window = ctx;
+      vm.createContext(ctx);
+      new vm.Script(SRC['components.js'], { filename: 'public/components.js' }).runInContext(ctx);
+      new vm.Script(SRC['speclib.js'], { filename: 'public/speclib.js' }).runInContext(ctx);
+      return ctx;
+    })();
+    const fx = [
+      { fileId: 901, name: 'Grand Rapids', ext: '.e360', rev: 3, ver: 'v3', createdAt: '2026-09-20T14:00:00Z',
+        showId: 11, showName: 'GR Rise', projectName: 'AVCA 2026' },
+      { fileId: 902, name: 'Omaha <img src=x onerror=alert(1)>', ext: '.e360', rev: 1, ver: 'v1',
+        createdAt: '2026-09-18T10:00:00Z', showId: 12, showName: 'Omaha Finals', projectName: 'NCAA Volleyball' },
+      { fileId: 903, name: 'Austin', ext: '.e360', rev: 2, ver: 'v2', createdAt: '2026-09-01T10:00:00Z',
+        showId: 13, showName: 'Austin', projectName: 'Austin' }
+    ];
+    const all = lib.specLibRowsHTML(fx, '');
+    ok('PICKER RENDER · every bound sheet is a row that picks it by file id',
+       (all.match(/data-act="specLibPick"/g) || []).length === 3
+       && /data-id="901"/.test(all) && /data-id="902"/.test(all) && /data-id="903"/.test(all), all.slice(0, 300));
+    ok('…each row says folder · show, the sheet name, vN and the date',
+       /Grand Rapids\.e360/.test(all) && /AVCA 2026 · GR Rise/.test(all) && /v3 · 2026-09-20/.test(all));
+    ok('…a folder and show that share a name are said once',
+       /br-s">Austin</.test(all) && !/Austin · Austin/.test(all));
+    ok('…and a hostile spec name is ESCAPED, never markup',
+       !/<img src=x/.test(all) && /&lt;img src=x onerror=alert\(1\)&gt;/.test(all));
+    const byShow = lib.specLibRowsHTML(fx, 'omaha FINALS');
+    ok('PICKER FILTER · case-insensitive on the show name — one row left',
+       (byShow.match(/data-act="specLibPick"/g) || []).length === 1 && /data-id="902"/.test(byShow));
+    const byFolder = lib.specLibRowsHTML(fx, 'avca');
+    ok('…on the folder name', (byFolder.match(/data-act="specLibPick"/g) || []).length === 1
+       && /data-id="901"/.test(byFolder));
+    const byName = lib.specLibRowsHTML(fx, 'GRAND rap');
+    ok('…and on the sheet name', (byName.match(/data-act="specLibPick"/g) || []).length === 1
+       && /data-id="901"/.test(byName));
+    const none = lib.specLibRowsHTML(fx, '<b>zzz');
+    ok('…a query nothing matches says so, escaped, with no rows',
+       !/specLibPick/.test(none) && /No bound spec matches/.test(none) && /&lt;b&gt;zzz/.test(none));
+    const empty = lib.specLibRowsHTML([], '');
+    ok('PICKER EMPTY · an empty library is the honest sentence, not a blank',
+       /No bound specs yet/.test(empty) && !/specLibPick/.test(empty));
+    ok('PICKER POSTS · never to "*" — only the served allowlist and its own origin',
+       (() => { lib.SPECLIB.origins = ['https://tools.example', '*', 'https://tools.example'];
+                lib.location = { origin: 'https://sr.example' };
+                const t = lib.specLibTargets();
+                return t.length === 2 && t[0] === 'https://tools.example' && t[1] === 'https://sr.example'; })());
+    ok('PICKER · its own shell: boots before the router, after the bind popup, never sends a bind-* message',
+       APP_JS.indexOf('return specLibBoot()') > APP_JS.indexOf('return bindSpecBoot()')
+       && APP_JS.indexOf('return specLibBoot()') < APP_JS.indexOf('routerStart();')
+       && !/routerStart/.test(SRC['speclib.js'])
+       && !/type: *'bind-/.test(SRC['speclib.js'])
+       && !/addEventListener\('message'/.test(SRC['speclib.js']));
+    const idx = fs.readFileSync(path.join(PUB, 'index.html'), 'utf8');
+    ok('…and index.html loads it between bind.js and app.js',
+       idx.indexOf('src="speclib.js"') > idx.indexOf('src="bind.js"')
+       && idx.indexOf('src="speclib.js"') < idx.indexOf('src="app.js"'));
+
+    // THE SEAM, executed against this walk's server
+    tab.SR.setToken(T.omar);
+    const seam = await tab.api.specLibrary();
+    const cur = await GET(`/api/shows/${SHOW}/spec-render/content`, { token: T.omar });
+    ok('THE SEAM · api.specLibrary() answers the list, and this show\'s CURRENT bind is on it',
+       !!seam && Array.isArray(seam.specs) && cur.status === 200
+       && seam.specs.some((x) => x.fileId === cur.body.fileId && x.showId === SHOW),
+       seam && seam.specs && seam.specs.map((x) => [x.fileId, x.showId]));
+    ok('…and no superseded row rides along',
+       seam.specs.every((x) => x.status === 'filed'), seam.specs.map((x) => x.status));
+    const seamQ = await tab.api.specLibrary('zz-no-such-sheet-zz');
+    ok('…the q filter reaches the server through the seam', seamQ.specs.length === 0, seamQ.count);
+  }
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

@@ -9261,6 +9261,8 @@ async function boot() {
   /* the ?bind-spec=1 popup is its own shell — no rail, no router
      (INTEGRATIONS_SPEC §9.3.3 / D5) */
   if (typeof bindSpecRequested === 'function' && bindSpecRequested()) return bindSpecBoot();
+  /* the ?spec-library=1 picker (9/29) — the same kind of own-shell popup */
+  if (typeof specLibRequested === 'function' && specLibRequested()) return specLibBoot();
 
   /* the hash router wakes only for the REAL shell — after the bind popup has
      had its exit, so that window's URL is never touched (Tom, 2026-09-16) */

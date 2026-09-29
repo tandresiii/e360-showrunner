@@ -1059,6 +1059,77 @@ router.get('/shows/:id/spec-render/:node', asyncH(async (req, res) => {
 }));
 
 // ════════════════════════════════════════════════════════════════════════════
+// THE SPEC LIBRARY (Tom, 2026-09-29: "every spec sheet at our fingertips for
+// editing or starting a new one")
+// ────────────────────────────────────────────────────────────────────────────
+// GET /api/spec-library[?q=…][&superseded=1]
+//
+// A QUERY over data the bind already banks — no new storage. Every
+// spec-bind writes the .e360 bytes to the show's NAS folder (step 5 above)
+// and a spec_renders row naming that file, so "the library" is simply every
+// files row that:
+//   · is a .e360 spec          kind='spec' AND spec_type='e360'
+//   · came from a real BIND    a spec_renders row names it — this is what
+//                              separates a bound sheet from an agent-filed
+//                              document that merely claims chain_key 'content'
+//                              (§D6: those carry no render and often no bytes)
+//   · is still on the chain    chain_key='content' — an UNBIND clears it, and
+//                              a sheet somebody detached is not offered as one
+//                              of the show's sheets
+//   · is CURRENT               status='filed'. A rebind supersedes the old row;
+//                              ?superseded=1 adds those back for the curious.
+// Bytes come from the EXISTING GET /api/files/:id/content — no second door.
+// tech+: the operators who run the spec tool are exactly who reuses a layout,
+// and every row here is already readable to them one show at a time.
+router.get('/spec-library', requireRole('tech'), asyncH(async (req, res) => {
+  const withSuperseded = String(pick(req.query, 'superseded') || '') === '1';
+  const statuses = withSuperseded ? ['filed', 'superseded'] : ['filed'];
+  const q = String(pick(req.query, 'q') || '').trim().toLowerCase().slice(0, 200);
+  const params = [statuses];
+  let qClause = '';
+  if (q) {
+    // strpos, not ILIKE: a '%' or '_' an operator types is a character, not a wildcard
+    params.push(q);
+    qClause = `AND (strpos(lower(f.name), $2) > 0 OR strpos(lower(COALESCE(s.name,'')), $2) > 0
+                    OR strpos(lower(COALESCE(p.name,'')), $2) > 0)`;
+  }
+  const r = await pool.query(
+    `SELECT f.id, f.name, f.ext, f.ver, f.size, f.uploaded_by, f.created_at, f.status,
+            f.chain_key, f.show_id, s.name AS show_name, s.event_date, s.project_id,
+            p.name AS project_name, p.client AS project_client,
+            (SELECT MAX(sr.rev) FROM spec_renders sr WHERE sr.file_id = f.id) AS rev
+       FROM files f
+       JOIN shows s ON s.id = f.show_id
+       LEFT JOIN projects p ON p.id = s.project_id
+      WHERE f.kind = 'spec' AND f.spec_type = 'e360' AND f.chain_key = 'content'
+        AND f.status = ANY($1::text[])
+        AND EXISTS (SELECT 1 FROM spec_renders sr WHERE sr.file_id = f.id)
+        ${qClause}
+      ORDER BY f.created_at DESC, f.id DESC
+      LIMIT 500`, params);
+  const specs = r.rows.map((row) => ({
+    fileId: row.id,
+    name: row.name,
+    ext: row.ext || '.e360',
+    ver: row.ver || '',
+    rev: row.rev == null ? null : Number(row.rev),
+    node: row.chain_key,
+    size: row.size == null ? 0 : Number(row.size),
+    uploadedBy: row.uploaded_by || '',
+    createdAt: row.created_at,
+    status: row.status,
+    showId: row.show_id,
+    showName: row.show_name || '',
+    eventDate: row.event_date || '',
+    projectId: row.project_id,
+    projectName: row.project_name || '',
+    client: row.project_client || '',
+    contentUrl: `/api/files/${row.id}/content`
+  }));
+  res.json({ specs, count: specs.length, q, superseded: withSuperseded });
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
 // SPEC LIFECYCLE (Tom, 2026-08-28: "can i update these when changes are made?")
 // ────────────────────────────────────────────────────────────────────────────
 // Supersede-on-rebind always existed (D1); these three are the manual half —
