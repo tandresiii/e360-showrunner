@@ -2565,6 +2565,11 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('D1: ...the superseded row is still there, marked',
      supRow.rows[0] && supRow.rows[0].status === 'superseded', supRow.rows[0]);
   ok('D1: the rebind bumped content to rev 2', bindEvil.body.rev === 2, bindEvil.body.rev);
+  // 9/29: the banked FILE row wears the same counter — File Details said v1
+  // while the chain chip said rev 3; the ver default was posing as a version.
+  ok('D1: ...and the banked file row wears the SAME counter (ver v2, not the v1 birth default)',
+     (await pool.query('SELECT ver FROM files WHERE id=$1', [bindEvil.body.fileId])).rows[0].ver === 'v2',
+     (await pool.query('SELECT ver FROM files WHERE id=$1', [bindEvil.body.fileId])).rows[0]);
 
   // the stale-flag cascade
   const bindNsf = await POST(`/api/shows/${S}/spec-bind`, {

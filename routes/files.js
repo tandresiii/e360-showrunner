@@ -957,6 +957,12 @@ router.post('/shows/:id/spec-bind', requireRole('pm'), asyncH(async (req, res) =
     const up = CHAIN_UP[node];
     const rev = (chainBefore[node].rev || 0) + 1;
     const derived = up ? chainBefore[up].rev : 0;
+    // The banked file's ver is the SAME counter as the chain rev — one story
+    // on every surface. Left at the 'v1' insert default, File Details and the
+    // record card said v1 while the chain chip said rev 3 (Tom, 9/29): a
+    // birth default posing as a version.
+    await c.query(`UPDATE files SET ver=$1 WHERE id=$2`, ['v' + rev, file.id]);
+    file.ver = 'v' + rev;
     // A fresh bind ANSWERS the outdated flag: "the design changed, nothing new
     // is bound yet" stops being true the moment something new binds. Cleared
     // here rather than by a second route call, so the flag can never linger
