@@ -6216,6 +6216,348 @@ async function main() {
     ok('…the q filter reaches the server through the seam', seamQ.specs.length === 0, seamQ.count);
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  section('57 · MARKETS — the umbrella between a season and its shows  (Tom, 2026-09-30)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "Grand Rapids lives in the MLV project folder. but has a system install and
+  // scrimmage show - which arent as connected under a grand rapids umbrella as
+  // i would like." shows.market groups a folder's shows; the season dashboard
+  // groups by it; a market HUB assembles one market's shows, meetings, tasks,
+  // files and job; a meeting anchored to a market lands on every one of its
+  // shows' tabs. Executed in BOTH modes over the real views.
+  //
+  // MUTATION GATES, each named on its assertion:
+  //   · a market-less folder must render BYTE-IDENTICALLY to the 154586f
+  //     viewSeason (scripts/fixtures/viewSeason-pre-market.js) — any change to
+  //     the flat path goes red
+  //   · meetingOnShow() without its market clause → the scrimmage-tab lines go red
+  //   · meetingsForMarket() without its market filter on pins → the hub
+  //     "nothing of Austin's" lines go red
+  //   · showJobsPanel() without its de-dupe → the "one common job = one card" line
+  //   · routeParse() without the markets branch → the deep-link lines
+  {
+    reach('Open a market hub (season header · show header · meeting chip)',
+      { seam: ['getProject', 'listShows', 'listMeetings'], action: ['openMarket'] });
+    reach('Set a show\'s market on Add show / Edit event',
+      { seam: ['createShow', 'updateShow'], action: ['addShow', 'nsCommit', 'editShow', 'esCommit'] });
+    reach('File a meeting on a market', { seam: ['addMeeting'], action: ['addMeeting', 'mtgCommit'] });
+
+    // the pre-market oracle, beside the live renderer in the same demo tab
+    new vm.Script(fs.readFileSync(path.join(APP, 'scripts', 'fixtures', 'viewSeason-pre-market.js'), 'utf8'),
+      { filename: 'scripts/fixtures/viewSeason-pre-market.js' }).runInContext(demoTab);
+    ok('the regression oracle loads — viewSeason exactly as it shipped at 154586f',
+       typeof demoTab.viewSeason__preMarket === 'function');
+
+    // ── THE REGRESSION GATE: no markets → the same bytes as before ─────────
+    const mkLovb = await demoTab.api.getProject(3);
+    ok('DEMO · the LOVB season carries NO markets (the fixture the regression runs on)',
+       demoTab.marketsOf(mkLovb).length === 0 && mkLovb.shows.length > 1);
+    const mkNow = demoTab.viewSeason(mkLovb);
+    const mkWas = demoTab.viewSeason__preMarket(mkLovb);
+    ok('REGRESSION · a folder with NO markets renders BYTE-IDENTICALLY to the pre-market dashboard ' +
+       '(change one byte of the flat path — row, header, pill, jobs panel — and this goes red)',
+       mkNow === mkWas,
+       (() => { let i = 0; while (i < mkNow.length && mkNow[i] === mkWas[i]) i++;
+                return { at: i, now: mkNow.slice(i - 40, i + 60), was: mkWas.slice(i - 40, i + 60) }; })());
+    ok('…and it carries no market vocabulary at all — no header row, no market door',
+       !/mkt-row|openMarket|in-mkt/.test(mkNow));
+
+    // ── the planted folder: two markets + a loose show ─────────────────────
+    const mkEv = await demoTab.api.createEvent({ name: 'WALK57 MLV season', type: 'led', venue: 'Van Andel',
+      event_date: plus(40) });
+    const MKP = mkEv.show.project_id;
+    const mkGR1 = await demoTab.api.updateShow(mkEv.show.id, { name: 'WALK57 GR system install', market: '  Grand   Rapids ' });
+    ok('DEMO TWIN · a market set on edit is trimmed + collapsed, the server\'s rule',
+       mkGR1.market === 'Grand Rapids', mkGR1.market);
+    const mkGR2 = await demoTab.api.createShow(MKP, { name: 'WALK57 GR scrimmage', event_date: plus(47),
+      market: 'grand rapids', seed_template: false });
+    const mkAUS = await demoTab.api.createShow(MKP, { name: 'WALK57 Austin match', event_date: plus(43),
+      market: 'Austin', seed_template: false });
+    const mkLoose = await demoTab.api.createShow(MKP, { name: 'WALK57 loose show', event_date: plus(44),
+      seed_template: false });
+    const mkLong = await demoTab.api.createShow(MKP, { name: 'x', market: 'Z'.repeat(81) })
+      .then(() => null, (e) => String(e.message));
+    ok('DEMO TWIN · an 81-character market is refused in the SERVER\'S words',
+       !!mkLong && /80 characters or fewer/.test(mkLong), mkLong);
+
+    const mkP = await demoTab.api.getProject(MKP);
+    const mkGroups = demoTab.marketsOf(mkP);
+    ok('marketsOf · two markets, in the order the season meets them, case-folded into ONE Grand Rapids',
+       mkGroups.length === 2 && mkGroups[0].name === 'Grand Rapids' && mkGroups[0].shows.length === 2 &&
+       mkGroups[1].name === 'Austin' && mkGroups[1].shows.length === 1,
+       mkGroups.map((g) => [g.name, g.shows.map((s) => s.id)]));
+
+    // ── the grouped season dashboard ───────────────────────────────────────
+    const mkHtml = demoTab.viewSeason(mkP);
+    const at = (needle) => mkHtml.indexOf(needle);
+    const rowOf = (id) => at('data-act="openShow" data-id="' + id + '"');
+    const hdrGR = at('data-act="openMarket" data-id="' + mkGR1.id + '"');
+    const hdrAUS = at('data-act="openMarket" data-id="' + mkAUS.id + '"');
+    const loosePos = at('mkt-row loose');
+    ok('SEASON · each market gets ONE header row, and it is the door to the hub (addressed by its first show)',
+       (mkHtml.match(/class="rowlink mkt-row"/g) || []).length === 2 && hdrGR > 0 && hdrAUS > 0);
+    ok('SEASON · …Grand Rapids\' header, then BOTH its shows; Austin\'s header, then its show; then the ' +
+       'market-less show after the grouped ones',
+       hdrGR < rowOf(mkGR1.id) && rowOf(mkGR1.id) < rowOf(mkGR2.id) && rowOf(mkGR2.id) < hdrAUS &&
+       hdrAUS < rowOf(mkAUS.id) && rowOf(mkAUS.id) < loosePos && loosePos < rowOf(mkLoose.id),
+       { hdrGR, gr1: rowOf(mkGR1.id), gr2: rowOf(mkGR2.id), hdrAUS, aus: rowOf(mkAUS.id), loosePos, loose: rowOf(mkLoose.id) });
+    ok('SEASON · the header carries the name, the show count and a rolled-up RAG pill',
+       /<b>Grand Rapids<\/b><span class="mini">Market · 2 shows<\/span><span class="pill /.test(mkHtml));
+    ok('SEASON · the grouped shows are indented under their market; the loose one is not',
+       (mkHtml.match(/rowlink in-mkt"/g) || []).length === 3);
+
+    // ── meetings: one market call, two show tabs, not the third ────────────
+    const mtGR = await demoTab.api.addMeeting(MKP, { title: 'WALK57 GR Season Beginning', held_at: plus(-1),
+      market: 'GRAND RAPIDS', summary_md: 'The market call.' });
+    ok('DEMO TWIN · a market call stores the SHOWS\' spelling and no show',
+       mtGR.market === 'Grand Rapids' && mtGR.show_id === null, [mtGR.market, mtGR.show_id]);
+    const mtPinGR1 = await demoTab.api.addMeeting(MKP, { title: 'WALK57 install advance', show_id: mkGR1.id });
+    const mtPinAUS = await demoTab.api.addMeeting(MKP, { title: 'WALK57 Austin advance', show_id: mkAUS.id });
+    const mtBoth = await demoTab.api.addMeeting(MKP, { title: 'x', show_id: mkAUS.id, market: 'Austin' })
+      .then(() => null, (e) => String(e.message));
+    ok('DEMO TWIN · a show AND a market at once is refused, in the server\'s words',
+       !!mtBoth && /ONE show or ONE market/.test(mtBoth), mtBoth);
+    const tGR1 = demoTab.tabMeetings(await demoTab.api.getShow(mkGR1.id));
+    const tGR2 = demoTab.tabMeetings(await demoTab.api.getShow(mkGR2.id));
+    const tAUS = demoTab.tabMeetings(await demoTab.api.getShow(mkAUS.id));
+    const has = (h, m) => h.indexOf('data-act="openMeeting" data-id="' + m.id + '"') >= 0;
+    ok('SHOW TAB (client) · the Grand Rapids market call is on the INSTALL\'s tab, beside its own pin',
+       has(tGR1, mtGR) && has(tGR1, mtPinGR1));
+    ok('SHOW TAB (client) · …AND on the SCRIMMAGE\'s tab — nobody pins it twice any more (drop the market ' +
+       'clause from meetingOnShow and this goes red)',
+       has(tGR2, mtGR) && !has(tGR2, mtPinGR1) && />Meetings · 1</.test(tGR2));
+    ok('SHOW TAB (client) · …and NOT on Austin\'s — another market\'s show never sees it',
+       !has(tAUS, mtGR) && has(tAUS, mtPinAUS));
+    ok('SHOW TAB · the market call wears its market chip there, and the chip opens the hub',
+       /mtg-chip mkt/.test(tGR2) && tGR2.indexOf('data-act="openMarket" data-id="' + mkGR1.id + '"') >= 0);
+    ok('SHOW TAB · the badge counts the market call too',
+       demoTab.meetingCountForShow(mkGR2.id) === 1 && demoTab.meetingCountForShow(mkGR1.id) === 2);
+    ok('DEMO SEAM · api.listMeetings(p, {show_id}) answers exactly what the tab draws',
+       JSON.stringify((await demoTab.api.listMeetings(MKP, { show_id: mkGR2.id })).map((m) => m.id)) ===
+       JSON.stringify([mtGR.id]));
+    const rollHtml = demoTab.viewSeason(await demoTab.api.getProject(MKP));
+    ok('ROLL-UP · the season\'s own list keeps every call, the market call wearing its chip',
+       rollHtml.indexOf('data-act="openMeeting" data-id="' + mtGR.id + '"') >= 0 && /mtg-chip mkt/.test(rollHtml));
+    const tLooseNo = demoTab.tabMeetings(await demoTab.api.getShow(mkLoose.id));
+    ok('SHOW TAB · a show with no market reads exactly the old copy — no market sentence, no market door',
+       /No meetings pinned to this show<\/div>/.test(tLooseNo) && !/openMarket/.test(tLooseNo));
+
+    // ── tasks + files on the planted shows ─────────────────────────────────
+    await demoTab.api.createStep({ show_id: mkGR2.id, lane: 'logistics', title: 'WALK57 GR scrimmage freight', due_date: plus(20) });
+    await demoTab.api.createStep({ show_id: mkAUS.id, lane: 'logistics', title: 'WALK57 AUSTIN ONLY task', due_date: plus(21) });
+    await demoTab.api.addFile(mkGR1.id, { name: 'WALK57 GR rigging plot', ext: 'pdf', kind: 'other', size: 1000 });
+    await demoTab.api.addFile(mkAUS.id, { name: 'WALK57 AUSTIN ONLY doc', ext: 'pdf', kind: 'other', size: 1000 });
+
+    // ── THE HUB ────────────────────────────────────────────────────────────
+    const hubP = await demoTab.api.getProject(MKP);
+    const hubHtml = demoTab.viewMarket(hubP, demoTab.marketOf(hubP, 'grand RAPIDS'), await demoTab.api.listShows(MKP));
+    ok('HUB · both Grand Rapids shows, as the season\'s own rows',
+       hubHtml.indexOf('data-act="openShow" data-id="' + mkGR1.id + '"') >= 0 &&
+       hubHtml.indexOf('data-act="openShow" data-id="' + mkGR2.id + '"') >= 0 && /rowlink/.test(hubHtml));
+    ok('HUB · its meetings: the market call AND the install\'s pin',
+       has(hubHtml, mtGR) && has(hubHtml, mtPinGR1));
+    ok('HUB · NOTHING OF AUSTIN\'S LEAKS — no Austin show, no Austin pin, no Austin task, no Austin file ' +
+       '(drop the market filter on pinned calls in meetingsForMarket and this goes red)',
+       hubHtml.indexOf('data-act="openShow" data-id="' + mkAUS.id + '"') < 0 && !has(hubHtml, mtPinAUS) &&
+       !/AUSTIN ONLY/.test(hubHtml) && !/Austin match/.test(hubHtml));
+    ok('HUB · open tasks across its shows, and its files grouped by show',
+       /WALK57 GR scrimmage freight/.test(hubHtml) && /WALK57 GR rigging plot/.test(hubHtml) &&
+       /class="mkt-files"/.test(hubHtml));
+    ok('HUB · on the hub the market chip is dropped — it would name the page you are on — but the pinned ' +
+       'call still wears its show',
+       !/mtg-chip mkt/.test(hubHtml) && /data-act="showMeetings" data-id="/.test(hubHtml));
+    ok('HUB · its Add meeting carries the hub as its origin, so the dialog comes back here',
+       hubHtml.indexOf('data-act="addMeeting" data-id="' + MKP + '" data-k="mkt:' + mkGR1.id + '"') >= 0);
+
+    // ── the job strip ──────────────────────────────────────────────────────
+    const jobCards = (h) => (h.match(/data-act="openJob"/g) || []).length;
+    ok('JOBS · both Grand Rapids shows bill to the folder\'s one job → ONE card, counting both shows ' +
+       '(drop the de-dupe in showJobsPanel and this goes red)',
+       jobCards(hubHtml) === 1 && /2 shows<\/span><\/div>/.test(hubHtml) && !/different jobs/.test(hubHtml),
+       jobCards(hubHtml));
+    const mkJ2 = await demoTab.api.createJob(MKP, { client: 'Grand Rapids Rise', deal_type: 'sale', contract_value: 1 });
+    await demoTab.api.updateShow(mkGR2.id, { default_job_id: mkJ2.id });
+    const hubP2 = await demoTab.api.getProject(MKP);
+    const hub2 = demoTab.viewMarket(hubP2, demoTab.marketOf(hubP2, 'Grand Rapids'), await demoTab.api.listShows(MKP));
+    ok('JOBS · shows that bill to DIFFERENT jobs → each job listed, honestly, and said so',
+       jobCards(hub2) === 2 && hub2.indexOf('data-act="openJob" data-id="' + mkJ2.id + '"') >= 0 &&
+       /different jobs/.test(hub2), jobCards(hub2));
+    ok('JOBS · a job card opens the job page (#/jobs/:id) — the season\'s own jobPanelRow, reused',
+       /function jobPanelRow\(j, shows\)/.test(SRC['views-dashboard.js']) &&
+       /openJob:\s+function \(t, id\) \{ return render\('job', id\); \}/.test(APP_JS));
+
+    // ── the vocabulary is ONE line ─────────────────────────────────────────
+    const lblWas = demoTab.MARKET_LABEL;
+    demoTab.MARKET_LABEL = 'Region';
+    const renamed = demoTab.viewSeason(await demoTab.api.getProject(MKP));
+    demoTab.MARKET_LABEL = lblWas;
+    ok('VOCABULARY · the label is one shared constant — rename it and the season header follows',
+       /Region · 2 shows/.test(renamed) && !/Market · 2 shows/.test(renamed) &&
+       (ALL_VIEWS.match(/var MARKET_LABEL = 'Market';/g) || []).length === 1);
+
+    // ── the dialogs ────────────────────────────────────────────────────────
+    ok('ADD SHOW / EDIT EVENT · a Market input over a datalist of the folder\'s markets, and both commits send it',
+       /marketFieldHTML\('nsMarket', p, nsMk\)/.test(APP_JS) && /market: _v\('nsMarket'\) \|\| null/.test(APP_JS) &&
+       /marketFieldHTML\('esMarket', esFolder, show\.market\)/.test(APP_JS) &&
+       /esPatch\.market = _v\('esMarket'\) \|\| null/.test(APP_JS) &&
+       /<datalist id="/.test(APP_JS));
+    const mkField = (() => {
+      const src = APP_JS.slice(APP_JS.indexOf('function marketFieldHTML('), APP_JS.indexOf('\n}', APP_JS.indexOf('function marketFieldHTML(')) + 2);
+      const c = { esc: demoTab.esc, marketsOf: demoTab.marketsOf, MARKET_LABEL: 'Market', MARKET_MAX: 80,
+                  finLabelWrap: (t, i) => t + i };
+      vm.createContext(c);
+      new vm.Script(src + '; this.out = marketFieldHTML("nsMarket", P, "");').runInContext(Object.assign(c, { P: mkP }));
+      return c.out || '';
+    })();
+    ok('ADD SHOW · the datalist offers every existing market of the folder, pick-or-type',
+       /<option value="Grand Rapids">/.test(mkField) && /<option value="Austin">/.test(mkField) &&
+       /list="nsMarketList"/.test(mkField) && /maxlength="80"/.test(mkField), mkField.slice(0, 200));
+    ok('ADD MEETING · a folder with markets offers each market as an anchor, and the commit sends ' +
+       'market with show_id null',
+       /'— the whole season —<\/option>' \+\s*mkGroups\.map/.test(APP_JS) &&
+       /if \(anc\.indexOf\('mkt:'\) === 0\) \{ body\.show_id = null; body\.market = anc\.slice\(4\); \}/.test(APP_JS));
+
+    // ── the single-show folder never sees the concept ──────────────────────
+    const mkOne = await demoTab.api.createEvent({ name: 'WALK57 one-off', type: 'led', venue: 'x', event_date: plus(50) });
+    const mkOneShow = demoTab.viewShow(await demoTab.api.getShow(mkOne.show.id));
+    ok('ONE-OFF · a single-show folder\'s page carries no market vocabulary — and the collapse is untouched',
+       !/openMarket|mkt-/.test(mkOneShow) && /f\.single\) return render\('show', f\.show\.id\)/.test(APP_JS));
+
+    // ── ROUTER: the deep link ──────────────────────────────────────────────
+    const RT = (() => { const c = {}; vm.createContext(c);
+      new vm.Script(SRC['router.js'], { filename: 'public/router.js' }).runInContext(c); return c; })();
+    const odd = 'São Paulo & Co / #2';
+    const h1 = RT.routeFor('market', 7, 'Grand Rapids');
+    const h2 = RT.routeFor('market', 7, odd);
+    ok('ROUTER · a hub has a route — #/folders/:id/markets/:name, encoded',
+       h1 === '#/folders/7/markets/Grand%20Rapids' && /^#\/folders\/7\/markets\/[^/]+$/.test(h2), [h1, h2]);
+    ok('ROUTER · …and it parses straight back to the same folder + market (a reload lands on the same ' +
+       'umbrella — drop the markets branch from routeParse and this goes red)',
+       JSON.stringify(RT.routeParse(h1)) === JSON.stringify({ view: 'market', arg: 7, tab: 'Grand Rapids' }) &&
+       RT.routeParse(h2)?.tab === odd && RT.routeParse(h2)?.arg === 7, [RT.routeParse(h1), RT.routeParse(h2)]);
+    ok('ROUTER · a malformed or empty market is UNKNOWN (the honest fallback), never a crash',
+       RT.routeParse('#/folders/7/markets/%E0%A4%A') === null && RT.routeParse('#/folders/7/markets/%20') === null &&
+       RT.routeFor('market', 7, '  ') === null && RT.routeParse('#/folders/7/bogus/x') === null);
+    {
+      let hash = ''; const writes = [], navs = [];
+      const core = RT.makeRouterCore({ read: () => hash, write: (h, r) => { writes.push([h, !!r]); hash = h; },
+        navigate: (route) => navs.push(route) });
+      core.routeBegin(''); core.sync('folder', 7);
+      writes.length = 0;
+      core.sync('market', 7, 'Grand Rapids');
+      const echo = core.onHashChange(h1);
+      core.sync('market', 7, 'Austin');
+      ok('ROUTER · opening a hub is a real move (PUSH), its echo routes nothing, and a second market is a ' +
+         'second screen — Back walks between them',
+         writes.length === 2 && writes[0][0] === h1 && writes[0][1] === false && echo === false &&
+         writes[1][0] === '#/folders/7/markets/Austin' && writes[1][1] === false && navs.length === 0, writes);
+    }
+    ok('ROUTER · the browser half: routeGo lands a market route through the same render a click uses, the ' +
+       'name riding CUR.market, and routeDidRender writes it back',
+       /else if \(route\.view === 'market'\) \{\s*\n\s*CUR\.market = route\.tab;[^\n]*\n\s*await render\('market', route\.arg\);/.test(APP_JS) &&
+       /view === 'market' \? CUR\.market : null/.test(APP_JS) &&
+       /view === 'folder' \|\| view === 'market' \? CUR\.projectId/.test(APP_JS));
+
+    // ── API MODE: the same questions, of the real server ───────────────────
+    const mkTab = (() => {
+      const store = new Map();
+      const ctx = {
+        fetch: (p, opts) => fetch(new URL(p, BASE), opts),
+        localStorage: { getItem: (k) => (store.has(k) ? store.get(k) : null),
+          setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
+        location: { protocol: 'http:' }, setTimeout, clearTimeout, AbortController, console,
+        document: { addEventListener: () => {}, querySelector: () => null, querySelectorAll: () => [],
+                    getElementById: () => null },
+        navigator: { userAgent: 'walk' }
+      };
+      ctx.window = ctx;
+      vm.createContext(ctx);
+      for (const f of ['data.js', 'api.js', 'components.js', 'views-notes.js', 'views-contacts.js',
+                       'views-finance.js', 'views-purchasing.js', 'views-folder.js',
+                       'views-dashboard.js', 'views-global.js']) {
+        new vm.Script(SRC[f], { filename: 'public/' + f }).runInContext(ctx);
+      }
+      new vm.Script(fs.readFileSync(path.join(APP, 'scripts', 'fixtures', 'viewSeason-pre-market.js'), 'utf8'))
+        .runInContext(ctx);
+      return ctx;
+    })();
+    ok('API MODE · the views load headless against this walk\'s server', (await mkTab.SR.probe()) === 'api');
+    mkTab.SR.resetStore();                 // boot()'s own step in API mode — no demo row may fuse with a real one
+    mkTab.SR.setToken(T.brenden);
+    const apF = await POST('/api/projects', { name: 'WALK57 API season', client: 'MLV', type: 'led', owner: 'brenden' },
+      { token: T.tom });
+    const AP = apF.body.id;
+    const apS = async (name, d, market) => (await POST('/api/shows', { project_id: AP, name, venue: 'v',
+      event_date: plus(d), market, seed_template: false }, { token: T.brenden })).body;
+    const aGR1 = await apS('WALK57 API GR install', 30, 'Grand Rapids');
+    const aGR2 = await apS('WALK57 API GR scrimmage', 37, ' grand  rapids ');
+    const aAUS = await apS('WALK57 API Austin', 33, 'Austin');
+    const aLoose = await apS('WALK57 API loose', 34, undefined);
+    const apM = async (b) => (await POST(`/api/projects/${AP}/meetings`, b, { token: T.brenden })).body;
+    const aMk = await apM({ title: 'WALK57 API GR market call', market: 'Grand Rapids' });
+    const aPin1 = await apM({ title: 'WALK57 API GR1 pin', show_id: aGR1.id });
+    const aPinA = await apM({ title: 'WALK57 API Austin pin', show_id: aAUS.id });
+    await POST('/api/steps', { show_id: aAUS.id, lane: 'logistics', title: 'WALK57 API AUSTIN ONLY task',
+      due_date: plus(12) }, { token: T.brenden });
+    await POST('/api/steps', { show_id: aGR2.id, lane: 'logistics', title: 'WALK57 API GR freight',
+      due_date: plus(11) }, { token: T.brenden });
+    await POST('/api/files', { show_id: aGR1.id, name: 'WALK57 API GR plot', ext: 'pdf', kind: 'other' }, { token: T.brenden });
+    await POST('/api/files', { show_id: aAUS.id, name: 'WALK57 API AUSTIN ONLY doc', ext: 'pdf', kind: 'other' }, { token: T.brenden });
+    ok('API · the planted folder is on file (4 shows, 3 meetings)', !!(aGR1.id && aGR2.id && aAUS.id && aLoose.id &&
+       aMk.id && aPin1.id && aPinA.id), [aGR1.id, aMk.id]);
+
+    // the server's show-tab listing vs the client's, per show
+    const apP = await mkTab.api.getProject(AP);
+    await mkTab.api.listMeetings(AP);
+    const srvIds = async (sid) => (await mkTab.api.listMeetings(AP, { show_id: sid })).map((m) => m.id).sort((a, b) => a - b);
+    const cliIds = (sid) => mkTab.meetingsForShow(sid).map((m) => m.id).sort((a, b) => a - b);
+    const per = {};
+    for (const s of [aGR1, aGR2, aAUS, aLoose]) per[s.id] = { srv: await srvIds(s.id), cli: cliIds(s.id) };
+    ok('SERVER = CLIENT · for EVERY show, ?show_id answers exactly the ids meetingsForShow draws',
+       Object.values(per).every((x) => JSON.stringify(x.srv) === JSON.stringify(x.cli)), per);
+    ok('SERVER = CLIENT · …and those are: the market call on BOTH Grand Rapids shows, on neither Austin nor the loose one',
+       per[aGR1.id].srv.includes(aMk.id) && per[aGR2.id].srv.includes(aMk.id) &&
+       !per[aAUS.id].srv.includes(aMk.id) && !per[aLoose.id].srv.includes(aMk.id) &&
+       per[aGR2.id].srv.length === 1, per);
+    const hubSrv = (await mkTab.api.listMeetings(AP, { market: 'GRAND RAPIDS' })).map((m) => m.id).sort((a, b) => a - b);
+    const hubCli = mkTab.meetingsForMarket(AP, 'Grand Rapids').map((m) => m.id).sort((a, b) => a - b);
+    ok('SERVER = CLIENT · the hub listing (?market) matches meetingsForMarket, and holds no Austin pin',
+       JSON.stringify(hubSrv) === JSON.stringify(hubCli) && hubSrv.includes(aMk.id) && hubSrv.includes(aPin1.id) &&
+       !hubSrv.includes(aPinA.id), { hubSrv, hubCli });
+
+    // the pages, rendered from the live server's data
+    const apSeason = mkTab.viewSeason(apP);
+    ok('API RENDER · the season dashboard groups by market off live data (two header rows, loose divider)',
+       (apSeason.match(/class="rowlink mkt-row"/g) || []).length === 2 && /mkt-row loose/.test(apSeason));
+    const apG = mkTab.marketOf(apP, 'grand rapids');
+    ok('API · the market came back from the server trimmed + collapsed, grouping both spellings',
+       !!apG && apG.name === 'Grand Rapids' && apG.shows.length === 2 && aGR2.market === 'grand rapids',
+       apG && apG.shows.map((s) => s.market));
+    // renderView('market')'s file read, in shape: per market SHOW, because
+    // GET /files?project_id= answers folder-level rows only
+    const apFiles = await Promise.all(apG.shows.map((ms) => mkTab.api.listFiles(ms.id)
+      .then((fl) => ({ id: ms.id, files: fl || [] }))));
+    ok('APP WIRING · renderView(\'market\') reads each market show\'s files by SHOW id, not per folder',
+       /var mFull = await Promise\.all\(mg\.shows\.map\(function \(ms\) \{\s*return api\.listFiles\(ms\.id\)/.test(APP_JS));
+    const apHub = mkTab.viewMarket(apP, apG, apFiles);
+    ok('API RENDER · the hub: both GR shows, the market call + the pin, the GR task and the GR file',
+       apHub.indexOf('data-act="openShow" data-id="' + aGR2.id + '"') >= 0 &&
+       has(apHub, aMk) && has(apHub, aPin1) && /WALK57 API GR freight/.test(apHub) && /WALK57 API GR plot/.test(apHub),
+       { show: apHub.indexOf('data-act="openShow" data-id="' + aGR2.id + '"') >= 0, mk: has(apHub, aMk),
+         pin: has(apHub, aPin1), task: /WALK57 API GR freight/.test(apHub), file: /WALK57 API GR plot/.test(apHub) });
+    ok('API RENDER · …and nothing of Austin\'s leaks into it',
+       apHub.indexOf('data-act="openShow" data-id="' + aAUS.id + '"') < 0 && !has(apHub, aPinA) && !/AUSTIN ONLY/.test(apHub));
+    ok('API RENDER · the job strip: the folder\'s one job, once', jobCards(apHub) === 1, jobCards(apHub));
+    const apTab = mkTab.tabMeetings(await mkTab.api.getShow(aGR2.id));
+    ok('API RENDER · the scrimmage\'s Meetings tab carries the market call it was never pinned to',
+       has(apTab, aMk) && !has(apTab, aPin1));
+    const apPlain = await mkTab.api.getProject(PROJ);
+    ok('API REGRESSION · a live folder with no markets renders byte-identically to the pre-market dashboard',
+       mkTab.marketsOf(apPlain).length === 0 &&
+       (() => { try { return mkTab.viewSeason(apPlain) === mkTab.viewSeason__preMarket(apPlain); } catch (e) { return false; } })());
+    await DEL(`/api/projects/${AP}`, { token: T.tom });
+  }
+
   // ── report ─────────────────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(66)}`);
   console.log(`  PERSONA WALK: ${pass} passed, ${fail} failed`);

@@ -48,6 +48,16 @@ var ROUTE_SHOW_TABS = {
 /* view + arg (+ tab) -> the canonical hash, or null for a view that has no
    route — the URL is then simply left alone: never a lie, never a crash */
 function routeFor(view, arg, tab) {
+  /* MARKETS (2026-09-30) — the market hub is a folder + a market NAME:
+     '#/folders/7/markets/Grand%20Rapids'. The name is the route (a market has
+     no id of its own — it is a grouping), encoded so any spelling survives
+     the hash and a reload lands on the same umbrella. */
+  if (view === 'market') {
+    var pm = arg == null ? NaN : Number(arg);
+    var mk = String(tab == null ? '' : tab).replace(/\s+/g, ' ').trim();
+    if (!isFinite(pm) || pm <= 0 || pm !== Math.floor(pm) || !mk) return null;
+    return '#/folders/' + pm + '/markets/' + encodeURIComponent(mk);
+  }
   var withId = { show: '#/shows/', folder: '#/folders/', job: '#/jobs/',
                  po: '#/pos/', viewer: '#/viewer/' };
   if (withId[view]) {
@@ -88,6 +98,11 @@ function routeParse(raw) {
         if (tab !== null && !ROUTE_SHOW_TABS[tab]) return null;
         return { view: 'show', arg: id, tab: tab };
       }
+      /* the market hub under its folder — see routeFor */
+      if (view === 'folder' && parts.length === 4 && String(parts[2]).toLowerCase() === 'markets') {
+        var name = decodeURIComponent(parts[3]).replace(/\s+/g, ' ').trim();
+        return name ? { view: 'market', arg: id, tab: name } : null;
+      }
       return parts.length === 2 ? { view: view, arg: id } : null;
     }
     return parts.length === 1 && ROUTE_VIEWS[head] ? { view: head } : null;
@@ -101,6 +116,7 @@ function routeSameScreen(a, b) {
   var pa = routeParse(a), pb = routeParse(b);
   if (!pa || !pb || !pa.view || pa.view !== pb.view) return false;
   if (pa.view === 'viewer') return true;
+  if (pa.view === 'market' && String(pa.tab).toLowerCase() !== String(pb.tab).toLowerCase()) return false;
   return (pa.arg == null ? null : pa.arg) === (pb.arg == null ? null : pb.arg);
 }
 

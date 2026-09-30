@@ -180,6 +180,13 @@ function viewShow(show, opts) {
       storageFolderChip(show) + '</div>' +
     '<div class="ef-sub"><span>' + icon('users') + ' <b>' + esc(show.job ? show.job.client : p.client) + '</b></span>' +
     '<span>' + icon('pin') + ' <b>' + esc(show.venue) + '</b></span>' +
+    /* MARKETS (2026-09-30) — the umbrella this show sits under, and the door
+       to it. Absent entirely for a show with no market. */
+    (show.market && !single
+      ? '<span>' + esc(MARKET_LABEL) + ' <button class="lnk-btn" ' + act('openMarket', show.id) +
+        ' title="' + esc('Every ' + show.market + ' show, meeting, task, file and job on one page') + '"><b>' +
+        esc(show.market) + '</b></button></span>'
+      : '') +
     '<span>Lead <b>' + esc(userName(show.owner)) + '</b></span>' +
     '<span>On-site <b>' + esc(userName(show.on_site_poc)) + '</b></span>' +
     /* A2. PUT /api/shows/:id accepted sixteen fields and recomputed the whole
@@ -1299,6 +1306,14 @@ function tabMeetings(show) {
      meetingsForProject(show.project_id) on a multi-show folder — and the walk's
      "each show's tab shows exactly its own" pair goes red. */
   var rows = single ? meetingsForProject(show.project_id) : meetingsForShow(show.id);
+  /* MARKETS — meetingsForShow() also carries the calls anchored to this
+     show's market; the copy below says so only when the show HAS one, so a
+     market-less show reads exactly as it always did. */
+  var mkt = !single && show.market ? show.market : null;
+  var mktLink = mkt
+    ? '<button class="btn ghost" ' + act('openMarket', show.id) + '>' + icon('pin') +
+      'Open the ' + esc(mkt) + ' ' + esc(marketNoun(1, true)) + '</button>'
+    : '';
   var addBtn = editable
     ? '<button class="btn primary" ' + act('addMeeting', p.id, String(show.id)) + '>' +
       icon('plus') + 'Add meeting</button>'
@@ -1315,6 +1330,7 @@ function tabMeetings(show) {
     return head + '<div class="gear-empty">' + icon('users') +
       '<div style="font-weight:600;font-size:14px">' +
       (single ? 'No meetings filed on this event yet'
+              : mkt ? 'No meetings pinned to this show or filed on ' + esc(mkt)
               : 'No meetings pinned to this show') + '</div>' +
       '<div style="font-size:12.5px;margin-top:7px;max-width:470px;margin-left:auto;margin-right:auto;line-height:1.5">' +
       /* reads as one sentence down the page, which is what the bold line + body
@@ -1326,7 +1342,7 @@ function tabMeetings(show) {
         : 'The season’s meetings live on the <b>folder dashboard</b>. Pin a call here when it ' +
           'really was about this venue; season-wide planning belongs on the season.') + '</div>' +
       '<div style="display:flex;gap:9px;justify-content:center;margin-top:16px;flex-wrap:wrap">' +
-      seasonLink + addBtn + '</div></div>';
+      mktLink + seasonLink + addBtn + '</div></div>';
   }
 
   return head + '<div class="card" style="padding:4px 14px"><div class="mtg-list">' +
@@ -1335,11 +1351,18 @@ function tabMeetings(show) {
     '<div class="hint">' + icon('bolt') + '<span>' +
     (single
       ? 'Every planning call on this folder. '
-      : 'Only the calls pinned to <b>' + esc(show.name) + '</b>. Season-wide planning — and ' +
-        'every other show’s calls — stay on the folder dashboard. ') +
+      : mkt
+        ? 'The calls pinned to <b>' + esc(show.name) + '</b>, and the ones filed on its ' +
+          esc(marketNoun(1, true)) + ', <b>' + esc(mkt) + '</b> — those show on every ' + esc(mkt) +
+          ' show. Season-wide planning stays on the folder dashboard. '
+        : 'Only the calls pinned to <b>' + esc(show.name) + '</b>. Season-wide planning — and ' +
+          'every other show’s calls — stay on the folder dashboard. ') +
     'Meeting summaries are <b>internal</b>: the client-recap generator can never read one.' +
     '</span></div>' +
-    (seasonLink ? '<div style="margin-top:12px">' + seasonLink + '</div>' : '');
+    (seasonLink
+      ? (mkt ? '<div style="margin-top:12px;display:flex;gap:9px;flex-wrap:wrap">' + mktLink + seasonLink
+             : '<div style="margin-top:12px">' + seasonLink) + '</div>'
+      : '');
 }
 
 

@@ -1804,3 +1804,16 @@ tr.archived:hover td{opacity:1}
 /* the digest as read in the modal — capped so a 4,000-word digest scrolls
    inside the dialog rather than pushing the footer off the screen */
 .mtg-body{max-height:min(52vh,540px); overflow:auto; padding:2px 4px 2px 0}
+
+/* ── MARKETS (2026-09-30) — the season table's market header rows, the
+   indented shows under them, and the hub's per-show file groups. Tokens only. */
+table.tbl tbody tr.mkt-row td{background:var(--surface-2); border-top:1px solid var(--border-strong)}
+table.tbl tbody tr.mkt-row.loose td{background:transparent}
+table.tbl tbody tr.mkt-row.rowlink:hover td{background:var(--surface-3)}
+.mkt-h{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.mkt-h svg{width:15px; height:15px; color:var(--accent)}
+.mkt-h b{font-size:13.5px}
+.mkt-h .mkt-go{margin-left:auto; font-size:12px; font-weight:600; color:var(--accent)}
+table.tbl tbody tr.in-mkt td:first-child{padding-left:30px}
+.mtg-chip.mkt:not([data-act]){cursor:default}
+.mkt-files + .mkt-files{margin-top:14px; padding-top:12px; border-top:1px solid var(--border)}

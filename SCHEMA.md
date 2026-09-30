@@ -143,6 +143,7 @@ still resolves by id, so a deep link and a search hit both still open.
 **F5 (the confirm fact):** `· confirmed_at · confirmed_by`
 **F2 (strike):** `· struck_at · struck_by`
 **F6 (closeout + archive):** `· closeout_complete_at · archived_at · archived_by` *(idx: `archived_at`, `closeout_complete_at`)*
+**Markets (2026-09-30):** `· market` *(idx: `(project_id, lower(market))`)* — the city/team a show groups under inside its folder (league season → **market** → events). A GROUPING, not a re-parenting: nullable free text, trimmed + inner whitespace collapsed, ≤ 80 chars (`lib/enums.js` `marketOrNull` — a 400 past the cap, never a silent truncation), compared **case-insensitively**. Set on `POST /api/shows` and `PUT /api/shows/:id` (`''`/`null` clears; omitted leaves it). A market move is **logged** in the `show.update` diff but is **not material** — filing, not operations, so it never mails the show's audience.
 **Push v2 (the scheduler link):** `· pushed_child_ids JSONB · scheduler_pushed_at · scheduler_pushed_by` — plus two **derived** fields on every hydrated show: `scheduler_stale` (did the show / its steps / its crew change after the last push) and `scheduler_deep_link` (the staffing app opened at the linked event; `null` while unconfigured).
 Every one of these defaults to `NULL`, so an existing show simply has no scope
 line, no confirm datestamp and no archive state until someone creates one — **no
@@ -509,8 +510,9 @@ agent-authored note is **immutable to humans**.
 
 ### Meetings
 
-**`meetings`** *(idx: `project_id`, `show_id`, `transcript_file_id`)*
+**`meetings`** *(idx: `project_id`, `show_id`, `transcript_file_id`, `(project_id, lower(market))`)*
 `id · project_id (NOT NULL) · show_id · title (NOT NULL) · held_at · held_time · attendees · summary_md · transcript_file_id · source · created_by · created_at · updated_at`
+**Markets (2026-09-30):** `· market` — a meeting may anchor to a **market** of its folder instead of one show (market set, `show_id` NULL). It renders on the market hub **and on the Meetings tab of every show in that folder + market**, and on the season roll-up as before. ONE anchor: a show, a market, or neither (the season) — both at once is a 400, on create and on a PUT whose patched row would hold both. The market must be one a show in THIS folder is filed under (a 400 otherwise) and is stored in the **shows' spelling**. `GET /api/projects/:id/meetings` narrows with `?show_id=N` (pinned to N **or** anchored to N's market) and `?market=M` (anchored to M **or** pinned to any show in M) — the server twins of `public/data.js` `meetingsForShow()` / `meetingsForMarket()`, held to the same ids by walk §57.
 
 > **Meeting summaries on a folder (Tom, 2026-09-21: "we should definitely add a
 > meeting summary feature to projects… we can add these summaries").** The
@@ -1096,6 +1098,7 @@ and the URL is **replaced**, never left lying.
 | `#/shows/:id` | a show's folder (Overview tab) |
 | `#/shows/:id/:tab` | a show tab — `schedule · pipeline · specs · gear · content · files · photos · reports · recap · financials · proofs · bookings · activity`. The tab **rides the hash** (refresh and copied links keep it) but a tab flick **replaces** the history entry: Back leaves the *screen*, never crawls back through tabs |
 | `#/folders/:id` | a season/program folder — the single-show auto-collapse rule still applies |
+| `#/folders/:id/markets/:name` | a **market hub** (2026-09-30) — one market's shows, meetings, open tasks, files and job(s). The name is URI-encoded and matched case-insensitively; a market no show is filed under any more is the stale-route fallback |
 | `#/jobs/:id` · `#/pos/:id` | the finance job drill-in · the PO drill-in |
 | `#/viewer/:fileId` | the multimedia viewer on that file; paging inside it replaces, like a tab |
 | `#show/:id` · `#folder/:id` | **legacy aliases** — the shape mail bodies emit (`lib/audience.js` · `lib/mentions.js` · `routes/*`); parsed forever so old notification links keep opening |

@@ -5381,12 +5381,27 @@ var api = (function () {
        with the SERVER'S OWN wording, so the demo teaches the walls rather than
        only the happy path. The demo store is the flat ALL_MEETINGS that
        viewSeason reads synchronously. */
-    listMeetings: function (projectId) {
+    /* opts (MARKETS, 2026-09-30) narrows the list the way the route does:
+         { show_id }  a show's tab — pinned to it, or anchored to its market
+         { market }   a market hub — anchored to it, or pinned to its shows
+       Demo answers off the same data.js filters the views draw with, so the
+       two modes cannot disagree about which calls a surface owns. */
+    listMeetings: function (projectId, opts) {
+      opts = opts || {};
       if (!API()) {
         var p = PROJECTS_BY_ID[Number(projectId)];
-        return p ? ok(meetingsForProject(p.id)) : fail('project ' + projectId + ' not found');
+        if (!p) return fail('project ' + projectId + ' not found');
+        if (opts.show_id) {
+          var os = SHOWS_BY_ID[Number(opts.show_id)];
+          if (!os || os.project_id !== p.id) return fail('show ' + opts.show_id + ' belongs to another folder — a meeting links only to a show in its own folder');
+          return ok(meetingsForShow(os.id));
+        }
+        if (normMarket(opts.market)) return ok(meetingsForMarket(p.id, opts.market));
+        return ok(meetingsForProject(p.id));
       }
-      return SR.get('/api/projects/' + Number(projectId) + '/meetings')
+      return SR.get('/api/projects/' + Number(projectId) + '/meetings' +
+          SR.qs({ show_id: opts.show_id ? Number(opts.show_id) : null,
+                  market: normMarket(opts.market) }))
         .then(function (rows) { return (rows || []).map(A.meeting); });
     },
     addMeeting: function (projectId, body) {
@@ -5401,6 +5416,8 @@ var api = (function () {
           attendees: String(body.attendees || '').trim(),
           summary_md: body.summary_md || '',
           show_id: body.show_id ? Number(body.show_id) : null,
+          /* the shows' own spelling, like the route stores it */
+          market: _canonMarket(p, body.market),
           transcript_file_id: body.transcript_file_id ? Number(body.transcript_file_id) : null,
           by: ME, off: 0 });
         /* the activity twin lands on the show when the meeting names one — a
@@ -5425,6 +5442,7 @@ var api = (function () {
         var bad = _meetingRefusal(p, patch, m);
         if (bad) return fail(bad);
         Object.keys(patch).forEach(function (k) { m[k] = patch[k]; });
+        if (patch.market !== undefined) m.market = _canonMarket(p, patch.market);
         if (m.show_id) m.show_id = Number(m.show_id);
         if (m.transcript_file_id) m.transcript_file_id = Number(m.transcript_file_id);
         m.updated_at = TODAY_ISO;
@@ -5541,8 +5559,11 @@ var api = (function () {
       if (!API()) {
         var s = SHOWS_BY_ID[Number(id)];
         if (!s) return fail('show ' + id + ' not found');
+        var muBad = patch ? _marketRefusal(patch.market) : null;
+        if (muBad) return fail(muBad);
         var was = s.event_date;
         Object.keys(patch || {}).forEach(function (k) { s[k] = patch[k]; });
+        if (patch && patch.market !== undefined) s.market = normMarket(patch.market);
         /* the demo twin of the server's back-schedule recompute, so a date
            move looks the same in both modes */
         if (patch && patch.event_date && patch.event_date !== was) {
@@ -5912,6 +5933,8 @@ var api = (function () {
       if (!API()) {
         var p = PROJECTS_BY_ID[Number(projectId)];
         if (!p) return fail('folder ' + projectId + ' not found');
+        var mBad = _marketRefusal(body.market);
+        if (mBad) return fail(mBad);
         var sid = 1;
         ALL_SHOWS.forEach(function (s) { if (s.id >= sid) sid = s.id + 1; });
         var show = _mkLocalShow(p, body, sid);
@@ -6326,12 +6349,26 @@ var api = (function () {
   /* One show record, in the exact shape the createEvent twin builds — pulled
      out so "second show in a folder" cannot drift from "first show of a new
      event" one collection at a time. */
+  /* MARKETS — the demo twins of lib/enums marketOrNull (a refusal past the
+     cap, never a silent truncation) and of the route's canonical spelling */
+  function _marketRefusal(v) {
+    var mk = normMarket(v);
+    return mk && mk.length > MARKET_MAX
+      ? 'market must be ' + MARKET_MAX + ' characters or fewer — got ' + mk.length : null;
+  }
+  function _canonMarket(project, v) {
+    var mk = normMarket(v);
+    if (!mk) return null;
+    var g = marketOf(project, mk);
+    return g ? g.name : mk;
+  }
   function _mkLocalShow(proj, b, sid) {
     var name = String(b.name || proj.name).trim();
     var job = (proj.jobs && proj.jobs[0]) || null;
     return {
       id: sid, project_id: proj.id, slug: proj.slug, name: name,
       venue: String(b.venue || ''), city: String(b.city || ''),
+      market: normMarket(b.market),
       load_in_date: b.load_in_date || '', event_date: b.event_date || '',
       strike_date: b.strike_date || '',
       stage: 'lead', rag: 'idle', on_site_poc: b.on_site_poc || '', owner: proj.owner || ME,
@@ -6654,6 +6691,20 @@ var api = (function () {
         return 'show ' + body.show_id +
           ' belongs to another folder — a meeting links only to a show in its own folder';
       }
+    }
+    /* MARKETS — routes/meetings.js marketInProjectOrNull + oneAnchor, in the
+       server's words: a real market of THIS folder, and one anchor at most */
+    var mk = body.market !== undefined ? normMarket(body.market) : undefined;
+    if (mk) {
+      if (mk.length > MARKET_MAX) return 'market must be ' + MARKET_MAX + ' characters or fewer — got ' + mk.length;
+      if (!marketOf(project, mk)) {
+        return 'no show in this folder is in the market "' + mk + '" — name the market on a show first';
+      }
+    }
+    var nextShow = body.show_id !== undefined ? body.show_id : (existing ? existing.show_id : null);
+    var nextMkt = mk !== undefined ? mk : (existing ? existing.market : null);
+    if (nextShow && nextMkt) {
+      return 'a meeting anchors to ONE show or ONE market, not both — clear one of them';
     }
     if (body.transcript_file_id) {
       var f = FILES_BY_ID[Number(body.transcript_file_id)];

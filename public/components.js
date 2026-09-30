@@ -211,6 +211,19 @@ function meetingChips(m, fromShowId) {
       esc('Pinned to ' + show.name + ' — open that show\'s Meetings tab') + '" ' +
       act('showMeetings', show.id) + '>' + esc(show.name) + '</span>';
   }
+  /* MARKETS — a call anchored to a market (market set, no show) wears the
+     market's name, and the chip is the way to its hub. Dropped ON that hub,
+     for the reason the show chip is dropped on the show's own tab. A market
+     no show is filed under any more still prints (the record says what it
+     was about) but opens nothing — there is no hub to open. */
+  if (!m.show_id && m.market && !isMarketFrom(fromShowId)) {
+    var anchor = marketAnchorShow(m.project_id, m.market);
+    out += '<span class="mini dep mtg-chip mkt" title="' +
+      esc(MARKET_LABEL + ' call — on every ' + m.market + ' show' +
+          (anchor ? '; open the ' + marketNoun(1, true) + ' page' : '')) + '"' +
+      (anchor ? ' ' + act('openMarket', anchor.id) : '') + '>' + inlineIcon('pin') + ' ' +
+      esc(m.market) + '</span>';
+  }
   var f = m.transcript_file_id ? FILES_BY_ID[m.transcript_file_id] : null;
   if (f) {
     out += '<span class="mini" title="' + esc('Written from ' + f.name + ' — the transcript the ' +
@@ -222,8 +235,13 @@ function meetingChips(m, fromShowId) {
 /* one row. A DIV, not a button, because it carries its own Edit/Delete buttons
    and a button inside a button is invalid — the delegated listener's
    closest('[data-act]') gives the inner controls priority either way. */
+/* the origin a row carries in its k slot: a show id ("12"), or — from a
+   market hub — "mkt:<id of the market's anchor show>", so the dialogs come
+   back to the hub. Numeric ids only either way (act()'s contract). */
+function isMarketFrom(k) { return /^mkt:\d+$/.test(String(k == null ? '' : k)); }
 function meetingRow(m, canEdit, fromShowId) {
-  var from = fromShowId == null ? null : String(Number(fromShowId));
+  var from = fromShowId == null ? null
+    : isMarketFrom(fromShowId) ? String(fromShowId) : String(Number(fromShowId));
   var when = m.held_at ? fmtDateFull(m.held_at) + (m.held_time ? ' · ' + m.held_time : '') : 'no date';
   var meta = [when, m.attendees || 'attendees not recorded'].join(' · ');
   var prev = mdPreview(m.summary_md, 190);
@@ -249,6 +267,7 @@ function meetingDetailHTML(m) {
   var head = '<div class="mtg-meta" style="margin:0 0 10px;white-space:normal">' +
     esc(when) + ' · <b>' + esc(m.attendees || 'attendees not recorded') + '</b>' +
     (show ? ' · ' + esc(show.name) : '') +
+    (!show && m.market ? ' · ' + esc(MARKET_LABEL + ': ' + m.market) : '') +
     (m.created_by ? ' · filed by ' + esc(userName(m.created_by)) : '') + '</div>';
   var src = f
     ? '<div class="hint" style="margin:0 0 12px">' + icon('file') + '<span>Written from <b>' +
@@ -616,6 +635,21 @@ function rollup(show) {
      an override changes the headline, never the arithmetic under it. */
   if (show.rag_override) r.rag = show.rag_override;
   return r;
+}
+/* MARKETS — one market's roll-up: the WORST show's RAG (an override on any
+   one show counts, exactly as rollup() honours it), and progress over every
+   step of every show in it. Worst-of rather than re-derived, because a market
+   is late when one of its shows is late — the season dashboard's market
+   header and the hub's pill both read this. */
+var RAG_WEIGHT = { crit: 3, warn: 2, go: 1, idle: 0 };
+function marketRollup(shows) {
+  var worst = 'idle', done = 0, total = 0;
+  (shows || []).forEach(function (s) {
+    var r = rollup(s);
+    done += r.done; total += r.total;
+    if ((RAG_WEIGHT[r.rag] || 0) > (RAG_WEIGHT[worst] || 0)) worst = r.rag;
+  });
+  return { rag: worst, done: done, total: total, pct: total ? Math.round(done / total * 100) : 0 };
 }
 /* folder-level rollup — every step under every show in the project */
 function projectRollup(project) {

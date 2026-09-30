@@ -45,7 +45,7 @@
 
 const express = require('express');
 const { pool, withTx, loadProject, loadShow } = require('../lib/db');
-const { isISODate, isHHMM, intOrNull, oneOf } = require('../lib/enums');
+const { isISODate, isHHMM, intOrNull, oneOf, marketOrNull } = require('../lib/enums');
 const { pick, has, dbToMeeting } = require('../lib/mappers');
 const { asyncH, badRequest, forbidden, notFound, idParam } = require('../lib/http');
 const { requireAuth, requireRole, canEditProject } = require('../lib/auth');
@@ -73,7 +73,8 @@ const MEETING_SOURCES = ['manual', 'graph'];
 // internal digest into the activity feed.
 const MATERIAL_MEETING_FIELDS = {
   title: 'title', held_at: 'held on', held_time: 'time',
-  attendees: 'attendees', show_id: 'show', transcript_file_id: 'transcript'
+  attendees: 'attendees', show_id: 'show', transcript_file_id: 'transcript',
+  market: 'market'
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -124,6 +125,32 @@ async function showInProjectOrNull(rawId, projectId, q = pool) {
   return showId;
 }
 
+// MARKETS (2026-09-30) — a meeting may anchor to a MARKET of its folder
+// instead of one show: the "Season Beginning" calls are about Grand Rapids,
+// not about its install OR its scrimmage. The market must be one a show in
+// THIS folder is actually filed under (case-insensitive), and the stored
+// spelling is the shows' own — so a hand-typed "grand rapids" lands as the
+// "Grand Rapids" every surface already prints. A market nobody is in would
+// be a meeting anchored to nothing any page can reach.
+async function marketInProjectOrNull(raw, projectId, q = pool) {
+  const market = marketOrNull(raw);
+  if (!market) return null;
+  const r = await q.query(
+    `SELECT market FROM shows WHERE project_id=$1 AND lower(market)=lower($2)
+      ORDER BY event_date ASC, id ASC LIMIT 1`, [projectId, market]);
+  if (!r.rows.length) {
+    throw badRequest(`no show in this folder is in the market "${market}" — name the market on a show first`);
+  }
+  return r.rows[0].market;
+}
+// ONE anchor: a show, a market, or neither (the whole season). Both at once
+// would render the call in two places for two different reasons.
+function oneAnchor(showId, market) {
+  if (showId && market) {
+    throw badRequest('a meeting anchors to ONE show or ONE market, not both — clear one of them');
+  }
+}
+
 // …and the same rule for the transcript document. A `files` row reaches its
 // folder either directly (project_id, the folder-level door) or through its
 // show — both count, nothing outside the folder does.
@@ -166,10 +193,36 @@ function meetingLabel(row) {
 // for. Meetings with no date sort after the dated ones rather than to the top,
 // which is what NULLS LAST buys; `id DESC` breaks a same-day tie by "filed
 // most recently", the only ordering the row itself can justify.
-async function meetingsForProject(projectId, q = pool) {
-  const r = await q.query(
-    `SELECT * FROM meetings WHERE project_id=$1
-      ORDER BY held_at DESC NULLS LAST, id DESC`, [projectId]);
+//
+// MARKETS — the two narrowed listings, the server half of what the client's
+// meetingsForShow()/meetingsForMarket() (public/data.js) compute off the
+// flat store. They must agree, and the walk asks both:
+//   { showId }  the show's OWN tab: pinned to it, OR anchored to its market
+//               (market set, show_id null, same folder, same market)
+//   { market }  the market HUB: anchored to the market, OR pinned to any
+//               show filed under it
+async function meetingsForProject(projectId, q = pool, { showId = null, market = null } = {}) {
+  const order = ' ORDER BY held_at DESC NULLS LAST, id DESC';
+  let r;
+  if (showId) {
+    r = await q.query(
+      `SELECT m.* FROM meetings m
+        WHERE m.project_id=$1
+          AND (m.show_id=$2
+               OR (m.show_id IS NULL AND m.market IS NOT NULL AND lower(m.market) =
+                   (SELECT lower(s.market) FROM shows s WHERE s.id=$2 AND s.project_id=$1)))` + order,
+      [projectId, showId]);
+  } else if (market) {
+    r = await q.query(
+      `SELECT m.* FROM meetings m
+        WHERE m.project_id=$1
+          AND ((m.show_id IS NULL AND lower(m.market)=lower($2))
+               OR m.show_id IN (SELECT s.id FROM shows s
+                                 WHERE s.project_id=$1 AND lower(s.market)=lower($2)))` + order,
+      [projectId, market]);
+  } else {
+    r = await q.query(`SELECT * FROM meetings WHERE project_id=$1` + order, [projectId]);
+  }
   return r.rows.map(dbToMeeting);
 }
 
@@ -179,9 +232,21 @@ async function meetingsForProject(projectId, q = pool) {
 
 // GET /api/projects/:id/meetings — anyone signed in. A tech who missed the call
 // is exactly who needs to read what was decided on it.
+//   ?show_id=N  → that show's tab (pinned + its market's anchored calls)
+//   ?market=M   → that market's hub (anchored + its shows' pinned calls)
 router.get('/projects/:id/meetings', asyncH(async (req, res) => {
   const projectId = idParam(req);
   await projectOr404(projectId);
+  const q = req.query || {};
+  if (q.show_id !== undefined && q.show_id !== '') {
+    const showId = await showInProjectOrNull(q.show_id, projectId);
+    if (!showId) throw badRequest(`show_id must be a show id — got "${q.show_id}"`);
+    return res.json(await meetingsForProject(projectId, pool, { showId }));
+  }
+  if (q.market !== undefined && q.market !== '') {
+    const market = marketOrNull(q.market);
+    if (market) return res.json(await meetingsForProject(projectId, pool, { market }));
+  }
   res.json(await meetingsForProject(projectId));
 }));
 
@@ -196,6 +261,8 @@ router.post('/projects/:id/meetings', pmPlus, asyncH(async (req, res) => {
   const heldAt = heldOrNull(pick(body, 'held_at'));
   const heldTime = timeOrBlank(pick(body, 'held_time'));
   const showId = await showInProjectOrNull(pick(body, 'show_id'), projectId);
+  const market = await marketInProjectOrNull(pick(body, 'market'), projectId);
+  oneAnchor(showId, market);
   const fileId = await fileInProjectOrNull(pick(body, 'transcript_file_id'), projectId);
   // 'manual' unless a caller names a source we know. The pipeline that will
   // write 'graph' rows does not exist yet — this accepts the value rather than
@@ -206,11 +273,11 @@ router.post('/projects/:id/meetings', pmPlus, asyncH(async (req, res) => {
     const r = await c.query(
       `INSERT INTO meetings
          (project_id, show_id, title, held_at, held_time, attendees, summary_md,
-          transcript_file_id, source, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+          transcript_file_id, source, created_by, market)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
       [projectId, showId, title, heldAt, heldTime,
        String(pick(body, 'attendees') || '').trim(),
-       String(pick(body, 'summary_md') || ''), fileId, source, req.actor]);
+       String(pick(body, 'summary_md') || ''), fileId, source, req.actor, market]);
     const row = r.rows[0];
     await logActivity(c, {
       projectId, showId,
@@ -249,9 +316,19 @@ router.put('/meetings/:id', pmPlus, asyncH(async (req, res) => {
   // lines and trailing structure are the author's, and the renderer already
   // handles both.
   if (has(body, 'summary_md')) set('summary_md', String(pick(body, 'summary_md') || ''));
+  // the anchor pair is resolved TOGETHER: what the row would hold after this
+  // patch must still be one anchor (a show, a market, or the season)
+  let nextShow = existing.show_id || null;
+  let nextMarket = existing.market || null;
   if (has(body, 'show_id')) {
-    set('show_id', await showInProjectOrNull(pick(body, 'show_id'), existing.project_id));
+    nextShow = await showInProjectOrNull(pick(body, 'show_id'), existing.project_id);
+    set('show_id', nextShow);
   }
+  if (has(body, 'market')) {
+    nextMarket = await marketInProjectOrNull(pick(body, 'market'), existing.project_id);
+    set('market', nextMarket);
+  }
+  oneAnchor(nextShow, nextMarket);
   if (has(body, 'transcript_file_id')) {
     set('transcript_file_id',
       await fileInProjectOrNull(pick(body, 'transcript_file_id'), existing.project_id));

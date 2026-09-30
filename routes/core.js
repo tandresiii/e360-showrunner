@@ -33,7 +33,8 @@ const {
   PROJECT_TYPES, STAGES, RAGS, STEP_STATUSES, EVIDENCE_TYPES, AUTO_SOURCES,
   SCOPE_KINDS, LIFECYCLE_STAGES, ROLE_RANK, DEAL_TYPES,
   oneOf, addDays, slug, isISODate, intOrNull, num, money, sameUser,
-  canonicalStage, stageLabel, isConfirmed, scopeLine, scopeOf, todayISO, printable, typeFamily
+  canonicalStage, stageLabel, isConfirmed, scopeLine, scopeOf, todayISO, printable, typeFamily,
+  marketOrNull
 } = require('../lib/enums');
 // F2/F3/F5/F6 — the four post-deploy engines. Each one owns its decision; this
 // module only routes to them.
@@ -76,6 +77,12 @@ const MATERIAL_SHOW_FIELDS = {
   stage: 'stage', owner: 'owner', on_site_poc: 'on-site POC',
   cabinets: 'cabinets', rag_override: 'RAG override', default_job_id: 'job'
 };
+// LOGGED but deliberately NOT material: which market a show groups under is
+// the folder's filing, not the show's operations — nobody's load-in moved.
+// It lands in the activity row's diff so the trail says who re-filed it, and
+// it never mails the show's audience (a backfill naming the markets on a
+// dozen shows must not become a dozen announcements).
+const LOGGED_SHOW_FIELDS = { market: 'market' };
 const MATERIAL_PROJECT_FIELDS = {
   name: 'name', client: 'client', stage: 'stage', owner: 'owner',
   type: 'type', description: 'description'
@@ -373,14 +380,16 @@ router.post('/shows', requireRole('pm'), asyncH(async (req, res) => {
     const name = pick(b, 'name') || '';
     const ins = await c.query(
       `INSERT INTO shows (project_id, name, slug, venue, city, load_in_date, event_date, strike_date,
-                          stage, rag, on_site_poc, owner, default_job_id, cabinets)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+                          stage, rag, on_site_poc, owner, default_job_id, cabinets, market)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
       [project.id, name, pick(b, 'slug') || slug(name || project.name), pick(b, 'venue') || '',
        pick(b, 'city') || '', pick(b, 'load_in_date') || '', pick(b, 'event_date') || '',
        pick(b, 'strike_date') || '', oneOf(pick(b, 'stage'), STAGES, 'lead'),
        oneOf(pick(b, 'rag'), RAGS, 'idle'), pick(b, 'on_site_poc') || '',
        pick(b, 'owner') || project.owner || req.session.username,
-       intOrNull(pick(b, 'default_job_id')), parseInt(pick(b, 'cabinets'), 10) || 0]
+       intOrNull(pick(b, 'default_job_id')), parseInt(pick(b, 'cabinets'), 10) || 0,
+       // MARKETS — trimmed, whitespace-collapsed, ≤80 or a 400 (lib/enums)
+       marketOrNull(pick(b, 'market'))]
     );
     const show = ins.rows[0];
     // A show with no explicit job inherits the folder's first job.
@@ -423,8 +432,8 @@ router.put('/shows/:id', asyncH(async (req, res) => {
     const r = await c.query(
       `UPDATE shows SET name=$1, slug=$2, venue=$3, city=$4, load_in_date=$5, event_date=$6,
          strike_date=$7, stage=$8, rag=$9, rag_override=$10, on_site_poc=$11, owner=$12,
-         default_job_id=$13, cabinets=$14, summary=$15, source=$16, updated_at=NOW()
-       WHERE id=$17 RETURNING *`,
+         default_job_id=$13, cabinets=$14, summary=$15, source=$16, market=$17, updated_at=NOW()
+       WHERE id=$18 RETURNING *`,
       [pick(b, 'name', s.name), pick(b, 'slug', s.slug), pick(b, 'venue', s.venue),
        pick(b, 'city', s.city), pick(b, 'load_in_date', s.load_in_date), newEventDate,
        pick(b, 'strike_date', s.strike_date), oneOf(pick(b, 'stage'), STAGES, s.stage),
@@ -435,7 +444,9 @@ router.put('/shows/:id', asyncH(async (req, res) => {
        has(b, 'default_job_id') ? intOrNull(pick(b, 'default_job_id')) : s.default_job_id,
        has(b, 'cabinets') ? (parseInt(pick(b, 'cabinets'), 10) || 0) : s.cabinets,
        has(b, 'summary') ? pick(b, 'summary') : s.summary,
-       has(b, 'source') ? pick(b, 'source') : s.source, s.id]
+       has(b, 'source') ? pick(b, 'source') : s.source,
+       // MARKETS — only when the body names it; '' / null clears it
+       has(b, 'market') ? marketOrNull(pick(b, 'market')) : s.market, s.id]
     );
     // Keeping BOTH due_date and due_offset_days means a date change recomputes
     // the back-schedule instead of stranding it (SCHEMA.md).
@@ -453,9 +464,12 @@ router.put('/shows/:id', asyncH(async (req, res) => {
     // meaning "something about this show changed" and starts saying which
     // field, from what, to what. `detail` is now built from the same array.
     const changes = diffFields(s, r.rows[0], MATERIAL_SHOW_FIELDS);
+    // the logged-not-announced set rides the activity row only (see
+    // LOGGED_SHOW_FIELDS); `changes` below stays the announcement's input
+    const logged = changes.concat(diffFields(s, r.rows[0], LOGGED_SHOW_FIELDS));
     await logActivity(c, { projectId: s.project_id, showId: s.id, actor: req.actor,
       action: 'show.update', accent: changes.length > 0,
-      detail: changeSummary(changes, r.rows[0].name), changes });
+      detail: changeSummary(logged, r.rows[0].name), changes: logged });
     await notifyTargets(c, { body: b, anchorType: 'show', anchorId: s.id, projectId: s.project_id,
       showId: s.id, actor: req.actor, summary: `updated the show —` });
     // F1/F5. THE POINT OF THE WHOLE PASS. Moving the event date used to rewrite

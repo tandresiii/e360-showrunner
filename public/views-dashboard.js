@@ -299,30 +299,16 @@ function viewSeason(project) {
     '<div class="stat"><div class="rail-c" style="background:var(--info)"></div><div class="k">Season progress</div><div class="v">' + r.pct + '<small>%</small></div></div>' +
     '</div>';
 
-  /* the show grid */
-  var rows = perShow.map(function (x) {
-    var s = x.s;
-    var job = s.default_job_id ? JOBS_BY_ID[s.default_job_id] : null;
-    var overrides = s.bookings.filter(function (b) { return b.job_id && b.job_id !== s.default_job_id; }).length;
-    /* quiet photo count (photo pass) — the gallery is filling in */
-    var phN = photoCount(s.id);
-    var phChip = phN ? '<span class="ph-count" title="' + phN + ' event photo' + (phN === 1 ? '' : 's') + ' on this show">' + inlineIcon('cam') + phN + '</span>' : '';
-    return '<tr class="rowlink' + (s.archived_at ? ' archived' : '') + '" ' + act('openShow', s.id) + '>' +
-      '<td><div class="ev-name"><div class="ic">' + icon(typeDef(s.type).icon) + '</div><div><b>' + esc(s.name) + '</b><span>' + esc(s.venue) + '</span></div>' + phChip + contentSeasonChip(s) + recapGlyph(s) + archivedChip(s) + '</div></td>' +
-      '<td class="mono" style="font-size:12.5px">' + esc(fmtDate(s.event_date)) + '</td>' +
-      /* F4 — the season row carries the scope line, so a season dashboard
-         answers "how much LED is Madison" without a drill-in. */
-      '<td>' + (hasScope(s) ? scopeChip(s) : '<span class="mini">—</span>') + '</td>' +
-      '<td>' + ragPill(x.r.rag) + poSeasonFlag(s) + '</td>' +
-      '<td><div class="mono" style="font-size:12.5px"><span style="color:var(--muted)">' + esc(x.next.k) + '</span> ' + esc(x.next.v) + '</div></td>' +
-      '<td>' + (job ? '<span class="tag">' + esc(job.qb_job_number) + '</span>' : '') + (overrides ? ' <span class="mini dep">+' + overrides + ' split</span>' : '') + '</td>' +
-      '<td><div class="who-cell">' + av(s.on_site_poc) + '<span>' + esc(firstName(s.on_site_poc)) + '</span></div></td>' +
-      '<td><div class="prog"><div class="bar"><div class="fill" style="width:' + x.r.pct + '%"></div></div><div class="num">' + x.r.pct + '%</div></div></td>' +
-      '</tr>';
-  }).join('');
+  /* the show grid — grouped under MARKET header rows when the folder has
+     markets (Tom, 2026-09-30), and EXACTLY the old flat table when it has
+     none: seasonShowRows() returns the pre-market bytes for a market-less
+     folder, which the walk holds against the 154586f original verbatim. */
+  var groups = marketsOf({ shows: shows });
+  var rows = seasonShowRows(perShow, groups);
 
-  var showTable = '<div class="card"><div class="card-h"><h3>Shows in this folder</h3><span class="pill idle">' + shows.length + ' shows · sorted by date</span></div>' +
-    '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Show</th><th>Date</th><th>Scope</th><th>Health</th><th>Next milestone</th><th>Job</th><th>On-site</th><th>Progress</th></tr></thead>' +
+  var showTable = '<div class="card"><div class="card-h"><h3>Shows in this folder</h3><span class="pill idle">' + shows.length + ' shows · ' +
+    (groups.length ? groups.length + ' ' + marketNoun(groups.length, true) + ' · ' : '') + 'sorted by date</span></div>' +
+    SEASON_SHOW_THEAD +
     '<tbody>' + rows + '</tbody></table></div></div>';
 
   /* upcoming shows list */
@@ -333,17 +319,8 @@ function viewSeason(project) {
   }).join('') || '<div class="empty">No shows scheduled.</div>';
 
   /* jobs panel — the commercial dimension, now live with budget burn */
-  var jobRows = (project.jobs || []).map(function (j) {
-    var jf = financeForJob(j.id);
-    var defaults = shows.filter(function (s) { return s.default_job_id === j.id; }).length;
-    var extras = 0;
-    shows.forEach(function (s) { s.bookings.forEach(function (b) { if (b.job_id === j.id && s.default_job_id !== j.id) extras++; }); });
-    return '<div class="next-item" ' + act('openJob', j.id) + ' style="cursor:pointer"><div class="txt">' + esc(j.client) + '<span>' + esc(j.description) + '</span></div>' +
-      '<span class="tag">' + esc(j.qb_job_number) + '</span>' + tempBadge(j) + dealTag(j) +
-      '<span class="mono" style="font-size:12px;color:var(--text-2)">' + esc(fmtMoney(j.contract_value)) + '</span>' +
-      burnBar(jf ? jf.actual : 0, jf ? jf.budget_total : 0) +
-      '<span class="mini">' + (defaults ? defaults + ' show' + (defaults === 1 ? '' : 's') : extras + ' item' + (extras === 1 ? '' : 's')) + '</span></div>';
-  }).join('') || '<div class="empty">No jobs on this folder yet.</div>';
+  var jobRows = (project.jobs || []).map(function (j) { return jobPanelRow(j, shows); }).join('') ||
+    '<div class="empty">No jobs on this folder yet.</div>';
 
   var summary = project.summary || project.description || '';
 
@@ -383,6 +360,259 @@ function viewSeason(project) {
     /* folder-level thread — season-wide notes (notes pass) */
     notesPanel('project', project.id, { title: 'Season notes', collapse: 2 }) +
     '</div></div>';
+}
+
+/* ============================================================================
+   THE SEASON ROW, THE JOB ROW — shared by the season dashboard and the market
+   hub. Lifted out of viewSeason() verbatim so the hub draws the SAME row
+   rather than a second copy that drifts; the walk renders a market-less
+   folder against the pre-market original and demands identical bytes.
+   ========================================================================== */
+var SEASON_SHOW_THEAD = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Show</th><th>Date</th><th>Scope</th><th>Health</th><th>Next milestone</th><th>Job</th><th>On-site</th><th>Progress</th></tr></thead>';
+/* x = { s: show, r: rollup(s), next: showNext(s) } — viewSeason's perShow */
+function seasonShowRow(x, inMarket) {
+  var s = x.s;
+  var job = s.default_job_id ? JOBS_BY_ID[s.default_job_id] : null;
+  var overrides = (s.bookings || []).filter(function (b) { return b.job_id && b.job_id !== s.default_job_id; }).length;
+  /* quiet photo count (photo pass) — the gallery is filling in */
+  var phN = photoCount(s.id);
+  var phChip = phN ? '<span class="ph-count" title="' + phN + ' event photo' + (phN === 1 ? '' : 's') + ' on this show">' + inlineIcon('cam') + phN + '</span>' : '';
+  return '<tr class="rowlink' + (s.archived_at ? ' archived' : '') + (inMarket ? ' in-mkt' : '') + '" ' + act('openShow', s.id) + '>' +
+    '<td><div class="ev-name"><div class="ic">' + icon(typeDef(s.type).icon) + '</div><div><b>' + esc(s.name) + '</b><span>' + esc(s.venue) + '</span></div>' + phChip + contentSeasonChip(s) + recapGlyph(s) + archivedChip(s) + '</div></td>' +
+    '<td class="mono" style="font-size:12.5px">' + esc(fmtDate(s.event_date)) + '</td>' +
+    /* F4 — the season row carries the scope line, so a season dashboard
+       answers "how much LED is Madison" without a drill-in. */
+    '<td>' + (hasScope(s) ? scopeChip(s) : '<span class="mini">—</span>') + '</td>' +
+    '<td>' + ragPill(x.r.rag) + poSeasonFlag(s) + '</td>' +
+    '<td><div class="mono" style="font-size:12.5px"><span style="color:var(--muted)">' + esc(x.next.k) + '</span> ' + esc(x.next.v) + '</div></td>' +
+    '<td>' + (job ? '<span class="tag">' + esc(job.qb_job_number) + '</span>' : '') + (overrides ? ' <span class="mini dep">+' + overrides + ' split</span>' : '') + '</td>' +
+    '<td><div class="who-cell">' + av(s.on_site_poc) + '<span>' + esc(firstName(s.on_site_poc)) + '</span></div></td>' +
+    '<td><div class="prog"><div class="bar"><div class="fill" style="width:' + x.r.pct + '%"></div></div><div class="num">' + x.r.pct + '%</div></div></td>' +
+    '</tr>';
+}
+/* MARKETS — the season table's body. No markets: the flat rows, byte for
+   byte what shipped before. Markets: each market's header row (name · the
+   worst show's RAG · show count · progress — the door to its hub), its shows
+   under it in date order, then every market-less show after the grouped
+   ones behind a quiet divider. Groups arrive in the order the season meets
+   them (marketsOf: earliest show first). */
+function seasonShowRows(perShow, groups) {
+  if (!groups || !groups.length) return perShow.map(function (x) { return seasonShowRow(x); }).join('');
+  var out = '';
+  groups.forEach(function (g) {
+    var mine = perShow.filter(function (x) { return marketKey(x.s.market) === g.key; });
+    out += marketHeaderRow(g) + mine.map(function (x) { return seasonShowRow(x, true); }).join('');
+  });
+  var loose = perShow.filter(function (x) { return !marketKey(x.s.market); });
+  if (loose.length) {
+    out += '<tr class="mkt-row loose"><td colspan="8"><div class="mkt-h"><span class="mini">Not in a ' +
+      esc(marketNoun(1, true)) + ' · ' + loose.length + '</span></div></td></tr>' +
+      loose.map(function (x) { return seasonShowRow(x); }).join('');
+  }
+  return out;
+}
+function marketHeaderRow(g) {
+  var mr = marketRollup(g.shows);
+  var n = g.shows.length;
+  return '<tr class="rowlink mkt-row" ' + act('openMarket', g.shows[0].id) + ' title="' +
+    esc('Open the ' + g.name + ' ' + marketNoun(1, true) + ' — its shows, meetings, tasks, files and job in one place') + '">' +
+    '<td colspan="8"><div class="mkt-h">' + icon('pin') + '<b>' + esc(g.name) + '</b>' +
+    '<span class="mini">' + esc(MARKET_LABEL) + ' · ' + n + ' show' + (n === 1 ? '' : 's') + '</span>' +
+    ragPill(mr.rag) +
+    '<span class="mini">' + mr.pct + '% done</span>' +
+    '<span class="mkt-go">Open ' + esc(marketNoun(1, true)) + ' →</span></div></td></tr>';
+}
+/* one job on a jobs panel; `shows` scopes the "N shows" count (the whole
+   folder on the season dashboard, the market's shows on its hub) */
+function jobPanelRow(j, shows) {
+  var jf = financeForJob(j.id);
+  var defaults = shows.filter(function (s) { return s.default_job_id === j.id; }).length;
+  var extras = 0;
+  shows.forEach(function (s) { (s.bookings || []).forEach(function (b) { if (b.job_id === j.id && s.default_job_id !== j.id) extras++; }); });
+  return '<div class="next-item" ' + act('openJob', j.id) + ' style="cursor:pointer"><div class="txt">' + esc(j.client) + '<span>' + esc(j.description) + '</span></div>' +
+    '<span class="tag">' + esc(j.qb_job_number) + '</span>' + tempBadge(j) + dealTag(j) +
+    '<span class="mono" style="font-size:12px;color:var(--text-2)">' + esc(fmtMoney(j.contract_value)) + '</span>' +
+    burnBar(jf ? jf.actual : 0, jf ? jf.budget_total : 0) +
+    '<span class="mini">' + (defaults ? defaults + ' show' + (defaults === 1 ? '' : 's') : extras + ' item' + (extras === 1 ? '' : 's')) + '</span></div>';
+}
+
+/* ============================================================================
+   SHAREABLE PANELS — built for the market hub, shaped for any page that holds
+   a SET OF SHOWS (a market today; the season page is expected to adopt them).
+   Each takes the shows it is about plus an options bag and returns one panel;
+   none reads a page global, none knows it is on the hub.
+     showsTableCard(perShow, o)   the season table's card over any show set
+     openTasksList(shows)         the open steps across shows, soonest first
+     openTasksPanel(shows, o)     …as a compact panel (owner · due · status)
+     showJobsPanel(shows, o)      the distinct DEFAULT jobs the shows bill to
+     meetingsListPanel(rows, o)   meetings through the shared meetingRow()
+     showFilesPanel(shows, byId)  documents grouped by show, through fileCard()
+   ========================================================================== */
+var TASKS_PANEL_MAX = 25;
+function showsTableCard(perShow, o) {
+  o = o || {};
+  var n = perShow.length;
+  return '<div class="card"><div class="card-h"><h3>' + esc(o.title || 'Shows') + '</h3>' +
+    '<span class="pill idle">' + n + ' show' + (n === 1 ? '' : 's') + ' · sorted by date</span></div>' +
+    SEASON_SHOW_THEAD + '<tbody>' +
+    perShow.map(function (x) { return seasonShowRow(x); }).join('') +
+    '</tbody></table></div></div>';
+}
+function openTasksList(shows) {
+  var out = [];
+  (shows || []).forEach(function (s) {
+    allSteps(s).forEach(function (p) {
+      var st = normStatus(p.step.status);
+      if (st !== 'done' && st !== 'na') out.push({ step: p.step, lane: p.lane, show: s });
+    });
+  });
+  return out.sort(function (a, b) {
+    return String(a.step.due_date || '9999').localeCompare(String(b.step.due_date || '9999'));
+  });
+}
+/* o.max caps the rows (the rest are one click away on each show); o.empty is
+   the sentence for none. A row opens the show the task lives on. */
+function openTasksPanel(shows, o) {
+  o = o || {};
+  var max = o.max || TASKS_PANEL_MAX;
+  var list = openTasksList(shows);
+  var rows = list.slice(0, max).map(function (t) {
+    var s = t.step;
+    return '<div class="next-item" ' + act('openShow', t.show.id) + ' style="cursor:pointer"><div class="txt">' + esc(s.title) +
+      '<span>' + esc(t.show.name) + ' · ' + esc((t.lane && t.lane.label) || s.lane || '') + ' · due ' + esc(fmtDate(s.due_date)) + '</span></div>' +
+      (s.risk ? '<span class="pill warn"><span class="dot"></span>At risk</span>' : statusPill(s.status)) +
+      ownerChip(s.owner) + '</div>';
+  }).join('');
+  return '<div class="panel"><h3>Open tasks · ' + list.length + '</h3><div class="next-list">' +
+    (rows || '<div class="empty">' + esc(o.empty || 'Nothing open on these shows.') + '</div>') + '</div>' +
+    (list.length > max ? '<div class="perm-note">Showing the ' + max + ' soonest — open a show for the rest.</div>' : '') +
+    '</div>';
+}
+/* NO MAPPING TABLE: the job a set of shows DEFAULTS to is its commercial
+   face. One common job → one row; shows that disagree → each job, listed as
+   it stands, never a "primary" the data does not say. Rows are the season's
+   own jobPanelRow(), so each opens the job page (#/jobs/:id). */
+function showJobsPanel(shows, o) {
+  o = o || {};
+  var noun = o.noun || 'folder';
+  var ids = [], noJob = 0;
+  (shows || []).forEach(function (s) {
+    if (!s.default_job_id) { noJob++; return; }
+    if (ids.indexOf(s.default_job_id) < 0) ids.push(s.default_job_id);
+  });
+  var rows = ids.map(function (id) {
+    var j = JOBS_BY_ID[id];
+    return j ? jobPanelRow(j, shows)
+      : '<div class="next-item"><div class="txt">Job #' + Number(id) + '<span>not loaded — open the season to read it</span></div></div>';
+  }).join('');
+  return '<div class="panel shows-jobs"><h3>' + (ids.length > 1 ? 'Jobs · ' + ids.length : 'Job') + '</h3>' +
+    '<div class="next-list">' + (rows || '<div class="empty">No show in this ' + esc(noun) + ' bills to a job yet.</div>') + '</div>' +
+    (ids.length > 1
+      ? '<div class="perm-note">' + inlineIcon('scale') + ' These shows bill to <b>different jobs</b> — each one is listed as it stands, with how many of this ' + esc(noun) + '’s shows default to it.</div>'
+      : '') +
+    (noJob ? '<div class="perm-note">' + noJob + ' show' + (noJob === 1 ? ' has' : 's have') + ' no default job.</div>' : '') +
+    '</div>';
+}
+/* o = { canEdit, from (the rows' origin k), addProjectId, empty, note } —
+   `empty` and `note` are HTML the CALLER has already escaped */
+function meetingsListPanel(rows, o) {
+  o = o || {};
+  return '<div class="panel"><h3 style="display:flex;align-items:center;gap:9px">Meetings · ' + rows.length +
+    (o.canEdit && o.addProjectId
+      ? '<button class="btn sm ghost" style="margin-left:auto" ' + act('addMeeting', o.addProjectId, o.from) + '>' + icon('plus') + 'Add meeting</button>'
+      : '') +
+    '</h3><div class="mtg-list">' +
+    (rows.length ? rows.map(function (m) { return meetingRow(m, o.canEdit, o.from); }).join('')
+      : '<div class="empty">' + (o.empty || 'No meetings yet.') + '</div>') +
+    '</div>' + (o.note ? '<div class="perm-note">' + inlineIcon('bolt') + ' ' + o.note + '</div>' : '') + '</div>';
+}
+/* documents only, grouped by show. `fullById` maps show id → the show as a
+   files-carrying read returned it (listShows); a show missing from it falls
+   back to itself, and a show with no .files reads as none — never a throw. */
+function showFilesPanel(shows, fullById) {
+  fullById = fullById || {};
+  var blocks = (shows || []).map(function (s0) {
+    var s = fullById[s0.id] || s0;
+    var docs = (s.files || []).filter(function (f) { return f.kind !== 'photo'; });
+    return '<div class="mkt-files"><div class="files-head"><h3>' + esc(s0.name) + ' · ' + docs.length + '</h3>' +
+      '<button class="btn sm ghost" ' + act('openShow', s0.id) + '>Open show</button></div>' +
+      (docs.length ? '<div class="file-grid">' + docs.map(fileCard).join('') + '</div>'
+        : '<div class="empty">No documents on this show yet.</div>') + '</div>';
+  }).join('');
+  return '<div class="card" style="padding:14px"><div class="card-h" style="padding:0 0 10px"><h3>Files</h3></div>' + blocks + '</div>';
+}
+
+/* ============================================================================
+   THE MARKET HUB — the umbrella (Tom, 2026-09-30)
+   ----------------------------------------------------------------------------
+   "Grand Rapids lives in the MLV project folder. but has a system install and
+   scrimmage show - which arent as connected under a grand rapids umbrella as
+   i would like." This is the umbrella: for folder P + market M, one page with
+   the market's shows, its meetings (anchored to it AND pinned to its shows),
+   the open tasks across its shows, their files, and the JOB(S) they bill to.
+
+   The page is a FRAME over the shareable panels above plus the season's own
+   rows (seasonShowRow, jobPanelRow) and the shared meetingRow / fileCard —
+   the only markup of its own is the header and the stat strip.
+
+   STUB-SAFE: every collection is `|| []`-guarded and the folder is always the
+   project passed in — no inline show.project read.
+
+   `market` arrives as the group marketOf() found (canonical name + shows);
+   `full` is the folder's shows as listShows() returns them (files attached),
+   read by id — the season dashboard's embedded shows carry no files.
+   ========================================================================== */
+function viewMarket(project, market, full) {
+  var byId = {};
+  (full || []).forEach(function (s) { if (s) byId[s.id] = s; });
+  var shows = (market.shows || []).slice();
+  var perShow = shows.map(function (s) { return { s: s, r: rollup(s), next: showNext(s) }; });
+  var mr = marketRollup(shows);
+  var canEdit = canEditFolder(project);
+  var from = 'mkt:' + shows[0].id;
+  var noun = marketNoun(1, true);
+  var upcoming = shows.filter(function (s) { return s.event_date >= TODAY_ISO; });
+  var open = openTasksList(shows);
+  var lateN = open.filter(function (t) { return isOverdue(t.step); }).length;
+
+  var head = '<div class="ef-head"><div class="ef-top"><div>' +
+    '<div class="ef-title"><h1>' + esc(market.name) + '</h1>' +
+    '<span class="tag">' + esc(MARKET_LABEL) + '</span>' + ragPill(mr.rag) + '</div>' +
+    '<div class="ef-sub">' +
+    '<span>' + icon('folder') + ' <button class="lnk-btn" ' + act('openFolder', project.id) + '>' + esc(project.name) + '</button></span>' +
+    '<span>' + icon('users') + ' <b>' + esc(project.client || '') + '</b></span>' +
+    '<span>' + icon('pin') + ' <b>' + shows.length + ' show' + (shows.length === 1 ? '' : 's') + '</b></span>' +
+    '<span>Upcoming <b>' + upcoming.length + ' of ' + shows.length + '</b></span>' +
+    '</div></div>' +
+    '<div style="display:flex;gap:9px;flex-wrap:wrap">' +
+    (canEdit
+      ? '<button class="btn primary" ' + act('addMeeting', project.id, from) + '>' + icon('plus') + 'Add meeting</button>' +
+        '<button class="btn ghost" ' + act('addShow', project.id, from) + '>' + icon('plus') + 'Add show</button>'
+      : '') +
+    '<button class="btn ghost" ' + act('openFolder', project.id) + '>' + icon('folder') + 'Season dashboard</button>' +
+    '</div></div></div>';
+
+  var stats = '<div class="stats">' +
+    '<div class="stat accent"><div class="rail-c" style="background:var(--accent)"></div><div class="k">Shows</div><div class="v">' + shows.length + '<small>/' + upcoming.length + ' ahead</small></div></div>' +
+    '<div class="stat"><div class="rail-c" style="background:var(--info)"></div><div class="k">Open tasks</div><div class="v">' + open.length + '</div></div>' +
+    '<div class="stat"><div class="rail-c" style="background:var(--crit)"></div><div class="k">Overdue</div><div class="v" style="color:' + (lateN ? 'var(--crit)' : 'var(--text-2)') + '">' + lateN + '</div></div>' +
+    '<div class="stat"><div class="rail-c" style="background:var(--go)"></div><div class="k">Progress</div><div class="v">' + mr.pct + '<small>%</small></div></div>' +
+    '</div>';
+
+  var mtgPanel = meetingsListPanel(meetingsForMarket(project.id, market.name), {
+    canEdit: canEdit, from: from, addProjectId: project.id,
+    empty: 'No meetings on ' + esc(market.name) + ' yet. A call about the whole ' + esc(noun) +
+      ' goes here — it shows on every ' + esc(market.name) + ' show’s Meetings tab.',
+    note: 'Calls filed on the <b>' + esc(noun) + '</b> appear on every one of its shows; calls pinned to ' +
+      'one show appear here too, wearing that show’s name. Meeting summaries are <b>internal</b>.'
+  });
+
+  return head + stats +
+    '<div class="ov" style="grid-template-columns:1.5fr 1fr">' +
+    '<div style="display:flex;flex-direction:column;gap:16px">' +
+      showsTableCard(perShow, { title: 'Shows in this ' + noun }) + mtgPanel + showFilesPanel(shows, byId) + '</div>' +
+    '<div style="display:flex;flex-direction:column;gap:16px">' +
+      showJobsPanel(shows, { noun: noun }) + openTasksPanel(shows, { empty: 'Nothing open on these shows.' }) + '</div></div>';
 }
 
 /* ============================================================================

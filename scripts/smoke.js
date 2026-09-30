@@ -7368,6 +7368,145 @@ const DEL = (p, o) => call('DELETE', p, o);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
+  section('MK. markets — the umbrella between the season and its shows (Tom, 2026-09-30)');
+  // ══════════════════════════════════════════════════════════════════════════
+  // "Grand Rapids lives in the MLV project folder. but has a system install
+  // and scrimmage show - which arent as connected under a grand rapids
+  // umbrella as i would like." shows.market groups a folder's shows; a meeting
+  // with meetings.market set (show_id null) belongs to EVERY show of that
+  // folder + market. THE LOAD-BEARING GATES, each named on its assertion:
+  //   1. the migration is ADDITIVE (nullable, no default, old rows NULL)
+  //   2. the write door cleans + caps (lib/enums marketOrNull)
+  //   3. the show-tab listing (?show_id) carries the market's anchored calls
+  //      — on BOTH of Grand Rapids' shows and on NEITHER of Austin's
+  //   4. the hub listing (?market) carries anchored + its shows' pinned calls,
+  //      and nothing pinned to another market's show
+  //   5. a meeting has ONE anchor, and a market must be a real one of the folder
+  {
+    // ── 1. additive ─────────────────────────────────────────────────────────
+    const mkCols = await pool.query(
+      `SELECT table_name, is_nullable, column_default FROM information_schema.columns
+        WHERE column_name='market' AND table_name IN ('shows','meetings') ORDER BY table_name`);
+    ok('MK MIGRATION: shows.market and meetings.market exist, NULLABLE, with no default — additive, ' +
+       'nothing rewritten',
+       mkCols.rows.length === 2 && mkCols.rows.every((r) => r.is_nullable === 'YES' && r.column_default === null),
+       mkCols.rows);
+    const mkOld = await GET(`/api/shows/${S}`, { token: PMT });
+    ok('MK ...and a show that predates markets reads market:null — one spelling for "none"',
+       mkOld.status === 200 && mkOld.body.market === null, mkOld.body.market);
+
+    // ── the fixture: two markets + a loose show, in one folder ─────────────
+    const mkF = await POST('/api/projects', { name: TAG + ' MLV markets', client: 'MLV', type: 'led',
+      owner: pmUser }, { token: A });
+    const MKP = mkF.body.id;
+    const grIn = await POST('/api/shows', { project_id: MKP, name: TAG + ' GR system install',
+      venue: 'Van Andel', event_date: '2026-11-01', market: '   Grand    Rapids  ' }, { token: PMT });
+    ok('MK ADD SHOW: market set at create — TRIMMED and inner whitespace collapsed server-side',
+       grIn.status === 200 && grIn.body.market === 'Grand Rapids', grIn.body.market);
+    const grScrim = await POST('/api/shows', { project_id: MKP, name: TAG + ' GR scrimmage',
+      venue: 'Van Andel', event_date: '2026-11-08', market: 'grand rapids' }, { token: PMT });
+    const austin = await POST('/api/shows', { project_id: MKP, name: TAG + ' Austin match',
+      venue: 'Gregory Gym', event_date: '2026-11-03', market: 'Austin' }, { token: PMT });
+    const loose = await POST('/api/shows', { project_id: MKP, name: TAG + ' loose show',
+      venue: 'x', event_date: '2026-11-05' }, { token: PMT });
+    ok('MK ...a show added with no market stays market:null', loose.body.market === null, loose.body.market);
+    const GR1 = grIn.body.id, GR2 = grScrim.body.id, AUS = austin.body.id;
+
+    // ── 2. the cap, on both doors ──────────────────────────────────────────
+    const long = 'X'.repeat(81);
+    const mkLongAdd = await POST('/api/shows', { project_id: MKP, name: TAG + ' too long', market: long }, { token: PMT });
+    ok('MK CAP: an 81-character market is REFUSED at create, naming the cap — never silently truncated',
+       mkLongAdd.status === 400 && /80 characters or fewer/.test(mkLongAdd.body.error || ''), mkLongAdd.body);
+    const mkLongPut = await PUT(`/api/shows/${loose.body.id}`, { market: long }, { token: PMT });
+    ok('MK CAP: ...and at edit', mkLongPut.status === 400 && /80 characters or fewer/.test(mkLongPut.body.error || ''),
+       mkLongPut.body);
+    const mk80 = await PUT(`/api/shows/${loose.body.id}`, { market: 'Y'.repeat(80) }, { token: PMT });
+    ok('MK CAP: ...while exactly 80 is accepted', mk80.status === 200 && mk80.body.market.length === 80, mk80.body.market);
+
+    // ── the edit door ──────────────────────────────────────────────────────
+    const mkEdit = await PUT(`/api/shows/${loose.body.id}`, { market: '  Salt Lake ' }, { token: PMT });
+    ok('MK EDIT SHOW: market set via PUT, trimmed', mkEdit.status === 200 && mkEdit.body.market === 'Salt Lake',
+       mkEdit.body.market);
+    const mkKeep = await PUT(`/api/shows/${loose.body.id}`, { venue: 'y' }, { token: PMT });
+    ok('MK ...a PUT that does not name market LEAVES it', mkKeep.body.market === 'Salt Lake', mkKeep.body.market);
+    const mkAct = await pool.query(
+      `SELECT * FROM activity WHERE show_id=$1 AND action='show.update' ORDER BY id DESC LIMIT 1 OFFSET 1`,
+      [loose.body.id]);
+    const mkActCh = (mkAct.rows[0] || {}).changes || [];
+    ok('MK ...the market move is LOGGED in the activity diff (who re-filed it) but is not accent — filing, ' +
+       'not operations',
+       mkActCh.some((c) => c.field === 'market' && c.to === 'Salt Lake') && mkAct.rows[0].accent === false,
+       mkAct.rows[0]);
+    const mkClear = await PUT(`/api/shows/${loose.body.id}`, { market: '   ' }, { token: PMT });
+    ok('MK ...and a blank market CLEARS it to null', mkClear.status === 200 && mkClear.body.market === null,
+       mkClear.body.market);
+
+    // ── 5. meetings: a real market, one anchor ─────────────────────────────
+    const mtMk = await POST(`/api/projects/${MKP}/meetings`, { title: TAG + ' GR Season Beginning',
+      held_at: '2026-09-30', market: 'GRAND   rapids' }, { token: PMT });
+    ok('MK MEETING: anchored to a market — stored in the SHOWS\' spelling, show_id null',
+       mtMk.status === 200 && mtMk.body.market === 'Grand Rapids' && mtMk.body.show_id === null, mtMk.body);
+    const mtNo = await POST(`/api/projects/${MKP}/meetings`, { title: 'x', market: 'Nowhere' }, { token: PMT });
+    ok('MK MEETING: a market no show in the folder is filed under is REFUSED',
+       mtNo.status === 400 && /no show in this folder is in the market "Nowhere"/.test(mtNo.body.error || ''), mtNo.body);
+    const mtOtherFolder = await POST(`/api/projects/${P}/meetings`, { title: 'x', market: 'Grand Rapids' }, { token: PMT });
+    ok('MK MEETING: ...including ANOTHER folder\'s market — a market is folder + name, never name alone',
+       mtOtherFolder.status === 400 && /no show in this folder/.test(mtOtherFolder.body.error || ''), mtOtherFolder.body);
+    const mtBoth = await POST(`/api/projects/${MKP}/meetings`, { title: 'x', market: 'Austin', show_id: AUS }, { token: PMT });
+    ok('MK MEETING: a show AND a market at once is refused — one anchor',
+       mtBoth.status === 400 && /ONE show or ONE market/.test(mtBoth.body.error || ''), mtBoth.body);
+    const mtPinGR1 = await POST(`/api/projects/${MKP}/meetings`, { title: TAG + ' GR install advance', show_id: GR1 }, { token: PMT });
+    const mtPinAus = await POST(`/api/projects/${MKP}/meetings`, { title: TAG + ' Austin advance', show_id: AUS }, { token: PMT });
+    const mtAusMk = await POST(`/api/projects/${MKP}/meetings`, { title: TAG + ' Austin kickoff', market: 'austin' }, { token: PMT });
+    const mtSeason = await POST(`/api/projects/${MKP}/meetings`, { title: TAG + ' season-wide' }, { token: PMT });
+    ok('MK the discriminating fixture is on file (GR market call, GR1 pin, Austin pin, Austin market call, season call)',
+       [mtPinGR1, mtPinAus, mtAusMk, mtSeason].every((r) => r.status === 200));
+    const mtRepin = await PUT(`/api/meetings/${mtMk.body.id}`, { show_id: GR2 }, { token: PMT });
+    ok('MK MEETING PUT: pinning a market call to a show WITHOUT clearing the market is refused — the patched ' +
+       'row must still hold one anchor',
+       mtRepin.status === 400 && /ONE show or ONE market/.test(mtRepin.body.error || ''), mtRepin.body);
+
+    // ── 3. the show-tab listing ────────────────────────────────────────────
+    const ids = (r) => (r.body || []).map((m) => m.id).sort((a, b) => a - b);
+    const tabGR1 = await GET(`/api/projects/${MKP}/meetings?show_id=${GR1}`, { token: TECHT });
+    const tabGR2 = await GET(`/api/projects/${MKP}/meetings?show_id=${GR2}`, { token: TECHT });
+    const tabAUS = await GET(`/api/projects/${MKP}/meetings?show_id=${AUS}`, { token: TECHT });
+    ok('MK SHOW TAB (server): the Grand Rapids market call is on the INSTALL\'s tab, beside its own pin',
+       JSON.stringify(ids(tabGR1)) === JSON.stringify([mtMk.body.id, mtPinGR1.body.id].sort((a, b) => a - b)),
+       ids(tabGR1));
+    ok('MK SHOW TAB (server): ...AND on the SCRIMMAGE\'s tab — one call, both shows, no double-pinning ' +
+       '(drop the market clause from meetingsForProject and this goes red)',
+       JSON.stringify(ids(tabGR2)) === JSON.stringify([mtMk.body.id]), ids(tabGR2));
+    ok('MK SHOW TAB (server): ...and NOT on Austin\'s — Austin gets its own pin and its own market call only',
+       JSON.stringify(ids(tabAUS)) === JSON.stringify([mtPinAus.body.id, mtAusMk.body.id].sort((a, b) => a - b)),
+       ids(tabAUS));
+    const tabX = await GET(`/api/projects/${MKP}/meetings?show_id=${S}`, { token: TECHT });
+    ok('MK SHOW TAB (server): a show from another folder is refused, never answered with an empty list',
+       tabX.status === 400 && /another folder/.test(tabX.body.error || ''), tabX.body);
+
+    // ── 4. the hub listing ─────────────────────────────────────────────────
+    const hubGR = await GET(`/api/projects/${MKP}/meetings?market=${encodeURIComponent('grand rapids')}`, { token: TECHT });
+    ok('MK HUB (server): Grand Rapids = its market call + the install\'s pin — case-insensitive — and NOTHING ' +
+       'of Austin\'s, nothing season-wide',
+       JSON.stringify(ids(hubGR)) === JSON.stringify([mtMk.body.id, mtPinGR1.body.id].sort((a, b) => a - b)),
+       ids(hubGR));
+    const all = await GET(`/api/projects/${MKP}/meetings`, { token: TECHT });
+    ok('MK ...and the un-narrowed roll-up is still the WHOLE folder, market calls included',
+       all.body.length === 5 && all.body.some((m) => m.id === mtMk.body.id && m.market === 'Grand Rapids'),
+       all.body.length);
+
+    // the market call re-homed properly: clear the market in the same patch
+    const mtMove = await PUT(`/api/meetings/${mtAusMk.body.id}`, { show_id: AUS, market: null }, { token: PMT });
+    ok('MK MEETING PUT: show_id + market:null together re-anchors it to one show',
+       mtMove.status === 200 && mtMove.body.show_id === AUS && mtMove.body.market === null, mtMove.body);
+
+    // the folder goes, meetings with it — section 6's sweep proves the rest
+    await DEL(`/api/projects/${MKP}`, { token: A });
+    const mkLeft = await pool.query('SELECT COUNT(*)::int n FROM meetings WHERE project_id=$1', [MKP]);
+    ok('MK the folder delete takes its market calls too — no orphans', mkLeft.rows[0].n === 0, mkLeft.rows[0]);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   section('CE. calendar entries — company life on the calendar (wave 3, 2026-09-25)');
   // ══════════════════════════════════════════════════════════════════════════
   // "someone's birthday? out of office notes, etc?" + "put post it notes on a

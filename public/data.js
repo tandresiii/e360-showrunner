@@ -3545,12 +3545,71 @@ function demoCrewNames() {
    from when there is one, and a file delete NULLS it: losing the recording
    does not un-decide what was decided.
    ========================================================================== */
+/* ============================================================================
+   MARKETS — the middle level (Tom, 2026-09-30)
+   ----------------------------------------------------------------------------
+   "Grand Rapids lives in the MLV project folder. but has a system install and
+   scrimmage show - which arent as connected under a grand rapids umbrella as
+   i would like." League season (the folder) → MARKET (a city/team) → events.
+   `show.market` is a GROUPING, not a re-parenting: nullable text, trimmed,
+   whitespace collapsed, ≤ MARKET_MAX, compared case-insensitively — the exact
+   rules lib/enums.js normMarket/marketKey apply server-side.
+
+   VOCABULARY: Tom has not blessed the word. Every label the UI prints comes
+   from MARKET_LABEL / marketNoun(), so renaming it is this one line.
+   ========================================================================== */
+var MARKET_LABEL = 'Market';
+var MARKET_MAX = 80;
+function marketNoun(n, lower) {
+  var w = n === 1 || n == null ? MARKET_LABEL : MARKET_LABEL + 's';
+  return lower ? w.toLowerCase() : w;
+}
+function normMarket(v) {
+  if (v === null || v === undefined) return null;
+  var s = String(v).replace(/\s+/g, ' ').trim();
+  return s ? s : null;
+}
+function marketKey(v) { var s = normMarket(v); return s ? s.toLowerCase() : ''; }
+/* a folder's markets, in the order the season meets them (earliest show
+   first), each with its shows date-sorted. STUB-SAFE: a thin project (no
+   .shows) has no markets rather than a TypeError. The canonical spelling is
+   the first show's — the same rule routes/meetings.js stores. */
+function marketsOf(project) {
+  var shows = ((project && project.shows) || []).slice().sort(function (a, b) {
+    return String(a.event_date || '').localeCompare(String(b.event_date || '')) || (a.id - b.id);
+  });
+  var out = [], byKey = {};
+  shows.forEach(function (s) {
+    var k = marketKey(s.market);
+    if (!k) return;
+    if (!byKey[k]) { byKey[k] = { name: normMarket(s.market), key: k, shows: [] }; out.push(byKey[k]); }
+    byKey[k].shows.push(s);
+  });
+  return out;
+}
+function marketOf(project, market) {
+  var k = marketKey(market);
+  var all = marketsOf(project);
+  for (var i = 0; i < all.length; i++) if (all[i].key === k) return all[i];
+  return null;
+}
+/* the show a market's controls anchor on. data-act carries NUMERIC ids only
+   (components.js act()), so a market is addressed by one of its shows — the
+   handler reads folder + market back off that show. Null when nothing in the
+   folder is filed under it (a meeting that outlived its last show). */
+function marketAnchorShow(projectId, market) {
+  var p = PROJECTS_BY_ID[Number(projectId)];
+  var g = p ? marketOf(p, market) : null;
+  return g && g.shows.length ? g.shows[0] : null;
+}
+
 var _mtgSeq = 0;
 var MEETINGS_BY_ID = {}, ALL_MEETINGS = [];
 
 function mkMeeting(project, o) {
   o = o || {};
   var m = { id: ++_mtgSeq, project_id: project.id, show_id: o.show_id || null,
+            market: normMarket(o.market),
             title: o.title, held_at: o.held_at || null, held_time: o.held_time || '',
             attendees: o.attendees || '', summary_md: o.summary_md || '',
             transcript_file_id: o.transcript_file_id || null,
@@ -3620,18 +3679,44 @@ function meetingCount(projectId) {
    what the show's Meetings tab lists — ONLY the calls pinned to this show, and
    never a sibling's, which is the one thing that makes the tab worth having on
    a season with ten team-specific calls on it. Same ordering as the roll-up. */
+/* MARKETS (Tom, 2026-09-30) — and a show's tab ALSO carries the calls
+   anchored to its MARKET: a meeting with market set and show_id null belongs
+   to every show of that folder filed under that market (Grand Rapids' install
+   AND its scrimmage), and to no other show. The server's GET
+   /projects/:id/meetings?show_id= answers the same question in SQL — the walk
+   asks both and holds them to the same ids. */
+function meetingOnShow(m, show) {
+  if (!m || !show) return false;
+  if (m.show_id) return m.show_id === Number(show.id);
+  var mk = marketKey(show.market);
+  return !!mk && m.project_id === Number(show.project_id) && marketKey(m.market) === mk;
+}
+function _mtgNewestFirst(a, b) {
+  var ad = a.held_at || '', bd = b.held_at || '';
+  if (ad !== bd) { if (!ad) return 1; if (!bd) return -1; return ad < bd ? 1 : -1; }
+  return b.id - a.id;
+}
 function meetingsForShow(showId) {
-  return ALL_MEETINGS.filter(function (m) { return m.show_id === Number(showId); })
-    .sort(function (a, b) {
-      var ad = a.held_at || '', bd = b.held_at || '';
-      if (ad !== bd) { if (!ad) return 1; if (!bd) return -1; return ad < bd ? 1 : -1; }
-      return b.id - a.id;
-    });
+  var show = SHOWS_BY_ID[Number(showId)] || { id: Number(showId) };
+  return ALL_MEETINGS.filter(function (m) { return meetingOnShow(m, show); })
+    .sort(_mtgNewestFirst);
 }
 function meetingCountForShow(showId) {
-  var n = 0;
-  ALL_MEETINGS.forEach(function (m) { if (m.show_id === Number(showId)) n++; });
-  return n;
+  return meetingsForShow(showId).length;
+}
+/* the market HUB's list: the calls anchored to the market, AND every call
+   pinned to one of its shows — "its meetings, and the shows' own pinned
+   meetings too". Folder + market, never market alone: two folders can each
+   have a Grand Rapids. */
+function meetingsForMarket(projectId, market) {
+  var pid = Number(projectId), mk = marketKey(market);
+  if (!mk) return [];
+  return ALL_MEETINGS.filter(function (m) {
+    if (m.project_id !== pid) return false;
+    if (!m.show_id) return marketKey(m.market) === mk;
+    var s = SHOWS_BY_ID[m.show_id];
+    return !!s && marketKey(s.market) === mk;
+  }).sort(_mtgNewestFirst);
 }
 
 (function seedMeetings() {

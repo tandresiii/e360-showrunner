@@ -149,6 +149,34 @@ async function renderView(view, arg) {
     crumb([{ t: 'Projects', act: act('goProjects') }, { t: project.name }]);
     navOn('projects');
 
+  } else if (view === 'market') {
+    /* MARKETS (Tom, 2026-09-30) — the umbrella page for folder `arg` +
+       market CUR.market. The folder (jobs + shows + steps), the folder's
+       shows WITH their files (listShows), and its meetings are all warmed
+       first; the view is synchronous like every other. A market no show is
+       filed under any more is a 404 the router's fallback answers honestly. */
+    var mp = await api.getProject(arg);
+    await api.listMeetings(mp.id);
+    var mg = marketOf(mp, CUR.market);
+    if (!mg) {
+      var mErr = new Error('No show in ' + mp.name + ' is filed under the ' + marketNoun(1, true) +
+        ' “' + String(CUR.market || '') + '” any more');
+      mErr.status = 404;
+      throw mErr;
+    }
+    /* each market show's documents, by SHOW — GET /files?project_id= answers
+       folder-level rows only (a show's files carry project_id NULL), so a
+       per-folder listShows() would hand the hub empty file lists */
+    var mFull = await Promise.all(mg.shows.map(function (ms) {
+      return api.listFiles(ms.id).then(function (fl) { return { id: ms.id, files: fl || [] }; },
+                                       function () { return { id: ms.id, files: [] }; });
+    }));
+    CUR.projectId = mp.id; CUR.market = mg.name;
+    s.innerHTML = viewMarket(mp, mg, mFull);
+    crumb([{ t: 'Projects', act: act('goProjects') }, { t: mp.name, act: act('openFolder', mp.id) },
+           { t: mg.name + ' · ' + MARKET_LABEL }]);
+    navOn('projects');
+
   } else if (view === 'show') {
     var show = await api.getShow(arg);
     await api.listNotes('show', show.id);
@@ -339,6 +367,29 @@ async function openFolder(projectId) {
   return render('folder', f.project.id);
 }
 async function openShow(showId) { return render('show', showId); }
+/* MARKETS — a market is addressed by one of its SHOWS (act() carries numeric
+   ids only); the folder and the market's name are read back off that show. */
+async function openMarketOf(showId) {
+  var s = SHOWS_BY_ID[Number(showId)];
+  if (!s) { try { s = await api.getShow(showId); } catch (_) { s = null; } }
+  if (!s || !normMarket(s.market)) {
+    toast('No ' + marketNoun(1, true) + ' to open', 'That show is not filed under a ' + marketNoun(1, true) + ' any more', 'err');
+    return;
+  }
+  CUR.market = normMarket(s.market);
+  return render('market', s.project_id);
+}
+/* the "Market" field on Add show / Edit event: a free-text input over a
+   datalist of the folder's existing markets — pick one or type a new one;
+   blank stays blank. Capped like the server (MARKET_MAX). */
+function marketFieldHTML(id, project, value) {
+  var opts = marketsOf(project).map(function (g) { return '<option value="' + esc(g.name) + '">'; }).join('');
+  return finLabelWrap(esc(MARKET_LABEL),
+    '<input id="' + esc(id) + '" class="cell-in" maxlength="' + MARKET_MAX + '" list="' + esc(id) + 'List" ' +
+    'placeholder="e.g. Grand Rapids" value="' + esc(value || '') + '">' +
+    '<datalist id="' + esc(id) + 'List">' + opts + '</datalist>',
+    'Groups the shows of one city or team inside this folder — pick one, type a new one, or leave it blank.');
+}
 
 /* re-render just the active tab of the show currently on screen */
 async function refreshShowTab(showId, forceTab) {
@@ -3152,7 +3203,7 @@ async function viewAs(userId) {
   updateBellBadge();
   await updateMineCount();
   var arg = CUR.view === 'show' ? CUR.showId : CUR.view === 'job' ? CUR.jobId
-    : CUR.view === 'folder' ? CUR.projectId : CUR.view === 'po' ? CUR.poId : undefined;
+    : CUR.view === 'folder' || CUR.view === 'market' ? CUR.projectId : CUR.view === 'po' ? CUR.poId : undefined;
   return render(CUR.view, arg);
 }
 
@@ -5467,6 +5518,15 @@ async function csPickBackAct() {
 async function openEditShow(showId) {
   var show = await api.getShow(showId);
   PENDING_SHOWEDIT = { showId: Number(showId) };
+  /* MARKETS — offered where a folder can have them: more than one show, or a
+     show that already carries one (so it can be cleared). A one-off never
+     sees the concept. The folder is read, never taken off show.project. */
+  var esFolder = null;
+  try { esFolder = await api.getProject(show.project_id); } catch (_) { esFolder = PROJECTS_BY_ID[show.project_id] || null; }
+  var esMarket = (esFolder && (esFolder.shows || []).length > 1) || show.market
+    ? '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+      marketFieldHTML('esMarket', esFolder, show.market) + '</div>'
+    : '';
   var canPickOwner = CURRENT_USER.role === 'admin' || CURRENT_USER.role === 'manager';
   var ownerOpts = (canPickOwner ? activeUsers() : [CURRENT_USER])
     .filter(function (u) { return u.role !== 'viewer'; })
@@ -5497,6 +5557,7 @@ async function openEditShow(showId) {
     finLabelWrap('On-site lead', '<select id="esPoc" class="cell-in">' + pocOpts + '</select>') +
     finLabelWrap('Cabinets', '<input id="esCabs" class="cell-in" type="number" min="0" value="' +
       esc(show.cabinets == null ? '' : show.cabinets) + '">') + '</div>' +
+    esMarket +
     notifyRow() +
     _foot(act('esCommit'), 'Save changes'));
 }
@@ -5507,12 +5568,15 @@ async function esCommit() {
   if (!name) { toast('An event needs a name', 'Type what we call it, or cancel'); return; }
   stageNotifies();
   var saved;
+  var esPatch = {
+    name: name, venue: _v('esVenue'), city: _v('esCity'),
+    load_in_date: _v('esLoadIn'), event_date: _v('esEvent'), strike_date: _v('esStrike'),
+    owner: _v('esOwner'), on_site_poc: _v('esPoc'), cabinets: _n('esCabs') || 0
+  };
+  /* only when the dialog offered it — an absent field must not clear it */
+  if (document.getElementById('esMarket')) esPatch.market = _v('esMarket') || null;
   try {
-    saved = await api.updateShow(showId, {
-      name: name, venue: _v('esVenue'), city: _v('esCity'),
-      load_in_date: _v('esLoadIn'), event_date: _v('esEvent'), strike_date: _v('esStrike'),
-      owner: _v('esOwner'), on_site_poc: _v('esPoc'), cabinets: _n('esCabs') || 0
-    });
+    saved = await api.updateShow(showId, esPatch);
   } catch (e) { toast('Not saved', String(e && e.message || e), 'err'); return; }
   PENDING_SHOWEDIT = null;
   closeM();
@@ -6021,7 +6085,14 @@ function meetingById(id) { return MEETINGS_BY_ID[Number(id)] || null; }
    that tab instead of dumping the person on the season dashboard they were
    deliberately not looking at. It rides the delegated action's `k` slot, the
    same way editBooking and roomEdit carry their show. */
-function meetingFrom(k) { return k == null || k === '' ? null : Number(k); }
+function meetingFrom(k) {
+  if (k == null || k === '') return null;
+  /* MARKETS — from a market hub the origin is 'mkt:<show id>' and stays a
+     string, so every dialog it opens comes back to the hub */
+  return isMarketFrom(k) ? String(k) : Number(k);
+}
+/* the hub an origin names, or null */
+function meetingFromMarketShow(from) { return isMarketFrom(from) ? Number(String(from).slice(4)) : null; }
 
 /* the reader. Opening a row is a READ, available to anybody signed in — the
    edit affordances appear inside it only for somebody who could also have
@@ -6083,6 +6154,21 @@ async function openMeeting(projectId, meetingId, fromShowId) {
     var ak = a.kind === 'transcript' ? 0 : 1, bk = b.kind === 'transcript' ? 0 : 1;
     return ak - bk || String(b.created_at || '').localeCompare(String(a.created_at || ''));
   });
+  /* MARKETS — a folder with markets offers each one as an anchor, between
+     the whole season and the single shows: a call about Grand Rapids lands on
+     BOTH its shows' tabs. Preselected when editing a market call, or when the
+     dialog was opened from that market's hub. */
+  var fromMk = meetingFromMarketShow(from);
+  var preMarket = m ? (!m.show_id && m.market ? marketKey(m.market) : '')
+    : (fromMk && SHOWS_BY_ID[fromMk] ? marketKey(SHOWS_BY_ID[fromMk].market) : '');
+  var mkGroups = marketsOf(project);
+  if (mkGroups.length) {
+    showOpts = showOpts.replace('— the whole season —</option>', '— the whole season —</option>' +
+      mkGroups.map(function (g) {
+        return '<option value="' + esc('mkt:' + g.name) + '"' + (preMarket === g.key ? ' selected' : '') + '>' +
+          esc(MARKET_LABEL + ': ' + g.name + ' — every ' + g.name + ' show') + '</option>';
+      }).join(''));
+  }
   var fileOpts = '<option value="">— not linked to a document —</option>' +
     docs.slice(0, 200).map(function (f) {
       return '<option value="' + Number(f.id) + '"' + (m && m.transcript_file_id === f.id ? ' selected' : '') + '>' +
@@ -6133,7 +6219,12 @@ async function mtgCommit() {
   var body = { title: title, held_at: _v('mtDate') || null, held_time: _v('mtTime') || '',
                attendees: _v('mtWho'), summary_md: _v('mtSummary') };
   var shEl = document.getElementById('mtShow');
-  if (shEl) body.show_id = shEl.value ? Number(shEl.value) : null;
+  if (shEl) {
+    /* one anchor: a show, a MARKET ('mkt:<name>'), or the whole season */
+    var anc = String(shEl.value || '');
+    if (anc.indexOf('mkt:') === 0) { body.show_id = null; body.market = anc.slice(4); }
+    else { body.show_id = anc ? Number(anc) : null; body.market = null; }
+  }
   var fEl = document.getElementById('mtFile');
   if (fEl) body.transcript_file_id = fEl.value ? Number(fEl.value) : null;
 
@@ -6147,6 +6238,7 @@ async function mtgCommit() {
   toast(wasEdit ? 'Meeting saved' : 'Meeting filed',
     saved.title + (saved.held_at ? ' · ' + fmtDate(saved.held_at) : '') +
     (saved.summary_md ? '' : ' — no summary yet'));
+  if (meetingFromMarketShow(from)) return openMarketOf(meetingFromMarketShow(from));
   /* back to the surface it was opened from. Repinning a call to another show
      while standing on this one makes it LEAVE this tab, which is the correct
      and visible consequence of the change that was just saved — badge
@@ -6169,6 +6261,7 @@ async function meetingDeleteAct(id, fromShowId) {
   PENDING_MEETING = null;
   closeM();
   toast('Meeting deleted', ((m && m.title) || 'The record') + ' — logged to activity');
+  if (meetingFromMarketShow(from)) return openMarketOf(meetingFromMarketShow(from));
   if (!from) return render('folder', projectId);
   var freshD = await refreshShowTab(from, 'meetings');
   refreshMeetingsTabBadge(freshD);
@@ -7674,10 +7767,14 @@ async function deleteProjectAct(projectId) {
    Event show fieldset; the type template seeds the pipeline inside the create
    transaction (template_id rides the POST), so no second call and no window
    where a bare show exists. */
-async function openAddShow(projectId) {
+async function openAddShow(projectId, fromK) {
   var p = await api.getProject(projectId);
   if (!p) return;
   PENDING_NEWSHOW = { projectId: Number(projectId), type: p.type };
+  /* opened from a market hub ('mkt:<show id>'), the new show starts in that
+     market — still editable, the person may be adding the folder's next one */
+  var nsMk = isMarketFrom(fromK) && SHOWS_BY_ID[Number(String(fromK).slice(4))]
+    ? SHOWS_BY_ID[Number(String(fromK).slice(4))].market : '';
   var t = typeDef(p.type);
   var tpls = await api.listTemplates().catch(function () { return []; });
   var pocOpts = '<option value="">— nobody yet —</option>' + activeUsers().map(function (u) {
@@ -7698,6 +7795,8 @@ async function openAddShow(projectId) {
     finLabelWrap(t.anchor, '<input id="nsEvent" class="cell-in" type="date">') +
     finLabelWrap('Strike', '<input id="nsStrike" class="cell-in" type="date">') +
     '</div>' +
+    '<div class="fin-inputs" style="grid-template-columns:1fr">' +
+    marketFieldHTML('nsMarket', p, nsMk) + '</div>' +
     /* the same picker New Event carries: WHICH of this type's templates seeds
        this show. The checkbox it replaces could only say yes-or-no to whichever
        template happened to be oldest. */
@@ -7723,7 +7822,7 @@ async function nsCommit() {
     show = await api.createShow(p.projectId, {
       name: name, venue: _v('nsVenue'), city: _v('nsCity'),
       load_in_date: _v('nsLoadIn'), event_date: _v('nsEvent'), strike_date: _v('nsStrike'),
-      on_site_poc: _v('nsPoc'),
+      on_site_poc: _v('nsPoc'), market: _v('nsMarket') || null,
       template_id: templateId, seed_template: seed
     });
   } catch (e) { toast('Not added', String(e && e.message || e), 'err'); return; }
@@ -8416,6 +8515,7 @@ var ACTIONS = {
   logout:        function () { return logoutAct(); },
   netRetry:      function () { return netRetry(); },
   openFolder:    function (t, id) { return openFolder(id); },
+  openMarket:    function (t, id) { return openMarketOf(id); },
   openShow:      function (t, id) { return openShow(id); },
   openViewer:    function (t, id) { return openViewer(id); },
   vSet:          function (t, id) { return vSet(id); },
@@ -8754,7 +8854,7 @@ var ACTIONS = {
   deleteShow:    function (t, id) { return deleteShowAct(id); },
   deleteFolder:  function (t, id) { return deleteProjectAct(id); },
   /* a season's second show + a frozen pipeline's seed */
-  addShow:       function (t, id) { return openAddShow(id); },
+  addShow:       function (t, id, k) { return openAddShow(id, k); },
   nsCommit:      function () { return nsCommit(); },
   seedPipeline:  function (t, id) { return seedPipelineAct(id); },
   seedTplPick:   function (t, id, k) { return seedPipelineWith(id, Number(k)); },
@@ -8874,14 +8974,15 @@ function routerStart() {
 
 /* the id the CURRENT screen renders — the same state netRetry reads */
 function routeArgFor(view) {
-  return view === 'show' ? CUR.showId : view === 'folder' ? CUR.projectId
+  return view === 'show' ? CUR.showId : view === 'folder' || view === 'market' ? CUR.projectId
     : view === 'job' ? CUR.jobId : view === 'po' ? CUR.poId
     : view === 'viewer' ? (VIEWER && VIEWER.fileId) : null;
 }
 function routeDidRender(view) {
   if (!ROUTER) return;
   ROUTER.sync(view, routeArgFor(view),
-    view === 'show' && typeof activeShowTab === 'function' ? activeShowTab() : null);
+    view === 'show' && typeof activeShowTab === 'function' ? activeShowTab()
+      : view === 'market' ? CUR.market : null);
 }
 /* views-folder.js calls this on every tab click — the tab rides the hash but
    REPLACES the entry (router.js: Back leaves the screen, not the tab trail) */
@@ -8915,6 +9016,9 @@ async function routeGo(route, rawHash) {
       if (route.tab && route.tab !== 'overview' && typeof setFolderTab === 'function') setFolderTab(route.tab);
     } else if (route.view === 'viewer') {
       await openViewer(route.arg);           /* a dead id renders nothing */
+    } else if (route.view === 'market') {
+      CUR.market = route.tab;                /* the name rides the hash */
+      await render('market', route.arg);
     } else {
       await render(route.view, route.arg);
     }
@@ -9183,7 +9287,7 @@ async function netRetry() {
   var el = document.getElementById('netBanner');
   if (el) el.remove();
   var arg = CUR.view === 'show' ? CUR.showId : CUR.view === 'job' ? CUR.jobId
-    : CUR.view === 'folder' ? CUR.projectId : CUR.view === 'po' ? CUR.poId : undefined;
+    : CUR.view === 'folder' || CUR.view === 'market' ? CUR.projectId : CUR.view === 'po' ? CUR.poId : undefined;
   return render(CUR.view, arg);
 }
 
@@ -9239,7 +9343,7 @@ async function boot() {
   }
   SR.on('unauthorized', function () {
     var arg = CUR.view === 'show' ? CUR.showId : CUR.view === 'job' ? CUR.jobId
-      : CUR.view === 'folder' ? CUR.projectId : CUR.view === 'po' ? CUR.poId : undefined;
+      : CUR.view === 'folder' || CUR.view === 'market' ? CUR.projectId : CUR.view === 'po' ? CUR.poId : undefined;
     var view = CUR.view;
     openLogin('Your session expired. Sign in to pick up where you left off.',
               function () { return render(view, arg); });
