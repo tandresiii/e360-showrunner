@@ -4744,7 +4744,7 @@ var api = (function () {
         var patch = { source: 'spec' };
         if (d.cabinet_count != null) patch.cabinet_count = d.cabinet_count;
         if (d.cabinet_type) patch.cabinet_type = d.cabinet_type;
-        if (!s.scope_kind) patch.kind = s.type === 'print' ? 'print' : 'led';
+        if (!s.scope_kind) patch.kind = typeDef(s.type).tag === 'print' ? 'print' : 'led';
         _applyScopeLocal(s, patch);
         s.activity.unshift(mkAct(ME, 'filled the scope from the bound spec',
           scopeLine(s) + ' · ' + d.count_source + (d.stack_aware ? ' (stack-aware)' : ''), 0, _nowHM(), true));

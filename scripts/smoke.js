@@ -608,8 +608,26 @@ const DEL = (p, o) => call('DELETE', p, o);
   ok('...and never leaks a password hash', !JSON.stringify(roster.body).includes('password'));
   const types = await GET('/api/event-types', { token: A });
   ok('GET /api/event-types exposes the lane sets (punch C)',
-     types.status === 200 && types.body.types.length === 3 && types.body.lanes.length === 14,
+     types.status === 200 && types.body.types.length === 4 && types.body.lanes.length === 14,
      (types.body.types || []).length);
+  // 9/30 — Print Pass-Thru: seeded additively, four existing lanes, print family
+  const ppt = (types.body.types || []).find((t) => t.key === 'print_passthru');
+  ok('9/30 · GET /api/event-types carries Print Pass-Thru (client · design · deliverables · logistics, print tag)',
+     !!ppt && ppt.label === 'Print Pass-Thru' && ppt.tag === 'print' && ppt.anchor === 'Delivery day'
+     && JSON.stringify(ppt.lanes) === JSON.stringify(['client', 'design', 'deliverables', 'logistics'])
+     && (ppt.lane_defs || []).length === 4, ppt);
+  const pptEv = await POST('/api/events', { name: TAG + ' Pass-Thru', type: 'print_passthru',
+    event_date: '2026-12-03', scope: { kind: 'print', print_pieces: 40 } }, { token: A });
+  ok('9/30 · POST /api/events keeps type print_passthru (PROJECT_TYPES would have turned it into led)',
+     pptEv.status === 200 && pptEv.body.project.type === 'print_passthru', pptEv.body);
+  const pptShow = pptEv.status === 200 ? await GET(`/api/shows/${pptEv.body.show.id}`, { token: A }) : { body: {} };
+  ok('…and its show carries exactly the four pass-thru lanes',
+     JSON.stringify(pptShow.body.lanes) === JSON.stringify(['client', 'design', 'deliverables', 'logistics']),
+     pptShow.body.lanes);
+  const pptStep = pptEv.status === 200 ? await POST('/api/steps', { show_id: pptEv.body.show.id, lane: 'venue',
+    title: TAG + ' not a pass-thru lane' }, { token: A }) : { status: 0 };
+  ok('…a step in a lane it does not declare (venue) is refused', pptStep.status === 400, pptStep.body);
+  if (pptEv.status === 200) await DEL(`/api/projects/${pptEv.body.project.id}`, { token: A });
 
   // purchasing (25-28)
   const po = await POST('/api/pos', { vendor: 'ROE Visual', project_id: P, job_id: J,

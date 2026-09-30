@@ -33,7 +33,7 @@ const {
   PROJECT_TYPES, STAGES, RAGS, STEP_STATUSES, EVIDENCE_TYPES, AUTO_SOURCES,
   SCOPE_KINDS, LIFECYCLE_STAGES, ROLE_RANK, DEAL_TYPES,
   oneOf, addDays, slug, isISODate, intOrNull, num, money, sameUser,
-  canonicalStage, stageLabel, isConfirmed, scopeLine, scopeOf, todayISO, printable
+  canonicalStage, stageLabel, isConfirmed, scopeLine, scopeOf, todayISO, printable, typeFamily
 } = require('../lib/enums');
 // F2/F3/F5/F6 — the four post-deploy engines. Each one owns its decision; this
 // module only routes to them.
@@ -808,7 +808,7 @@ router.post('/shows/:id/scope/from-spec', requireRole('pm'), asyncH(async (req, 
     if (derived.cabinet_count != null) patch.cabinet_count = derived.cabinet_count;
     if (derived.cabinet_type) patch.cabinet_type = derived.cabinet_type;
     // A show with no scope kind yet takes the one its spec implies.
-    if (!show.scope_kind) patch.kind = (project && project.type === 'print') ? 'print' : 'led';
+    if (!show.scope_kind) patch.kind = (project && typeFamily(project.type) === 'print') ? 'print' : 'led';
     const updated = await applyScope(c, show, { scope: patch }, req.actor);
     await logActivity(c, {
       projectId: show.project_id, showId: show.id, actor: req.actor, action: 'scope.from_spec',

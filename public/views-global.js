@@ -645,7 +645,11 @@ function calFilterPanel(all) {
     act('calJustMine') + '><i class="mine-dot"></i>Just mine <span class="sc">' + mineN + '</span></button></div></div>' +
     '<div class="cal-fg"><h5>What</h5><div>' + CAL_KINDS.map(function (k) { return chip('kind', k[0], k[1], kc[k[0]] || 0, calKindColor(k[0])); }).join('') + '</div></div>' +
     '<div class="cal-fg"><h5>Company life</h5><div>' + CAL_LIFE_KINDS.map(function (k) { return chip('kind', k[0], k[1], kc[k[0]] || 0, calKindColor(k[0])); }).join('') + '</div></div>' +
-    (types.length > 1 ? '<div class="cal-fg"><h5>Type</h5><div>' + types.map(function (t) { return chip('type', t, typeLabel(t), tc[t]); }).join('') + '</div></div>' : '') +
+    /* 9/30 (Tom: "we want to be able to filter by event type") - ALWAYS drawn
+       when anything is on the calendar, one chip per catalog type that has
+       entries, a lone chip included: an all-LED month used to make the group
+       vanish, which read as the feature not existing. */
+    (types.length ? '<div class="cal-fg"><h5>Type</h5><div>' + types.map(function (t) { return chip('type', t, typeLabel(t), tc[t]); }).join('') + '</div></div>' : '') +
     (folders.length ? '<div class="cal-fg"><h5>Folder / client</h5><div>' + folderCtl + '</div></div>' : '') +
     '</div>';
 }

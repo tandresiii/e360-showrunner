@@ -1835,8 +1835,11 @@ async function openNew() {
 function newEventForm(type) {
   NEW_EVENT.type = type;
   var t = typeDef(type);
-  var isLed = type === 'led' || type === 'both';
-  var isPrint = type === 'print' || type === 'both';
+  /* by FAMILY (the type's tag), so a print-family type like print_passthru
+     asks the print numbers — never `type === 'print'` */
+  var fam = t.tag;
+  var isLed = fam === 'led' || fam === 'both';
+  var isPrint = fam === 'print' || fam === 'both';
   /* a pm always owns what they create; manager+ may hand it to someone else —
      the same rule the server enforces in POST /api/events */
   var canPickOwner = CURRENT_USER.role === 'admin' || CURRENT_USER.role === 'manager';
@@ -1908,7 +1911,7 @@ async function commitNewEvent() {
   var name = v('neName');
   if (!name) { toast('An event needs a name', 'Type what we call it, or cancel'); return; }
   var num2 = function (id) { var s = v(id); return s === '' ? null : Number(s); };
-  var scope = { kind: NEW_EVENT.type,
+  var scope = { kind: typeDef(NEW_EVENT.type).tag,   /* scope kinds are the families: led | print | both */
                 linear_feet: num2('neFeet'), cabinet_count: num2('neCabs'),
                 cabinet_type: v('neCabType') || null, pitch: v('nePitch') || null,
                 print_pieces: num2('nePieces'), print_sqft: num2('neSqft') };

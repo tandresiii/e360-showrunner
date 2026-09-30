@@ -217,7 +217,12 @@ var EVENT_TYPES = {
   print: { label: 'Print',      tag: 'print', icon: 'print',  anchor: 'Install day',
            lanes: laneset('design', 'proof', 'approval', 'production', 'tracking', 'ship', 'install', 'return') },
   both:  { label: 'LED + Print', tag: 'both', icon: 'layers', anchor: 'Show day',
-           lanes: laneset('client', 'venue', 'design', 'proof', 'approval', 'logistics', 'crew', 'gear', 'deliverables', 'install') }
+           lanes: laneset('client', 'venue', 'design', 'proof', 'approval', 'logistics', 'crew', 'gear', 'deliverables', 'install') },
+  /* 9/30 (Tom): "for jobs where we are just pushing paper, proofing, and
+     sending print items" — the print family (tag 'print'), no new lanes.
+     Mirrored in lib/enums.js EVENT_TYPE_CONFIG + PROJECT_TYPES. */
+  print_passthru: { label: 'Print Pass-Thru', tag: 'print', icon: 'print', anchor: 'Delivery day',
+           lanes: laneset('client', 'design', 'deliverables', 'logistics') }
   /* <-- EXTENSION POINT: add new event types here (see "HOW TO ADD" above). */
 };
 function typeDef(t) { return EVENT_TYPES[t] || EVENT_TYPES.led; }
@@ -1540,7 +1545,8 @@ var TEMPLATE_STEPS = {
 var TEMPLATE_META = {
   led:   { desc: 'Traveling-crew perimeter LED for a stadium/arena match — kickoff call through strike. Full spec derivation chain (.e360 → .nsf → .pcfg → pull sheet).' },
   print: { desc: 'Large-format print engagement — graphic design through proof, approval, production, ship, install and return.' },
-  both:  { desc: 'Combined LED + print package — a sensible union of both lane sets for events that carry a show and a printed element.' }
+  both:  { desc: 'Combined LED + print package — a sensible union of both lane sets for events that carry a show and a printed element.' },
+  print_passthru: { desc: 'Print pass-thru — pushing paper: the client brief, design and proofing, then sending the print items out. No install, no crew.' }
 };
 
 /* ============================================================================
@@ -4372,14 +4378,14 @@ var RECAP_LANE_WINS = {
    ========================================================================== */
 function buildRecapDraft(show) {
   var f = recapFacts(show);
-  var isPrint = f.type === 'print';
+  var isPrint = typeDef(f.type).tag === 'print';   /* print_passthru is print work too */
   var where = f.venue + ((f.city && f.venue.indexOf(f.city) < 0) ? ', ' + f.city : '');
   var pkg = isPrint ? 'large-format print package'
     : (f.cabinets ? f.cabinets + '-cabinet ' : '') + (f.type === 'both' ? 'LED and print package' : 'LED package');
 
   /* ---- narrative: 2-3 paragraphs woven from the facts above -------------- */
   var narrative = [];
-  var p1 = 'E360 Sport ' + (isPrint ? 'produced and installed the ' : 'delivered the ') + pkg +
+  var p1 = 'E360 Sport ' + (isPrint ? (f.type === 'print_passthru' ? 'produced and delivered the ' : 'produced and installed the ') : 'delivered the ') + pkg +
     ' for ' + f.showName + ' at ' + where + '. ' +
     (f.daysOnSite > 1
       ? 'The crew was on site ' + f.daysOnSite + ' days — load-in ' + _rcDateLong(f.loadInDate) +

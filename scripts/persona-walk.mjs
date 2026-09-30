@@ -1807,9 +1807,58 @@ async function main() {
     const ddBulk = demoTab.viewCalendar(many, {});
     ok('…“None” over the match hides Bravo’s show and nothing else',
        ddBulk.indexOf('data-id="900201"') < 0 && ddBulk.indexOf('data-id="900200"') >= 0 && /7 of 8 folders/.test(ddBulk));
+    {
+      /* 9/30 prod bug: every row drew checkbox + count and NO folder name.
+         The HTML was right (the gates above passed); the CSS was not —
+         `.cal-fdd-pop input{width:100%}` also matched each row's checkbox,
+         which took the whole flex row and left .fl 0px wide (reproduced in
+         real Chrome, live mode: checkbox 300.7px, .fl 0px). The walk has no
+         layout engine, so the gate reads the cascade itself: no width rule on
+         an input under the dropdown may be broad enough to reach the row
+         checkbox, and the checkbox is pinned flex:none / width:auto. */
+      const css = fs.readFileSync(path.join(PUB, 'app.css'), 'utf8').replace(/\/\*[^]*?\*\//g, '');
+      const leaks = [];
+      for (const m of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+        const decl = m[2];
+        if (!/(^|;)\s*(width|min-width|flex(-grow)?)\s*:/.test(decl) || /(^|;)\s*width\s*:\s*auto/.test(decl)) continue;
+        for (const sel of m[1].split(',').map((x) => x.trim())) {
+          if (!/cal-fdd/.test(sel)) continue;
+          const last = sel.split(/\s+|>/).filter(Boolean).pop();
+          // a compound that is a bare `input` (or input[type=checkbox]) reaches the row's checkbox
+          if (/^input(\[type="?checkbox"?\])?$/.test(last) || /^\*$/.test(last)) leaks.push(sel + '{' + decl.trim() + '}');
+        }
+      }
+      ok('W2 (e) · CSS · no width rule under the folder dropdown can reach a row CHECKBOX (the 9/30 blank-names bug)',
+         leaks.length === 0, leaks);
+      ok('…the row checkbox is pinned flex:none + width:auto, and the name span is the one that grows',
+         /\.cal-fdd-row input\[type="checkbox"\]\{[^}]*flex:none[^}]*width:auto/.test(css)
+         && /\.cal-fdd-row \.fl\{[^}]*flex:1/.test(css));
+    }
     const few = draw(() => { demoTab.CAL_UI.filtersOpen = true; });
     ok('…and at 6 or fewer folders the chips stay chips',
        !/class="cal-fdd/.test(few.html) && /data-act="calFilter" data-k="folder:777801"/.test(few.html));
+
+    // 9/30 · the TYPE group is always there (Tom: "we want to be able to filter by event type")
+    {
+      const allLed = [wA, { id: 900150, project_id: PW, name: 'WALK w2 led2', type: 'led', event_date: '2031-05-21' }];
+      const one = draw(() => { demoTab.CAL_UI.filtersOpen = true; }, allLed, {});
+      const typeChips = [...one.html.matchAll(/data-act="calFilter" data-k="type:([a-z_]+)"[^>]*>([^<]*)<span class="sc">(\d+)</g)];
+      ok('9/30 · DEMO RENDER · an ALL-LED calendar still draws the Type group — one LED chip, honest count',
+         one.threw === null && /<h5>Type<\/h5>/.test(one.html) && typeChips.length === 1
+         && typeChips[0][1] === 'led' && typeChips[0][3] === '2', one.threw || typeChips.map((m) => m.slice(1)));
+      const pp = { id: 900151, project_id: PW2, name: 'WALK w2 passthru', type: 'print_passthru', event_date: '2031-05-22' };
+      const mixed = draw(() => { demoTab.CAL_UI.filtersOpen = true; }, [wA, pp], {});
+      ok('9/30 · DEMO RENDER · a Print Pass-Thru show with a date: its chip lands (print tint) and the Type group offers it by name',
+         mixed.threw === null && chip2('openShow', 900151, 'Delivery day', 't-print').test(at(mixed.html, '2031-05-22'))
+         && /data-k="type:print_passthru"[^>]*>Print Pass-Thru <span class="sc">1</.test(mixed.html), mixed.threw);
+      demoTab.calToggle('type:print_passthru');
+      ok('…and switching that chip off hides exactly the pass-thru show',
+         demoTab.viewCalendar([wA, pp], {}).indexOf('data-id="900151"') < 0
+         && demoTab.viewCalendar([wA, pp], {}).indexOf('data-id="900101"') >= 0);
+      demoTab.calFilterReset();
+      const noItems = draw(() => { demoTab.CAL_UI.filtersOpen = true; }, [], {});
+      ok('…with nothing on the calendar at all there is no empty Type group', !/<h5>Type<\/h5>/.test(noItems.html));
+    }
 
     // (f) Reset
     const messy = draw(() => {
@@ -2170,6 +2219,55 @@ async function main() {
        lThrew3 || (loaded3 && loaded3.ctx.errors));
     demoTab.CURRENT_USER = cuUser3; demoTab.ME = me3;
     Object.assign(demoTab.CAL_UI, JSON.parse(cu3));
+  }
+  {
+    /* 9/30 · PRINT PASS-THRU — Tom: "for jobs where we are just pushing
+       paper, proofing, and sending print items". The type catalogue lives
+       twice (public/data.js EVENT_TYPES for the demo + every renderer,
+       lib/enums.js EVENT_TYPE_CONFIG seeded into event_types) and they must
+       MIRROR; PROJECT_TYPES must name every configured key or oneOf() turns a
+       new type into 'led' at create. */
+    const en = require(path.join(APP, 'lib', 'enums.js'));
+    const cfg = en.EVENT_TYPE_CONFIG;
+    const ET = demoTab.EVENT_TYPES;
+    const drift = [];
+    cfg.forEach((t) => {
+      const d = ET[t.key];
+      if (!d) { drift.push(t.key + ' missing in data.js'); return; }
+      ['label', 'tag', 'icon', 'anchor'].forEach((k) => { if (d[k] !== t[k]) drift.push(`${t.key}.${k}: ${d[k]} ≠ ${t[k]}`); });
+      const dl = (d.lanes || []).map((l) => l && l.key).join();
+      if (dl !== t.lanes.join()) drift.push(`${t.key}.lanes: ${dl} ≠ ${t.lanes.join()}`);
+    });
+    Object.keys(ET).forEach((k) => { if (!cfg.some((t) => t.key === k)) drift.push(k + ' missing in lib/enums.js'); });
+    ok('9/30 · the type catalogue MIRRORS: data.js EVENT_TYPES ≡ lib/enums EVENT_TYPE_CONFIG (keys, label, tag, icon, anchor, lanes)',
+       drift.length === 0, drift);
+    ok('…PROJECT_TYPES names every configured type (else create silently coerces to led)',
+       cfg.every((t) => en.PROJECT_TYPES.includes(t.key)), en.PROJECT_TYPES);
+    const pp = cfg.find((t) => t.key === 'print_passthru');
+    ok('9/30 · Print Pass-Thru is configured as specified: print family, Delivery day, client · design · deliverables · logistics',
+       !!pp && pp.label === 'Print Pass-Thru' && pp.tag === 'print' && pp.icon === 'print' && pp.anchor === 'Delivery day'
+       && pp.lanes.join() === 'client,design,deliverables,logistics'
+       && pp.lanes.every((k) => en.LANE_CATALOG.some((l) => l.key === k)), pp);
+    ok('…and it is a PRINT-family type everywhere that branches on family',
+       en.typeFamily('print_passthru') === 'print' && en.typeFamily('both') === 'both'
+       && require(path.join(APP, 'lib', 'scheduler.js')).mapEventType('print_passthru') === 'Print');
+    ok('9/30 · New Event OFFERS it — the type cards iterate the catalogue, and the pass-thru card is in it',
+       /'<div class="tpl-cards" style="margin:0">' \+ Object\.keys\(EVENT_TYPES\)\.map/.test(APP_JS) && !!ET.print_passthru
+       && /\n\s{2}newEventType:\s*function \(t, id, k\) \{ newEventForm\(EVENT_TYPES\[k\] \? k : 'led'\)/.test(APP_JS));
+    ok('…the New Event form asks by FAMILY (print numbers for a pass-thru) and sends the family as the scope kind',
+       /var fam = t\.tag;\s*\r?\n\s*var isLed = fam === 'led' \|\| fam === 'both';\s*\r?\n\s*var isPrint = fam === 'print' \|\| fam === 'both';/.test(APP_JS)
+       && /var scope = \{ kind: typeDef\(NEW_EVENT\.type\)\.tag,/.test(APP_JS) && en.SCOPE_KINDS.includes(ET.print_passthru.tag));
+    // executed: a demo event of the new type, and its pipeline's lanes
+    let ppEv = null, ppHtml = '', ppThrew = null;
+    try {
+      ppEv = await demoTab.api.createEvent({ name: 'WALK pass-thru', type: 'print_passthru', event_date: plus(40) });
+      const ppShow = await demoTab.api.getShow(ppEv.show.id);
+      ppHtml = demoTab.tabPipeline(ppShow);
+    } catch (e) { ppThrew = String(e && e.stack || e); }
+    const laneHeads = [...ppHtml.matchAll(/<div class="lane-h">[^]*?<b>([^<]+)<\/b>/g)].map((m) => m[1]);
+    ok('9/30 · DEMO RENDER · a Print Pass-Thru event keeps its type and its pipeline draws exactly its four lanes',
+       ppThrew === null && ppEv.show.type === 'print_passthru'
+       && laneHeads.join('|') === 'Client|Graphic Design|Deliverables|Logistics', ppThrew || laneHeads);
   }
   reach('Calendar wave 2 (Just mine · folder dropdown · day-add doors · open from the day list)',
     { seam: ['myCrewShows', 'myOpenSteps', 'myReports', 'listMeetings', 'addMilestone', 'createStep'],

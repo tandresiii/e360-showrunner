@@ -975,7 +975,7 @@ function fileIcon(f) {
 }
 function fileTypeLabel(f, show) {
   var c = fileClass(f);
-  return c === 'e360' ? 'Content spec (' + (show.type === 'print' ? 'print' : '.e360') + ')'
+  return c === 'e360' ? 'Content spec (' + (typeDef(show.type).tag === 'print' ? 'print' : '.e360') + ')'
     : c === 'nsf' ? 'Data cabling (.nsf)'
     : c === 'pcfg' ? 'Power config (.pcfg)'
     : c === 'pullsheet' ? 'Flex pull sheet'
@@ -1433,7 +1433,7 @@ function sheetHTML(show, f, gear) {
      card says what the row is. Same answer for a gear sheet with no gear. */
   if ((show && show.folder && (c === 'e360' || c === 'nsf' || c === 'pcfg')) ||
       ((c === 'pullsheet' || c === 'manifest') && !(gear && gear.kit))) return docSheet(show, f);
-  if (c === 'e360') return show.type === 'print' ? printSpecSheet(show, f) : ledSpecSheet(show, f);
+  if (c === 'e360') return typeDef(show.type).tag === 'print' ? printSpecSheet(show, f) : ledSpecSheet(show, f);
   if (c === 'nsf') return nsfSpecSheet(show, f);
   if (c === 'pcfg') return pcfgSpecSheet(show, f);
   if (c === 'pullsheet') return pullSheetSheet(show, f, gear);
