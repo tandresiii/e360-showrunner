@@ -206,3 +206,41 @@ A **template picker now sits at every human seed door**: New Event (after the ty
 ## Official PO document generation (Tom, 2026-09-21) — PARKED pending accounting: "I'm guessing there's another official means to generate a PO" — QuickBooks likely owns the letterhead artifact; Showrunner stays the ops record bridged by qb_job_number. If Candice says QB doesn't cover it, the offer stands: a printable PO sheet in the house print-dialog pattern (header, lines, terms, the approval line).
 
 ## Notes composer needs two clicks? (Tom, 2026-09-21) — OPEN, undiagnosed: "seems like i have to click post, then click it again to write a note." Code shows no two-click mechanism (empty box → honest toast); either the rows=1 composer doesn't read as "type here" (design nit → make it visibly a text area) or a focus/mention-popup handler eats the first click (real bug). Discriminator question posed to Tom — toast or silence on the first click? — unanswered.
+
+## 2026-09-30 — the calendar week's ledger
+
+> **SHIPPED this span (all Tom-driven, most same-day):** the Calendar arc — real
+> month/week/range/list views, filters that scale, personal layer ("user can
+> show their tasks on their calendars"), company life (notes / multi-day OOO /
+> yearly birthdays; post-its aimed at people with instant pings; OOO heads-ups;
+> "Company life" in the morning digest) · Done button on My Tasks (with the
+> assignee-completes-own-task server allowance) · season-level tasks made
+> visible in My Tasks + calendar · folder-level files viewable · **PO documents
+> list** ("what if i want a po, a quote, an invoice, a contract, like any number
+> of things?") · spec library ("every spec sheet at our fingertips") · Print
+> Pass-Thru event type · direct pings default to immediate ("some of this shit
+> should be instant") · "Outdated" button renamed to say what it does · bound
+> specs wear one version number everywhere.
+
+**⭐ OPEN — THE BIG ONE (Tom, at close): "everything is kind of there… but
+somehow discombobulated… stuff is all scattered around and seemingly hard to
+find."** The week is the evidence: every bug he reported was a findability
+failure. Next arc = a flow/IA audit BEFORE more features — per-persona walk,
+map every noun's home and click-distance, then fix the architecture, not the
+symptoms. Candidates: global search/command palette, "everything about X in
+one place" passes, nav consolidation.
+
+**OPEN, smaller:**
+- The batch-digest email is an envelope without a letter ("what the hell is
+  this email?") — it announces updates without listing them. Agreed fix:
+  compose member lines into the body at flush, daily-digest style. Unbuilt.
+- Job-number confirm door exists only on Finance — the person standing in the
+  folder with Candice's number can't act there. Offer made to add the same
+  gated button to the folder job card.
+- Bookings still carry a ONE-document slot (status_file_id) — the same disease
+  the PO just got cured of; should ride the po_documents container pattern.
+- Print Pass-Thru has no starter template — awaiting Tom's proofing SOP steps.
+- PO attach modal pre-fills the amount for plain Documents (harmless, slightly
+  misleading).
+- Viewer-role users can currently post team-wide calendar notes — needs Tom's
+  nod or a rank floor.
