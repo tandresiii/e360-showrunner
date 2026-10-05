@@ -244,3 +244,25 @@ one place" passes, nav consolidation.
   misleading).
 - Viewer-role users can currently post team-wide calendar notes — needs Tom's
   nod or a rank floor.
+
+## 2026-10-05 — venue-call week + the PowerSpec rebuild
+
+> **SHIPPED (e360-tools)**: PowerSpec rebuilt around field reality in five
+> Tom-spec'd rounds — physical cab numbering with row blocks in stacked zones,
+> socapex circuits 1A-1F, a manual circuit-range editor as the PRIMARY
+> interface ("give me the option to set this. theres no logic that always gets
+> it right"), auto demoted to a zone-aware suggestion, and the rating cap made
+> unraisable (it was silently overloading P10 runs 8-on-4). Also: the meeting
+> pipeline carried three more calls (Baxter venue, LA Orbit season, MINI F1
+> thread-aggregate) and the market layer absorbed LA.
+
+**OPEN:**
+- **Agent-meetings endpoint (POST /api/agent/meetings)** — designed for Tony's
+  (and Jim's) agents to file meeting digests directly; both agent paths
+  currently end at a manual paste into Add meeting. Awaits Tom's go.
+- **Tom owes PowerSpec ratings**: cabinets-per-circuit for P6 and P1.98 V/H —
+  those panel types refuse honestly until supplied.
+- **Regenerate pre-10/5 power docs for stacked systems** (they undercounted) —
+  ops task, Wes Weir/Baxter doc included.
+- Still unruled from 9/30: project SHAPES (one-off/production/season),
+  linked-tasks go, flow-audit batch ① go, Confirm-verb vocabulary.
